@@ -1,0 +1,4 @@
+lib/clickhouse-cpp/contrib/cityhash/cityhash/city.lo: \
+ /home/ilia/ai/SeasClick/lib/clickhouse-cpp/contrib/cityhash/cityhash/city.cc \
+ config.h \
+ /home/ilia/ai/SeasClick/lib/clickhouse-cpp/contrib/cityhash/cityhash/city.h

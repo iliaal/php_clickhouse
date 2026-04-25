@@ -72,7 +72,7 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_INFO_EX(SeasClick_destruct, 0, 0, 0)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_INFO_EX(SeasClick_select, 0, 0, 3)
+ZEND_BEGIN_ARG_INFO_EX(SeasClick_select, 0, 0, 1)
 ZEND_ARG_INFO(0, sql)
 ZEND_ARG_INFO(0, params)
 ZEND_ARG_INFO(0, fetch_mode)
@@ -96,7 +96,7 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_INFO_EX(SeasClick_writeEnd, 0, 0, 0)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_INFO_EX(SeasClick_execute, 0, 0, 2)
+ZEND_BEGIN_ARG_INFO_EX(SeasClick_execute, 0, 0, 1)
 ZEND_ARG_INFO(0, sql)
 ZEND_ARG_INFO(0, params)
 ZEND_END_ARG_INFO()
@@ -273,8 +273,8 @@ PHP_METHOD(SEASCLICK_RES_NAME, __construct)
                             .SetPort(Z_LVAL_P(port))
                             .SetSendRetries(Z_LVAL_P(retry_count))
                             .SetRetryTimeout(std::chrono::seconds(Z_LVAL_P(retry_timeout)))
-                            .SetSocketReceiveTimeout(std::chrono::seconds(Z_LVAL_P(receive_timeout)))
-                            .SetSocketConnectTimeout(std::chrono::seconds(Z_LVAL_P(connect_timeout)))
+                            .SetConnectionRecvTimeout(std::chrono::seconds(Z_LVAL_P(receive_timeout)))
+                            .SetConnectionConnectTimeout(std::chrono::seconds(Z_LVAL_P(connect_timeout)))
                             .SetPingBeforeQuery(false);
     if (Z_LVAL_P(compression) == 1)
     {
@@ -568,13 +568,8 @@ PHP_METHOD(SEASCLICK_RES_NAME, insert)
         }
 
         getInsertSql(&sql, table, columns);
-        Block blockQuery;
 
-        client->InsertQuery(sql, [&blockQuery](const Block& block)
-        {
-            blockQuery = block;
-        }
-                           );
+        Block blockQuery = client->BeginInsert(sql);
 
         Block blockInsert;
         size_t index = 0;
@@ -586,8 +581,8 @@ PHP_METHOD(SEASCLICK_RES_NAME, insert)
         }
         SC_HASHTABLE_FOREACH_END();
 
-        client->InsertData(blockInsert);
-        client->InsertDataEnd();
+        client->SendInsertBlock(blockInsert);
+        client->EndInsert();
         sc_zval_ptr_dtor(&return_should);
 
     }
@@ -636,14 +631,9 @@ PHP_METHOD(SEASCLICK_RES_NAME, writeStart)
         }
 
         getInsertSql(&sql, table, columns);
-        Block blockQuery;
 
-        client->InsertQuery(sql, [&blockQuery](const Block& block)
-        {
-            blockQuery = block;
-        }
-                           );
-        
+        Block blockQuery = client->BeginInsert(sql);
+
         clientInsertBlack.insert(std::pair<int, Block>(key, blockQuery));
     }
     catch (const std::exception& e)
@@ -736,7 +726,7 @@ PHP_METHOD(SEASCLICK_RES_NAME, write)
         }
         SC_HASHTABLE_FOREACH_END();
 
-        client->InsertData(blockInsert);
+        client->SendInsertBlock(blockInsert);
         sc_zval_ptr_dtor(&return_should);
     }
     catch (const std::exception& e)
@@ -757,7 +747,7 @@ PHP_METHOD(SEASCLICK_RES_NAME, writeEnd)
         Client *client = clientMap.at(key);
         clientInsertBlack.erase(key);
 
-        client->InsertDataEnd();
+        client->EndInsert();
     }
     catch (const std::exception& e)
     {

@@ -1,0 +1,4 @@
+lib/clickhouse-cpp/contrib/zstd/zstd/common/xxhash.lo: \
+ /home/ilia/ai/SeasClick/lib/clickhouse-cpp/contrib/zstd/zstd/common/xxhash.c \
+ /home/ilia/ai/SeasClick/lib/clickhouse-cpp/contrib/zstd/zstd/common/xxhash.h \
+ /home/ilia/ai/SeasClick/lib/clickhouse-cpp/contrib/zstd/zstd/common/zstd_deps.h

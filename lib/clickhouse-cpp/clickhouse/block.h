@@ -25,13 +25,35 @@ public:
         /// Reference to column object.
         ColumnRef Column() const;
 
-        /// Move to next column.
-        void Next();
+        /// Move to next column, returns false if next call to IsValid() would return false;
+        bool Next();
 
         /// Is the iterator still valid.
         bool IsValid() const;
 
+        size_t ColumnIndex() const {
+            return idx_;
+        }
+
+        Iterator& operator*() { return *this; }
+        const Iterator& operator*() const { return *this; }
+
+        bool operator==(const Iterator & other) const {
+            return &block_ == &other.block_ && idx_ == other.idx_;
+        }
+        bool operator!=(const Iterator & other) const {
+            return !(*this == other);
+        }
+
+        Iterator& operator++() {
+            this->Next();
+            return *this;
+        }
+
     private:
+        friend class Block;
+        struct ConstructAtEndTag {};
+        Iterator(const Block& block, ConstructAtEndTag at_end);
         Iterator() = delete;
 
         const Block& block_;
@@ -51,15 +73,31 @@ public:
 
     const BlockInfo& Info() const;
 
+    /// Set block info
+    void SetInfo(BlockInfo info);
+
     /// Count of rows in the block.
     size_t GetRowCount() const;
+
+    size_t RefreshRowCount();
 
     const std::string& GetColumnName(size_t idx) const {
         return columns_.at(idx).name;
     }
 
+    /// Convenience method to wipe out all rows from all columns
+    void Clear();
+
+    /// Convenience method to do Reserve() on all columns
+    void Reserve(size_t new_cap);
+
     /// Reference to column by index in the block.
     ColumnRef operator [] (size_t idx) const;
+
+    Iterator begin() const;
+    Iterator end() const;
+    Iterator cbegin() const { return begin(); }
+    Iterator cend() const { return end(); }
 
 private:
     struct ColumnItem {

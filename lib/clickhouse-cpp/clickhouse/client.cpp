@@ -1,33 +1,50 @@
 #include "client.h"
+#include "clickhouse/version.h"
 #include "protocol.h"
 
-#include "base/coded.h"
 #include "base/compressed.h"
 #include "base/socket.h"
 #include "base/wire_format.h"
 
 #include "columns/factory.h"
 
-#include <cityhash/city.h>
-#include <lz4/lz4.h>
-
 #include <assert.h>
-#include <atomic>
 #include <system_error>
-#include <thread>
 #include <vector>
 #include <sstream>
 
-#define DBMS_NAME                                       "ClickHouse"
-#define DBMS_VERSION_MAJOR                              1
-#define DBMS_VERSION_MINOR                              1
-#define REVISION                                        54126
+#if defined(WITH_OPENSSL)
+#include "base/sslsocket.h"
+#endif
+
+#define CLIENT_NAME "clickhouse-cpp"
 
 #define DBMS_MIN_REVISION_WITH_TEMPORARY_TABLES         50264
+#define DBMS_MIN_REVISION_WITH_TOTAL_ROWS_IN_PROGRESS   51554
 #define DBMS_MIN_REVISION_WITH_BLOCK_INFO               51903
 #define DBMS_MIN_REVISION_WITH_CLIENT_INFO              54032
 #define DBMS_MIN_REVISION_WITH_SERVER_TIMEZONE          54058
 #define DBMS_MIN_REVISION_WITH_QUOTA_KEY_IN_CLIENT_INFO 54060
+//#define DBMS_MIN_REVISION_WITH_TABLES_STATUS            54226
+#define DBMS_MIN_REVISION_WITH_TIME_ZONE_PARAMETER_IN_DATETIME_DATA_TYPE 54337
+#define DBMS_MIN_REVISION_WITH_SERVER_DISPLAY_NAME      54372
+#define DBMS_MIN_REVISION_WITH_VERSION_PATCH            54401
+#define DBMS_MIN_REVISION_WITH_LOW_CARDINALITY_TYPE     54405
+#define DBMS_MIN_REVISION_WITH_COLUMN_DEFAULTS_METADATA 54410
+#define DBMS_MIN_REVISION_WITH_CLIENT_WRITE_INFO        54420
+#define DBMS_MIN_REVISION_WITH_SETTINGS_SERIALIZED_AS_STRINGS 54429
+#define DBMS_MIN_REVISION_WITH_INTERSERVER_SECRET       54441
+#define DBMS_MIN_REVISION_WITH_OPENTELEMETRY            54442
+#define DBMS_MIN_REVISION_WITH_DISTRIBUTED_DEPTH        54448
+#define DBMS_MIN_REVISION_WITH_INITIAL_QUERY_START_TIME 54449
+#define DBMS_MIN_REVISION_WITH_INCREMENTAL_PROFILE_EVENTS 54451
+#define DBMS_MIN_REVISION_WITH_PARALLEL_REPLICAS 54453
+#define DBMS_MIN_REVISION_WITH_CUSTOM_SERIALIZATION  54454 // Client can get some fields in JSon format
+#define DBMS_MIN_PROTOCOL_VERSION_WITH_ADDENDUM 54458 // send quota key after handshake
+#define DBMS_MIN_PROTOCOL_REVISION_WITH_QUOTA_KEY 54458 // the same
+#define DBMS_MIN_PROTOCOL_VERSION_WITH_PARAMETERS 54459
+
+#define DMBS_PROTOCOL_REVISION  DBMS_MIN_PROTOCOL_VERSION_WITH_PARAMETERS
 
 namespace clickhouse {
 
@@ -43,76 +60,165 @@ struct ClientInfo {
     std::string initial_address = "[::ffff:127.0.0.1]:0";
     uint64_t client_version_major = 0;
     uint64_t client_version_minor = 0;
+    uint64_t client_version_patch = 0;
     uint32_t client_revision = 0;
 };
 
-struct ServerInfo {
-    std::string name;
-    std::string timezone;
-    uint64_t    version_major;
-    uint64_t    version_minor;
-    uint64_t    revision;
-};
+std::ostream& operator<<(std::ostream& os, const Endpoint& endpoint) {
+    return os << endpoint.host << ":" << endpoint.port;
+}
 
 std::ostream& operator<<(std::ostream& os, const ClientOptions& opt) {
-    os << "Client(" << opt.user << '@' << opt.host << ":" << opt.port
+    os << "Client("
+       << " Endpoints : [";
+    size_t extra_endpoints = 0;
+
+    if (!opt.host.empty()) {
+        extra_endpoints = 1;
+        os << opt.user << '@' << Endpoint{opt.host, opt.port};
+
+        if (opt.endpoints.size())
+            os << ", ";
+    }
+
+    for (size_t i = 0; i < opt.endpoints.size(); i++) {
+        os << opt.user << '@' << opt.endpoints[i]
+           << ((i == opt.endpoints.size() - 1) ? "" : ", ");
+    }
+
+    os << "] (" << opt.endpoints.size() + extra_endpoints << " items )"
        << " ping_before_query:" << opt.ping_before_query
        << " send_retries:" << opt.send_retries
        << " retry_timeout:" << opt.retry_timeout.count()
        << " compression_method:"
-       << (opt.compression_method == CompressionMethod::LZ4 ? "LZ4" : "None")
-       << ")";
+       << (opt.compression_method == CompressionMethod::LZ4    ? "LZ4"
+           : opt.compression_method == CompressionMethod::ZSTD ? "ZSTD"
+                                                               : "None");
+#if defined(WITH_OPENSSL)
+    if (opt.ssl_options) {
+        const auto & ssl_options = *opt.ssl_options;
+        os << " SSL ("
+           << " ssl_context: " << (ssl_options.ssl_context ? "provided by user" : "created internally")
+           << " use_default_ca_locations: " << ssl_options.use_default_ca_locations
+           << " path_to_ca_files: " << ssl_options.path_to_ca_files.size() << " items"
+           << " path_to_ca_directory: " << ssl_options.path_to_ca_directory
+           << " min_protocol_version: " << ssl_options.min_protocol_version
+           << " max_protocol_version: " << ssl_options.max_protocol_version
+           << " context_options: " << ssl_options.context_options
+           << ")";
+    }
+#endif
+    os << ")";
     return os;
+}
+
+ClientOptions& ClientOptions::SetSSLOptions(ClientOptions::SSLOptions options)
+{
+#ifdef WITH_OPENSSL
+    ssl_options = options;
+    return *this;
+#else
+    (void)options;
+    throw OpenSSLError("Library was built with no SSL support");
+#endif
+}
+
+namespace {
+
+std::unique_ptr<SocketFactory> GetSocketFactory(const ClientOptions& opts) {
+    (void)opts;
+#if defined(WITH_OPENSSL)
+    if (opts.ssl_options)
+        return std::make_unique<SSLSocketFactory>(opts);
+    else
+#endif
+        return std::make_unique<NonSecureSocketFactory>();
+}
+
+std::unique_ptr<EndpointsIteratorBase> GetEndpointsIterator(const ClientOptions& opts) {
+    if (opts.endpoints.empty())
+    {
+        throw ValidationError("The list of endpoints is empty");
+    }
+
+    return std::make_unique<RoundRobinEndpointsIterator>(opts.endpoints);
+}
+
 }
 
 class Client::Impl {
 public:
      Impl(const ClientOptions& opts);
+     Impl(const ClientOptions& opts,
+          std::unique_ptr<SocketFactory> socket_factory);
     ~Impl();
 
     void ExecuteQuery(Query query);
 
+    void SelectWithExternalData(Query query, const ExternalTables& external_tables);
+
     void SendCancel();
 
-    void Insert(const std::string& table_name, const Block& block);
+    void Insert(const std::string& table_name, const std::string& query_id, const Block& block);
+
+    Block BeginInsert(Query query);
+
+    void SendInsertBlock(const Block& block);
+
+    void EndInsert();
 
     void Ping();
 
     void ResetConnection();
 
-    void InsertQuery(Query query);
+    void ResetConnectionEndpoint();
 
-    void InsertData(const Block& block);
+    const ServerInfo& GetServerInfo() const;
 
-    void InsertDataEnd();
+    const std::optional<Endpoint>& GetCurrentEndpoint() const;
 
 private:
     bool Handshake();
 
     bool ReceivePacket(uint64_t* server_packet = nullptr);
 
-    void SendQuery(const std::string& query);
+    void SendQuery(const Query& query, bool finalize = true);
+    void FinalizeQuery();
 
     void SendData(const Block& block);
 
+    void SendBlockData(const Block& block);
+    void SendExternalData(const ExternalTables& external_tables);
+
     bool SendHello();
 
-    bool ReadBlock(Block* block, CodedInputStream* input);
+    bool ReadBlock(InputStream& input, Block* block);
 
     bool ReceiveHello();
 
     /// Reads data packet form input stream.
-    bool ReceiveData(std::function<void(const Block&)> cb);
+    bool ReceiveData();
 
     /// Reads exception packet form input stream.
     bool ReceiveException(bool rethrow = false);
 
-    void WriteBlock(const Block& block, CodedOutputStream* output);
+    void WriteBlock(const Block& block, OutputStream& output);
+
+    void CreateConnection();
+
+    void InitializeStreams(std::unique_ptr<SocketBase>&& socket);
+
+    inline size_t GetConnectionAttempts() const
+    {
+        return options_.endpoints.size() * options_.send_retries;
+    }
 
 private:
     /// In case of network errors tries to reconnect to server and
     /// call fuc several times.
-    void RetryGuard(std::function<void()> fuc);
+    void RetryGuard(std::function<void()> func);
+
+    void RetryConnectToTheEndpoint(std::function<void()>& func);
 
 private:
     class EnsureNull {
@@ -141,169 +247,311 @@ private:
     QueryEvents* events_;
     int compression_ = CompressionState::Disable;
 
-    SocketHolder socket_;
+    std::unique_ptr<SocketFactory> socket_factory_;
 
-    SocketInput socket_input_;
-    BufferedInput buffered_input_;
-    CodedInputStream input_;
+    std::unique_ptr<InputStream> input_;
+    std::unique_ptr<OutputStream> output_;
+    std::unique_ptr<SocketBase> socket_;
+    std::unique_ptr<EndpointsIteratorBase> endpoints_iterator;
 
-    SocketOutput socket_output_;
-    BufferedOutput buffered_output_;
-    CodedOutputStream output_;
+    std::optional<Endpoint> current_endpoint_;
 
     ServerInfo server_info_;
+
+    bool inserting_;
 };
 
+ClientOptions modifyClientOptions(ClientOptions opts)
+{
+    if (opts.host.empty())
+        return opts;
+
+    Endpoint default_endpoint({opts.host, opts.port});
+    opts.endpoints.emplace(opts.endpoints.begin(), default_endpoint);
+    return opts;
+}
 
 Client::Impl::Impl(const ClientOptions& opts)
-    : options_(opts)
-    , events_(nullptr)
-    , socket_(-1)
-    , socket_input_(socket_)
-    , buffered_input_(&socket_input_)
-    , input_(&buffered_input_)
-    , socket_output_(socket_)
-    , buffered_output_(&socket_output_)
-    , output_(&buffered_output_)
-{
-    for (int i = 0; ; ) {
-        try {
-            ResetConnection();
-            break;
-        } catch (const std::system_error&) {
-            if (++i > options_.send_retries) {
-                throw;
-            }
+    : Impl(opts, GetSocketFactory(opts)) {}
 
-            std::this_thread::sleep_for(options_.retry_timeout);
-        }
-    }
+Client::Impl::Impl(const ClientOptions& opts,
+                   std::unique_ptr<SocketFactory> socket_factory)
+    : options_(modifyClientOptions(opts))
+    , events_(nullptr)
+    , socket_factory_(std::move(socket_factory))
+    , endpoints_iterator(GetEndpointsIterator(options_))
+{
+    CreateConnection();
 
     if (options_.compression_method != CompressionMethod::None) {
         compression_ = CompressionState::Enable;
     }
 }
 
-Client::Impl::~Impl()
-{ }
+Client::Impl::~Impl() {
+    try {
+        EndInsert();
+    } catch (...) {
+    }
+}
 
 void Client::Impl::ExecuteQuery(Query query) {
+    if (inserting_) {
+        throw ValidationError("cannot execute query while inserting");
+    }
+
     EnsureNull en(static_cast<QueryEvents*>(&query), &events_);
 
     if (options_.ping_before_query) {
         RetryGuard([this]() { Ping(); });
     }
 
-    SendQuery(query.GetText());
+    SendQuery(query);
 
     while (ReceivePacket()) {
         ;
     }
 }
 
-void Client::Impl::InsertData(const Block& block) {
-    // Send data.
-    SendData(block);
-}
 
-void Client::Impl::InsertDataEnd() {
-    // Send empty block as marker of
-    // end of data.
-    SendData(Block());
-
-    // Wait for EOS.
-    while (ReceivePacket()) {
-        ;
+void Client::Impl::SelectWithExternalData(Query query, const ExternalTables& external_tables) {
+    if (inserting_) {
+        throw ValidationError("cannot execute query while inserting");
     }
-}
 
-void Client::Impl::Insert(const std::string& table_name, const Block& block) {
+    if (server_info_.revision < DBMS_MIN_REVISION_WITH_TEMPORARY_TABLES) {
+       throw UnimplementedError("This version of ClickHouse server doesn't support temporary tables");
+    }
+
+    EnsureNull en(static_cast<QueryEvents*>(&query), &events_);
+
     if (options_.ping_before_query) {
         RetryGuard([this]() { Ping(); });
     }
 
-    std::vector<std::string> fields;
-    fields.reserve(block.GetColumnCount());
+    SendQuery(query, false);
+    SendExternalData(external_tables);
+    FinalizeQuery();
 
-    // Enumerate all fields
-    for (unsigned int i = 0; i < block.GetColumnCount(); i++) {
-        fields.push_back(block.GetColumnName(i));
-    }
-
-    std::stringstream fields_section;
-
-    for (auto elem = fields.begin(); elem != fields.end(); ++elem) {
-        if (std::distance(elem, fields.end()) == 1) {
-            fields_section << *elem;
-        } else {
-            fields_section << *elem << ",";
-        }
-    }
-
-    SendQuery("INSERT INTO " + table_name + " ( " + fields_section.str() + " ) VALUES");
-
-    uint64_t server_packet;
-    // Receive data packet.
-    while (true) {
-        bool ret = ReceivePacket(&server_packet);
-
-        if (!ret) {
-            throw std::runtime_error("fail to receive data packet");
-        }
-        if (server_packet == ServerCodes::Data) {
-            break;
-        }
-        if (server_packet == ServerCodes::Progress) {
-            continue;
-        }
-    }
-
-    // Send data.
-    SendData(block);
-    // Send empty block as marker of
-    // end of data.
-    SendData(Block());
-
-    // Wait for EOS.
     while (ReceivePacket()) {
         ;
     }
 }
 
+void Client::Impl::SendBlockData(const Block& block) {
+    if (compression_ == CompressionState::Enable) {
+        std::unique_ptr<OutputStream> compressed_output = std::make_unique<CompressedOutput>(output_.get(), options_.max_compression_chunk_size, options_.compression_method);
+        BufferedOutput buffered(std::move(compressed_output), options_.max_compression_chunk_size);
+    
+        WriteBlock(block, buffered);
+    } else {
+        WriteBlock(block, *output_);
+    }
+}
+
+void Client::Impl::SendExternalData(const ExternalTables& external_tables) {
+    for (const auto& table: external_tables) {
+        if (!table.data.GetRowCount()) {
+           // skip empty blocks to keep the connection in the consistent state as the current request would be marked as finished by such an empty block
+           continue;
+        }
+        WireFormat::WriteFixed<uint8_t>(*output_, ClientCodes::Data);
+        WireFormat::WriteString(*output_, table.name);
+        SendBlockData(table.data);
+    }
+}
+
+
+std::string NameToQueryString(const std::string &input)
+{
+    std::string output;
+    output.reserve(input.size() + 2);
+    output += '`';
+
+    for (const auto & c : input) {
+        if (c == '`') {
+            //escape ` with ``
+            output.append("``");
+        } else {
+            output.push_back(c);
+        }
+    }
+
+    output += '`';
+    return output;
+}
+
+void Client::Impl::Insert(const std::string& table_name, const std::string& query_id, const Block& block) {
+    if (inserting_) {
+        throw ValidationError("cannot execute query while inserting, use SendInsertData instead");
+    }
+
+    if (options_.ping_before_query) {
+        RetryGuard([this]() { Ping(); });
+    }
+
+    inserting_ = true;
+
+    std::stringstream fields_section;
+    const auto num_columns = block.GetColumnCount();
+
+    for (unsigned int i = 0; i < num_columns; ++i) {
+        if (i == num_columns - 1) {
+            fields_section << NameToQueryString(block.GetColumnName(i));
+        } else {
+            fields_section << NameToQueryString(block.GetColumnName(i)) << ",";
+        }
+    }
+
+    Query query("INSERT INTO " + table_name + " ( " + fields_section.str() + " ) VALUES", query_id);
+    SendQuery(query);
+
+    // Wait for a data packet and return
+    uint64_t server_packet = 0;
+    while (ReceivePacket(&server_packet)) {
+        if (server_packet == ServerCodes::Data) {
+            SendData(block);
+            EndInsert();
+            return;
+        }
+    }
+
+    throw ProtocolError("fail to receive data packet");
+}
+
+Block Client::Impl::BeginInsert(Query query) {
+    if (inserting_) {
+        throw ValidationError("cannot execute query while inserting");
+    }
+
+    EnsureNull en(static_cast<QueryEvents*>(&query), &events_);
+
+    if (options_.ping_before_query) {
+        RetryGuard([this]() { Ping(); });
+    }
+
+    inserting_ = true;
+
+    // Create a callback to extract the block with the proper query columns.
+    Block block;
+    query.OnData([&block](const Block& b) {
+        block = std::move(b);
+        return true;
+    });
+
+    SendQuery(query.GetText());
+
+    // Wait for a data packet and return
+    uint64_t server_packet = 0;
+    while (ReceivePacket(&server_packet)) {
+        if (server_packet == ServerCodes::Data) {
+            return block;
+        }
+    }
+
+    throw ProtocolError("fail to receive data packet");
+}
+
+void Client::Impl::SendInsertBlock(const Block& block) {
+    if (!inserting_) {
+        throw ValidationError("illegal call to InsertData without first calling BeginInsert");
+    }
+
+    SendData(block);
+}
+
+void Client::Impl::EndInsert() {
+    if (!inserting_) {
+        return;
+    }
+
+    // Send empty block as marker of end of data.
+    SendData(Block());
+
+    // Wait for EOS.
+    uint64_t eos_packet{0};
+    while (ReceivePacket(&eos_packet)) {
+        ;
+    }
+
+    if (eos_packet != ServerCodes::EndOfStream && eos_packet != ServerCodes::Exception
+        && eos_packet != ServerCodes::Log && options_.rethrow_exceptions) {
+        throw ProtocolError(std::string{"unexpected packet from server while receiving end of query, expected (expected Exception, EndOfStream or Log, got: "}
+                            + (eos_packet ? std::to_string(eos_packet) : "nothing") + ")");
+    }
+    inserting_ = false;
+}
+
 void Client::Impl::Ping() {
-    WireFormat::WriteUInt64(&output_, ClientCodes::Ping);
-    output_.Flush();
+    if (inserting_) {
+        throw ValidationError("cannot execute query while inserting");
+    }
+
+    WireFormat::WriteUInt64(*output_, ClientCodes::Ping);
+    output_->Flush();
 
     uint64_t server_packet;
     const bool ret = ReceivePacket(&server_packet);
 
     if (!ret || server_packet != ServerCodes::Pong) {
-        throw std::runtime_error("fail to ping server");
+        throw ProtocolError("fail to ping server");
     }
 }
 
 void Client::Impl::ResetConnection() {
-    SocketHolder s(SocketConnect(NetworkAddress(options_.host, std::to_string(options_.port)), options_.socket_receive_timeout, options_.socket_connect_timeout));
-
-    if (s.Closed()) {
-        throw std::system_error(errno, std::system_category());
-    }
-
-    if (options_.tcp_keepalive) {
-        s.SetTcpKeepAlive(options_.tcp_keepalive_idle.count(),
-                          options_.tcp_keepalive_intvl.count(),
-                          options_.tcp_keepalive_cnt);
-    }
-
-    socket_ = std::move(s);
-    socket_input_ = SocketInput(socket_);
-    socket_output_ = SocketOutput(socket_);
-    buffered_input_.Reset();
-    buffered_output_.Reset();
+    InitializeStreams(socket_factory_->connect(options_, current_endpoint_.value()));
+    inserting_ = false;
 
     if (!Handshake()) {
-        throw std::runtime_error("fail to connect to " + options_.host);
+        throw ProtocolError("fail to connect to " + options_.host);
     }
+}
+
+void Client::Impl::ResetConnectionEndpoint() {
+    current_endpoint_.reset();
+    for (size_t i = 0; i < options_.endpoints.size();)
+    {
+        try
+        {
+            current_endpoint_ = endpoints_iterator->Next();
+            ResetConnection();
+            return;
+        } catch (const std::system_error&) {
+            if (++i == options_.endpoints.size())
+            {
+                current_endpoint_.reset();
+                throw;
+            }
+        }
+    }
+}
+
+void Client::Impl::CreateConnection() {
+    // make sure to try to connect to each endpoint at least once even if `options_.send_retries` is 0
+    const size_t max_attempts = (options_.send_retries ? options_.send_retries : 1);
+    for (size_t i = 0; i < max_attempts;)
+    {
+        try
+        {
+            // Try to connect to each endpoint before throwing exception.
+            ResetConnectionEndpoint();
+            return;
+        } catch (const std::system_error&) {
+            if (++i >= max_attempts)
+            {
+                throw;
+            }
+        }
+    }
+}
+
+const ServerInfo& Client::Impl::GetServerInfo() const {
+    return server_info_;
+}
+
+
+const std::optional<Endpoint>& Client::Impl::GetCurrentEndpoint() const {
+    return current_endpoint_;
 }
 
 bool Client::Impl::Handshake() {
@@ -313,39 +561,18 @@ bool Client::Impl::Handshake() {
     if (!ReceiveHello()) {
         return false;
     }
+
+    if (server_info_.revision >= DBMS_MIN_PROTOCOL_VERSION_WITH_ADDENDUM) {
+        WireFormat::WriteString(*output_, std::string());
+    }
+
     return true;
-}
-
-void Client::Impl::InsertQuery(Query query) {
-    EnsureNull en(static_cast<QueryEvents*>(&query), &events_);
-
-    if (options_.ping_before_query) {
-        RetryGuard([this]() { Ping(); });
-    }
-
-    SendQuery(query.GetText());
-
-    uint64_t server_packet;
-    // Receive data packet.
-    while (true) {
-        bool ret = ReceivePacket(&server_packet);
-
-        if (!ret) {
-            throw std::runtime_error("fail to receive data packet");
-        }
-        if (server_packet == ServerCodes::Data) {
-            break;
-        }
-        if (server_packet == ServerCodes::Progress) {
-            continue;
-        }
-    }
 }
 
 bool Client::Impl::ReceivePacket(uint64_t* server_packet) {
     uint64_t packet_type = 0;
 
-    if (!input_.ReadVarint64(&packet_type)) {
+    if (!WireFormat::ReadVarint64(*input_, &packet_type)) {
         return false;
     }
     if (server_packet) {
@@ -354,17 +581,8 @@ bool Client::Impl::ReceivePacket(uint64_t* server_packet) {
 
     switch (packet_type) {
     case ServerCodes::Data: {
-        auto cb = [this] (const Block& block) {
-            if (events_) {
-                events_->OnData(block);
-                if (!events_->OnDataCancelable(block)) {
-                    SendCancel();
-                }
-            }
-        };
-
-        if (!ReceiveData(cb)) {
-            throw std::runtime_error("can't read data packet from input stream");
+        if (!ReceiveData()) {
+            throw ProtocolError("can't read data packet from input stream");
         }
         return true;
     }
@@ -377,22 +595,22 @@ bool Client::Impl::ReceivePacket(uint64_t* server_packet) {
     case ServerCodes::ProfileInfo: {
         Profile profile;
 
-        if (!WireFormat::ReadUInt64(&input_, &profile.rows)) {
+        if (!WireFormat::ReadUInt64(*input_, &profile.rows)) {
             return false;
         }
-        if (!WireFormat::ReadUInt64(&input_, &profile.blocks)) {
+        if (!WireFormat::ReadUInt64(*input_, &profile.blocks)) {
             return false;
         }
-        if (!WireFormat::ReadUInt64(&input_, &profile.bytes)) {
+        if (!WireFormat::ReadUInt64(*input_, &profile.bytes)) {
             return false;
         }
-        if (!WireFormat::ReadFixed(&input_, &profile.applied_limit)) {
+        if (!WireFormat::ReadFixed(*input_, &profile.applied_limit)) {
             return false;
         }
-        if (!WireFormat::ReadUInt64(&input_, &profile.rows_before_limit)) {
+        if (!WireFormat::ReadUInt64(*input_, &profile.rows_before_limit)) {
             return false;
         }
-        if (!WireFormat::ReadFixed(&input_, &profile.calculated_rows_before_limit)) {
+        if (!WireFormat::ReadFixed(*input_, &profile.calculated_rows_before_limit)) {
             return false;
         }
 
@@ -406,14 +624,25 @@ bool Client::Impl::ReceivePacket(uint64_t* server_packet) {
     case ServerCodes::Progress: {
         Progress info;
 
-        if (!WireFormat::ReadUInt64(&input_, &info.rows)) {
+        if (!WireFormat::ReadUInt64(*input_, &info.rows)) {
             return false;
         }
-        if (!WireFormat::ReadUInt64(&input_, &info.bytes)) {
+        if (!WireFormat::ReadUInt64(*input_, &info.bytes)) {
             return false;
         }
-        if (!WireFormat::ReadUInt64(&input_, &info.total_rows)) {
-            return false;
+        if constexpr(DMBS_PROTOCOL_REVISION >= DBMS_MIN_REVISION_WITH_TOTAL_ROWS_IN_PROGRESS) {
+            if (!WireFormat::ReadUInt64(*input_, &info.total_rows)) {
+                return false;
+            }
+        }
+        if (server_info_.revision >= DBMS_MIN_REVISION_WITH_CLIENT_WRITE_INFO)
+        {
+            if (!WireFormat::ReadUInt64(*input_, &info.written_rows)) {
+                return false;
+            }
+            if (!WireFormat::ReadUInt64(*input_, &info.written_bytes)) {
+                return false;
+            }
         }
 
         if (events_) {
@@ -427,6 +656,10 @@ bool Client::Impl::ReceivePacket(uint64_t* server_packet) {
         return true;
     }
 
+    case ServerCodes::Hello: {
+        return true;
+    }
+
     case ServerCodes::EndOfStream: {
         if (events_) {
             events_->OnFinish();
@@ -434,43 +667,62 @@ bool Client::Impl::ReceivePacket(uint64_t* server_packet) {
         return false;
     }
 
-    case ServerCodes::Totals: {
-        auto cb = [this] (const Block& block) {
-            if (events_) {
-                events_->OnTotals(block);
-            }
-        };
+    case ServerCodes::Log: {
+        // log tag
+        if (!WireFormat::SkipString(*input_)) {
+            return false;
+        }
+        Block block;
 
-        if (!ReceiveData(cb)) {
-            throw std::runtime_error("can't read data packet with totals from input stream");
+        // Use uncompressed stream since log blocks usually contain only one row
+        if (!ReadBlock(*input_, &block)) {
+            return false;
+        }
+
+        if (events_) {
+            events_->OnServerLog(block);
         }
         return true;
     }
 
-    case ServerCodes::Extremes: {
-       auto cb = [this] (const Block& block) {
-            if (events_) {
-                events_->OnExtremes(block);
-            }
-        };
+    case ServerCodes::TableColumns: {
+        // external table name
+        if (!WireFormat::SkipString(*input_)) {
+            return false;
+        }
 
-        if (!ReceiveData(cb)) {
-            throw std::runtime_error("can't read data packet with extremes from input stream");
+        //  columns metadata
+        if (!WireFormat::SkipString(*input_)) {
+            return false;
+        }
+        return true;
+    }
+
+    case ServerCodes::ProfileEvents: {
+        if (!WireFormat::SkipString(*input_)) {
+            return false;
+        }
+
+        Block block;
+        if (!ReadBlock(*input_, &block)) {
+            return false;
+        }
+
+        if (events_) {
+            events_->OnProfileEvents(block);
         }
         return true;
     }
 
     default:
-        throw std::runtime_error("unimplemented " + std::to_string((int)packet_type));
+        throw UnimplementedError("unimplemented " + std::to_string((int)packet_type));
         break;
     }
-
-    return false;
 }
 
-bool Client::Impl::ReadBlock(Block* block, CodedInputStream* input) {
+bool Client::Impl::ReadBlock(InputStream& input, Block* block) {
     // Additional information about block.
-    if (REVISION >= DBMS_MIN_REVISION_WITH_BLOCK_INFO) {
+    if (server_info_.revision >= DBMS_MIN_REVISION_WITH_BLOCK_INFO) {
         uint64_t num;
         BlockInfo info;
 
@@ -491,7 +743,7 @@ bool Client::Impl::ReadBlock(Block* block, CodedInputStream* input) {
             return false;
         }
 
-        // TODO use data
+        block->SetInfo(std::move(info));
     }
 
     uint64_t num_columns = 0;
@@ -504,79 +756,100 @@ bool Client::Impl::ReadBlock(Block* block, CodedInputStream* input) {
         return false;
     }
 
+    CreateColumnByTypeSettings create_column_settings;
+    create_column_settings.low_cardinality_as_wrapped_column = options_.backward_compatibility_lowcardinality_as_wrapped_column;
+
     for (size_t i = 0; i < num_columns; ++i) {
         std::string name;
         std::string type;
-
         if (!WireFormat::ReadString(input, &name)) {
             return false;
         }
         if (!WireFormat::ReadString(input, &type)) {
             return false;
         }
+    
+        if (server_info_.revision >= DBMS_MIN_REVISION_WITH_CUSTOM_SERIALIZATION) {
+            uint8_t custom_format_len;
+            if (!WireFormat::ReadFixed(input, &custom_format_len)) {
+                return false;
+            }
+            if (custom_format_len > 0) {
+                throw UnimplementedError(std::string("unsupported custom serialization"));
+            }
+        }  
 
-        if (ColumnRef col = CreateColumnByType(type)) {
-            if (num_rows && !col->Load(input, num_rows)) {
-                throw std::runtime_error("can't load");
+        if (ColumnRef col = CreateColumnByType(type, create_column_settings)) {
+            if (num_rows && !col->Load(&input, num_rows)) {
+                throw ProtocolError("can't load column '" + name + "' of type " + type);
             }
 
             block->AppendColumn(name, col);
         } else {
-            throw std::runtime_error(std::string("unsupported column type: ") + type);
+            throw UnimplementedError(std::string("unsupported column type: ") + type);
         }
     }
 
     return true;
 }
 
-bool Client::Impl::ReceiveData(std::function<void(const Block&)> cb) {
+bool Client::Impl::ReceiveData() {
     Block block;
-    std::string table_name;
 
-    // Read name of a table.
-    if (!WireFormat::ReadString(&input_, &table_name)) {
-        return false;
+    if (server_info_.revision >= DBMS_MIN_REVISION_WITH_TEMPORARY_TABLES) {
+        if (!WireFormat::SkipString(*input_)) {
+            return false;
+        }
     }
 
     if (compression_ == CompressionState::Enable) {
-        CompressedInput compressed(&input_);
-        CodedInputStream coded(&compressed);
-
-        if (!ReadBlock(&block, &coded)) {
+        CompressedInput compressed(input_.get());
+        if (!ReadBlock(compressed, &block)) {
             return false;
         }
     } else {
-        if (!ReadBlock(&block, &input_)) {
+        if (!ReadBlock(*input_, &block)) {
             return false;
         }
     }
 
-    cb(block);
+    if (events_) {
+        events_->OnData(block);
+        if (!events_->OnDataCancelable(block)) {
+            SendCancel();
+        }
+    }
 
     return true;
 }
 
 bool Client::Impl::ReceiveException(bool rethrow) {
-    std::unique_ptr<Exception> e(new Exception);
+    std::shared_ptr<Exception> e(new Exception);
     Exception* current = e.get();
 
+    bool exception_received = true;
     do {
         bool has_nested = false;
 
-        if (!WireFormat::ReadFixed(&input_, &current->code)) {
-            return false;
+        if (!WireFormat::ReadFixed(*input_, &current->code)) {
+           exception_received = false;
+           break;
         }
-        if (!WireFormat::ReadString(&input_, &current->name)) {
-            return false;
+        if (!WireFormat::ReadString(*input_, &current->name)) {
+            exception_received = false;
+            break;
         }
-        if (!WireFormat::ReadString(&input_, &current->display_text)) {
-            return false;
+        if (!WireFormat::ReadString(*input_, &current->display_text)) {
+            exception_received = false;
+            break;
         }
-        if (!WireFormat::ReadString(&input_, &current->stack_trace)) {
-            return false;
+        if (!WireFormat::ReadString(*input_, &current->stack_trace)) {
+            exception_received = false;
+            break;
         }
-        if (!WireFormat::ReadFixed(&input_, &has_nested)) {
-            return false;
+        if (!WireFormat::ReadFixed(*input_, &has_nested)) {
+            exception_received = false;
+            break;
         }
 
         if (has_nested) {
@@ -592,73 +865,143 @@ bool Client::Impl::ReceiveException(bool rethrow) {
     }
 
     if (rethrow || options_.rethrow_exceptions) {
-        throw ServerException(std::move(e));
+        throw ServerError(e);
     }
 
-    return true;
+    return exception_received;
 }
 
 void Client::Impl::SendCancel() {
-    WireFormat::WriteUInt64(&output_, ClientCodes::Cancel);
-    output_.Flush();
+    WireFormat::WriteUInt64(*output_, ClientCodes::Cancel);
+    output_->Flush();
 }
 
-void Client::Impl::SendQuery(const std::string& query) {
-    WireFormat::WriteUInt64(&output_, ClientCodes::Query);
-    WireFormat::WriteString(&output_, std::string());
+void Client::Impl::SendQuery(const Query& query, bool finalize) {
+    WireFormat::WriteUInt64(*output_, ClientCodes::Query);
+    WireFormat::WriteString(*output_, query.GetQueryID());
 
     /// Client info.
     if (server_info_.revision >= DBMS_MIN_REVISION_WITH_CLIENT_INFO) {
         ClientInfo info;
 
         info.query_kind = 1;
-        info.client_name = "ClickHouse client";
-        info.client_version_major = DBMS_VERSION_MAJOR;
-        info.client_version_minor = DBMS_VERSION_MINOR;
-        info.client_revision = REVISION;
+        info.client_name          = CLIENT_NAME;
+        info.client_version_major = CLICKHOUSE_CPP_VERSION_MAJOR;
+        info.client_version_minor = CLICKHOUSE_CPP_VERSION_MINOR;
+        info.client_version_patch = CLICKHOUSE_CPP_VERSION_PATCH;
+        info.client_revision = DMBS_PROTOCOL_REVISION;
 
 
-        WireFormat::WriteFixed(&output_, info.query_kind);
-        WireFormat::WriteString(&output_, info.initial_user);
-        WireFormat::WriteString(&output_, info.initial_query_id);
-        WireFormat::WriteString(&output_, info.initial_address);
-        WireFormat::WriteFixed(&output_, info.iface_type);
+        WireFormat::WriteFixed(*output_, info.query_kind);
+        WireFormat::WriteString(*output_, info.initial_user);
+        WireFormat::WriteString(*output_, info.initial_query_id);
+        WireFormat::WriteString(*output_, info.initial_address);
+        if (server_info_.revision >= DBMS_MIN_REVISION_WITH_INITIAL_QUERY_START_TIME) {
+            WireFormat::WriteFixed<int64_t>(*output_, 0);
+        }
+        WireFormat::WriteFixed(*output_, info.iface_type);
 
-        WireFormat::WriteString(&output_, info.os_user);
-        WireFormat::WriteString(&output_, info.client_hostname);
-        WireFormat::WriteString(&output_, info.client_name);
-        WireFormat::WriteUInt64(&output_, info.client_version_major);
-        WireFormat::WriteUInt64(&output_, info.client_version_minor);
-        WireFormat::WriteUInt64(&output_, info.client_revision);
+        WireFormat::WriteString(*output_, info.os_user);
+        WireFormat::WriteString(*output_, info.client_hostname);
+        WireFormat::WriteString(*output_, info.client_name);
+        WireFormat::WriteUInt64(*output_, info.client_version_major);
+        WireFormat::WriteUInt64(*output_, info.client_version_minor);
+        WireFormat::WriteUInt64(*output_, info.client_revision);
 
         if (server_info_.revision >= DBMS_MIN_REVISION_WITH_QUOTA_KEY_IN_CLIENT_INFO)
-            WireFormat::WriteString(&output_, info.quota_key);
+            WireFormat::WriteString(*output_, info.quota_key);
+        if (server_info_.revision >= DBMS_MIN_REVISION_WITH_DISTRIBUTED_DEPTH)
+            WireFormat::WriteUInt64(*output_, 0u);
+        if (server_info_.revision >= DBMS_MIN_REVISION_WITH_VERSION_PATCH) {
+            WireFormat::WriteUInt64(*output_, info.client_version_patch);
+        }
+
+        if (server_info_.revision >= DBMS_MIN_REVISION_WITH_OPENTELEMETRY) {
+            if (const auto& tracing_context = query.GetTracingContext()) {
+                // Have OpenTelemetry header.
+                WireFormat::WriteFixed(*output_, uint8_t(1));
+                // No point writing these numbers with variable length, because they
+                // are random and will probably require the full length anyway.
+                WireFormat::WriteFixed(*output_, tracing_context->trace_id);
+                WireFormat::WriteFixed(*output_, tracing_context->span_id);
+                WireFormat::WriteString(*output_, tracing_context->tracestate);
+                WireFormat::WriteFixed(*output_, tracing_context->trace_flags);
+            } else {
+                // Don't have OpenTelemetry header.
+                WireFormat::WriteFixed(*output_, uint8_t(0));
+            }
+        } else {
+            if (query.GetTracingContext()) {
+                // Current implementation works only for server version >= v20.11.2.1-stable
+                throw UnimplementedError(std::string("Can't send open telemetry tracing context to a server, server version is too old"));
+            }
+        }
+        if (server_info_.revision >= DBMS_MIN_REVISION_WITH_PARALLEL_REPLICAS) {
+            // replica dont supported by client
+            WireFormat::WriteUInt64(*output_, 0);
+            WireFormat::WriteUInt64(*output_, 0);
+            WireFormat::WriteUInt64(*output_, 0);
+        }
     }
 
-    /// Per query settings.
-    //if (settings)
-    //    settings->serialize(*out);
-    //else
-    WireFormat::WriteString(&output_, std::string());
+    /// Per query settings
+    if (server_info_.revision >= DBMS_MIN_REVISION_WITH_SETTINGS_SERIALIZED_AS_STRINGS) {
+        for(const auto& [name, field] : query.GetQuerySettings()) {
+            WireFormat::WriteString(*output_, name);
+            WireFormat::WriteVarint64(*output_, field.flags);
+            WireFormat::WriteString(*output_, field.value);
+        }
+    }
+    else if (query.GetQuerySettings().size() > 0) {
+        // Current implementation works only for server version >= v20.1.2.4-stable, since we do not implement binary settings serialization.
+        throw UnimplementedError(std::string("Can't send query settings to a server, server version is too old"));
+    }
+    // Empty string signals end of serialized settings
+    WireFormat::WriteString(*output_, std::string());
 
-    WireFormat::WriteUInt64(&output_, Stages::Complete);
-    WireFormat::WriteUInt64(&output_, compression_);
-    WireFormat::WriteString(&output_, query);
+    if (server_info_.revision >= DBMS_MIN_REVISION_WITH_INTERSERVER_SECRET) {
+        WireFormat::WriteString(*output_, "");
+    }
+
+    WireFormat::WriteUInt64(*output_, Stages::Complete);
+    WireFormat::WriteUInt64(*output_, compression_);
+    WireFormat::WriteString(*output_, query.GetText());
+
+    //Send params after query text
+    if (server_info_.revision >= DBMS_MIN_PROTOCOL_VERSION_WITH_PARAMETERS) {
+        for(const auto& [name, value] : query.GetParams()) {
+            // params is like query settings
+            WireFormat::WriteString(*output_, name);
+            const uint64_t Custom = 2;
+            WireFormat::WriteVarint64(*output_, Custom);
+            if (value)
+                WireFormat::WriteQuotedString(*output_, *value);
+            else
+                WireFormat::WriteParamNullRepresentation(*output_);
+        }
+        WireFormat::WriteString(*output_, std::string()); // empty string after last param
+    }
+ 
+    if (finalize) {
+        FinalizeQuery();
+    }
+}
+
+void Client::Impl::FinalizeQuery() {
     // Send empty block as marker of
     // end of data
     SendData(Block());
 
-    output_.Flush();
+    output_->Flush();
 }
 
-
-void Client::Impl::WriteBlock(const Block& block, CodedOutputStream* output) {
+void Client::Impl::WriteBlock(const Block& block, OutputStream& output) {
     // Additional information about block.
     if (server_info_.revision >= DBMS_MIN_REVISION_WITH_BLOCK_INFO) {
         WireFormat::WriteUInt64(output, 1);
-        WireFormat::WriteFixed (output, block.Info().is_overflows);
+        WireFormat::WriteFixed<uint8_t>(output, block.Info().is_overflows);
         WireFormat::WriteUInt64(output, 2);
-        WireFormat::WriteFixed (output, block.Info().bucket_num);
+        WireFormat::WriteFixed<int32_t>(output, block.Info().bucket_num);
         WireFormat::WriteUInt64(output, 0);
     }
 
@@ -669,73 +1012,52 @@ void Client::Impl::WriteBlock(const Block& block, CodedOutputStream* output) {
         WireFormat::WriteString(output, bi.Name());
         WireFormat::WriteString(output, bi.Type()->GetName());
 
-        bi.Column()->Save(output);
+        if (server_info_.revision >= DBMS_MIN_REVISION_WITH_CUSTOM_SERIALIZATION) {
+            // TODO: custom serialization
+            WireFormat::WriteFixed<uint8_t>(output, 0);
+        }
+
+        // Empty columns are not serialized and occupy exactly 0 bytes.
+        // ref https://github.com/ClickHouse/ClickHouse/blob/39b37a3240f74f4871c8c1679910e065af6bea19/src/Formats/NativeWriter.cpp#L163
+        const bool containsData = block.GetRowCount() > 0;
+        if (containsData) {
+            bi.Column()->Save(&output);
+        }
     }
+    output.Flush();
 }
 
 void Client::Impl::SendData(const Block& block) {
-    WireFormat::WriteUInt64(&output_, ClientCodes::Data);
+    WireFormat::WriteUInt64(*output_, ClientCodes::Data);
 
     if (server_info_.revision >= DBMS_MIN_REVISION_WITH_TEMPORARY_TABLES) {
-        WireFormat::WriteString(&output_, std::string());
+        WireFormat::WriteString(*output_, std::string());
     }
+    SendBlockData(block);
 
-    if (compression_ == CompressionState::Enable) {
-        switch (options_.compression_method) {
-            case CompressionMethod::None: {
-                assert(false);
-                break;
-            }
+    output_->Flush();
+}
 
-            case CompressionMethod::LZ4: {
-                Buffer tmp;
-                // Serialize block's data
-                {
-                    BufferOutput out(&tmp);
-                    CodedOutputStream coded(&out);
-                    WriteBlock(block, &coded);
-                }
-                // Reserver space for data
-                Buffer buf;
-                buf.resize(9 + LZ4_compressBound(tmp.size()));
+void Client::Impl::InitializeStreams(std::unique_ptr<SocketBase>&& socket) {
+    std::unique_ptr<OutputStream> output = std::make_unique<BufferedOutput>(socket->makeOutputStream());
+    std::unique_ptr<InputStream> input = std::make_unique<BufferedInput>(socket->makeInputStream());
 
-                // Compress data
-                int size = LZ4_compress((const char*)tmp.data(), (char*)buf.data() + 9, tmp.size());
-                buf.resize(9 + size);
-
-                // Fill header
-                uint8_t* p = buf.data();
-                // Compression method
-                WriteUnaligned(p, (uint8_t)0x82); p += 1;
-                // Compressed data size with header
-                WriteUnaligned(p, (uint32_t)buf.size()); p += 4;
-                // Original data size
-                WriteUnaligned(p, (uint32_t)tmp.size());
-
-                WireFormat::WriteFixed(&output_, CityHash128(
-                                    (const char*)buf.data(), buf.size()));
-                WireFormat::WriteBytes(&output_, buf.data(), buf.size());
-                break;
-            }
-        }
-    } else {
-        WriteBlock(block, &output_);
-    }
-
-    output_.Flush();
+    std::swap(input, input_);
+    std::swap(output, output_);
+    std::swap(socket, socket_);
 }
 
 bool Client::Impl::SendHello() {
-    WireFormat::WriteUInt64(&output_, ClientCodes::Hello);
-    WireFormat::WriteString(&output_, std::string(DBMS_NAME) + " client");
-    WireFormat::WriteUInt64(&output_, DBMS_VERSION_MAJOR);
-    WireFormat::WriteUInt64(&output_, DBMS_VERSION_MINOR);
-    WireFormat::WriteUInt64(&output_, REVISION);
-    WireFormat::WriteString(&output_, options_.default_database);
-    WireFormat::WriteString(&output_, options_.user);
-    WireFormat::WriteString(&output_, options_.password);
+    WireFormat::WriteUInt64(*output_, ClientCodes::Hello);
+    WireFormat::WriteString(*output_, std::string(CLIENT_NAME));
+    WireFormat::WriteUInt64(*output_, CLICKHOUSE_CPP_VERSION_MAJOR);
+    WireFormat::WriteUInt64(*output_, CLICKHOUSE_CPP_VERSION_MINOR);
+    WireFormat::WriteUInt64(*output_, DMBS_PROTOCOL_REVISION);
+    WireFormat::WriteString(*output_, options_.default_database);
+    WireFormat::WriteString(*output_, options_.user);
+    WireFormat::WriteString(*output_, options_.password);
 
-    output_.Flush();
+    output_->Flush();
 
     return true;
 }
@@ -743,26 +1065,38 @@ bool Client::Impl::SendHello() {
 bool Client::Impl::ReceiveHello() {
     uint64_t packet_type = 0;
 
-    if (!input_.ReadVarint64(&packet_type)) {
+    if (!WireFormat::ReadVarint64(*input_, &packet_type)) {
         return false;
     }
 
     if (packet_type == ServerCodes::Hello) {
-        if (!WireFormat::ReadString(&input_, &server_info_.name)) {
+        if (!WireFormat::ReadString(*input_, &server_info_.name)) {
             return false;
         }
-        if (!WireFormat::ReadUInt64(&input_, &server_info_.version_major)) {
+        if (!WireFormat::ReadUInt64(*input_, &server_info_.version_major)) {
             return false;
         }
-        if (!WireFormat::ReadUInt64(&input_, &server_info_.version_minor)) {
+        if (!WireFormat::ReadUInt64(*input_, &server_info_.version_minor)) {
             return false;
         }
-        if (!WireFormat::ReadUInt64(&input_, &server_info_.revision)) {
+        if (!WireFormat::ReadUInt64(*input_, &server_info_.revision)) {
             return false;
         }
 
         if (server_info_.revision >= DBMS_MIN_REVISION_WITH_SERVER_TIMEZONE) {
-            if (!WireFormat::ReadString(&input_, &server_info_.timezone)) {
+            if (!WireFormat::ReadString(*input_, &server_info_.timezone)) {
+                return false;
+            }
+        }
+
+        if (server_info_.revision >= DBMS_MIN_REVISION_WITH_SERVER_DISPLAY_NAME) {
+            if (!WireFormat::ReadString(*input_, &server_info_.display_name)) {
+                return false;
+            }
+        }
+
+        if (server_info_.revision >= DBMS_MIN_REVISION_WITH_VERSION_PATCH) {
+            if (!WireFormat::ReadUInt64(*input_, &server_info_.version_patch)) {
                 return false;
             }
         }
@@ -777,21 +1111,45 @@ bool Client::Impl::ReceiveHello() {
 }
 
 void Client::Impl::RetryGuard(std::function<void()> func) {
-    for (int i = 0; i <= options_.send_retries; ++i) {
-        try {
+
+    if (current_endpoint_)
+    {
+        for (unsigned int i = 0; ; ++i) {
+            try {
+                func();
+                return;
+            } catch (const std::system_error&) {
+                bool ok = true;
+
+                try {
+                    socket_factory_->sleepFor(options_.retry_timeout);
+                    ResetConnection();
+                } catch (...) {
+                    ok = false;
+                }
+
+                if (!ok && i == options_.send_retries) {
+                    break;
+                }
+            }
+        }
+    }
+    // Connections with current_endpoint_ are broken.
+    // Trying to establish  with the another one from the list.
+    size_t connection_attempts_count = GetConnectionAttempts();
+    for (size_t i = 0; i < connection_attempts_count;)
+    {
+        try
+        {
+            socket_factory_->sleepFor(options_.retry_timeout);
+            current_endpoint_ = endpoints_iterator->Next();
+            ResetConnection();
             func();
             return;
         } catch (const std::system_error&) {
-            bool ok = true;
-
-            try {
-                std::this_thread::sleep_for(options_.retry_timeout);
-                ResetConnection();
-            } catch (...) {
-                ok = false;
-            }
-
-            if (!ok) {
+            if (++i == connection_attempts_count)
+            {
+                current_endpoint_.reset();
                 throw;
             }
         }
@@ -804,6 +1162,13 @@ Client::Client(const ClientOptions& opts)
 {
 }
 
+Client::Client(const ClientOptions& opts,
+               std::unique_ptr<SocketFactory> socket_factory)
+    : options_(opts)
+    , impl_(new Impl(opts, std::move(socket_factory)))
+{
+}
+
 Client::~Client()
 { }
 
@@ -812,31 +1177,63 @@ void Client::Execute(const Query& query) {
 }
 
 void Client::Select(const std::string& query, SelectCallback cb) {
-    Execute(Query(query).OnData(cb));
+    Execute(Query(query).OnData(std::move(cb)));
+}
+
+void Client::Select(const std::string& query, const std::string& query_id, SelectCallback cb) {
+    Execute(Query(query, query_id).OnData(std::move(cb)));
 }
 
 void Client::SelectCancelable(const std::string& query, SelectCancelableCallback cb) {
-    Execute(Query(query).OnDataCancelable(cb));
+    Execute(Query(query).OnDataCancelable(std::move(cb)));
+}
+
+void Client::SelectCancelable(const std::string& query, const std::string& query_id, SelectCancelableCallback cb) {
+    Execute(Query(query, query_id).OnDataCancelable(std::move(cb)));
 }
 
 void Client::Select(const Query& query) {
     Execute(query);
 }
 
+void Client::SelectWithExternalData(const std::string& query, const ExternalTables& external_tables, SelectCallback cb) {
+    impl_->SelectWithExternalData(Query(query).OnData(std::move(cb)), external_tables);
+}
+
+void Client::SelectWithExternalData(const std::string& query, const std::string& query_id, const ExternalTables& external_tables, SelectCallback cb) {
+    impl_->SelectWithExternalData(Query(query, query_id).OnData(std::move(cb)), external_tables);
+}
+
+void Client::SelectWithExternalDataCancelable(const std::string& query, const ExternalTables& external_tables, SelectCancelableCallback cb) {
+    impl_->SelectWithExternalData(Query(query).OnDataCancelable(std::move(cb)), external_tables);
+}
+
+void Client::SelectWithExternalDataCancelable(const std::string& query, const std::string& query_id, const ExternalTables& external_tables, SelectCancelableCallback cb) {
+    impl_->SelectWithExternalData(Query(query, query_id).OnDataCancelable(std::move(cb)), external_tables);
+}
+
 void Client::Insert(const std::string& table_name, const Block& block) {
-    impl_->Insert(table_name, block);
+    impl_->Insert(table_name, Query::default_query_id, block);
 }
 
-void Client::InsertQuery(const std::string& query, SelectCallback cb) {
-    impl_->InsertQuery(Query(query).OnData(cb));
+void Client::Insert(const std::string& table_name, const std::string& query_id, const Block& block) {
+    impl_->Insert(table_name, query_id, block);
 }
 
-void Client::InsertData(const Block& block) {
-    impl_->InsertData(block);
+Block Client::BeginInsert(const std::string& query) {
+    return impl_->BeginInsert(Query(query));
 }
 
-void Client::InsertDataEnd() {
-    impl_->InsertDataEnd();
+Block Client::BeginInsert(const std::string& query, const std::string& query_id) {
+    return impl_->BeginInsert(Query(query, query_id));
+}
+
+void Client::SendInsertBlock(const Block& block) {
+    impl_->SendInsertBlock(block);
+}
+
+void Client::EndInsert() {
+    impl_->EndInsert();
 }
 
 void Client::Ping() {
@@ -845,6 +1242,28 @@ void Client::Ping() {
 
 void Client::ResetConnection() {
     impl_->ResetConnection();
+}
+
+void Client::ResetConnectionEndpoint() {
+    impl_->ResetConnectionEndpoint();
+}
+
+const std::optional<Endpoint>& Client::GetCurrentEndpoint() const {
+    return impl_->GetCurrentEndpoint();
+}
+
+const ServerInfo& Client::GetServerInfo() const {
+    return impl_->GetServerInfo();
+}
+
+Client::Version Client::GetVersion() {
+    return Version {
+        CLICKHOUSE_CPP_VERSION_MAJOR,
+        CLICKHOUSE_CPP_VERSION_MINOR,
+        CLICKHOUSE_CPP_VERSION_PATCH,
+        CLICKHOUSE_CPP_VERSION_BUILD,
+        ""
+    };
 }
 
 }
