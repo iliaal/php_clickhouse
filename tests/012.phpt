@@ -1,7 +1,7 @@
 --TEST--
 ClickHouse Date Formatting
 --SKIPIF--
-<?php print "skip TODO: re-baseline against ClickHouse v2.6.1 / CH 26 (inherited test, expected output predates the v2.6.1 lib bump)"; ?>
+<?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--
 <?php
 require __DIR__ . "/_clickhouse.inc";
@@ -28,12 +28,12 @@ $data = [
 ];
 $expected = [
     [
-            'date_c'        => date('Y-m-d', 1548633600),
-            'datetime_c'    => date('Y-m-d H:i:s', 1548687925),
+            'date_c'        => gmdate('Y-m-d', 1548633600),
+            'datetime_c'    => gmdate('Y-m-d H:i:s', 1548687925),
         ],
         [
-            'date_c'        => date('Y-m-d', 1548547200),
-            'datetime_c'    => date('Y-m-d H:i:s', 1548513600),
+            'date_c'        => gmdate('Y-m-d', 1548547200),
+            'datetime_c'    => gmdate('Y-m-d H:i:s', 1548513600),
         ],
 ];
 
@@ -61,18 +61,18 @@ array(2) {
   [0]=>
   array(2) {
     ["date_c"]=>
-    string(10) "2019-01-27"
+    string(10) "2019-01-28"
     ["datetime_c"]=>
-    string(19) "2019-01-28 10:05:25"
+    string(19) "2019-01-28 15:05:25"
   }
   [1]=>
   array(2) {
     ["date_c"]=>
-    string(10) "2019-01-26"
+    string(10) "2019-01-27"
     ["datetime_c"]=>
-    string(19) "2019-01-26 09:40:00"
+    string(19) "2019-01-26 14:40:00"
   }
 }
 OK
-2019-01-27 = 2019-01-27 OK
-2019-01-28 10:05:25 = 2019-01-28 10:05:25 OK
+2019-01-28 = 2019-01-28 OK
+2019-01-28 15:05:25 = 2019-01-28 15:05:25 OK

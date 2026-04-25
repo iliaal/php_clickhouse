@@ -524,12 +524,8 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
             if (Z_TYPE_P(array_value) == IS_STRING && memchr(Z_STRVAL_P(array_value), '-', Z_STRLEN_P(array_value)) != NULL) {
                 value->Append((long)to_time_t(Z_STRVAL_P(array_value)));
             } else {
-                time_t t;
-                struct tm *tz;
                 convert_to_long(array_value);
-                t = (time_t) Z_LVAL_P(array_value);
-                tz = localtime(&t);
-                value->Append(Z_LVAL_P(array_value) + tz->tm_gmtoff);
+                value->Append((std::time_t)Z_LVAL_P(array_value));
             }
         }
         SC_HASHTABLE_FOREACH_END();
@@ -679,7 +675,15 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
 
         SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
         {
-            if (Z_TYPE_P(array_value) == IS_LONG)
+            // PHP NULLs reach here when the column is Nullable(Enum8); the row's
+            // null mask makes the data slot meaningless, but ColumnEnum8::Append
+            // validates names through std::map::at and throws on "". Append the
+            // unchecked int8 overload (default checkValue=false) instead.
+            if (Z_TYPE_P(array_value) == IS_NULL)
+            {
+                value->Append((int8_t)0);
+            }
+            else if (Z_TYPE_P(array_value) == IS_LONG)
             {
                 convert_to_long(array_value);
                 value->Append(Z_LVAL_P(array_value));
@@ -701,7 +705,11 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
 
         SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
         {
-            if (Z_TYPE_P(array_value) == IS_LONG)
+            if (Z_TYPE_P(array_value) == IS_NULL)
+            {
+                value->Append((int16_t)0);
+            }
+            else if (Z_TYPE_P(array_value) == IS_LONG)
             {
                 convert_to_long(array_value);
                 value->Append(Z_LVAL_P(array_value));

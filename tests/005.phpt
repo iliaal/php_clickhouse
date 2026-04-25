@@ -1,7 +1,7 @@
 --TEST--
 ClickHouse testNullAble
 --SKIPIF--
-<?php print "skip TODO: re-baseline against ClickHouse v2.6.1 / CH 26 (inherited test, expected output predates the v2.6.1 lib bump)"; ?>
+<?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--
 <?php
 require __DIR__ . "/_clickhouse.inc";
