@@ -37,7 +37,7 @@ function testUInt($client, $deleteTable = false) {
     ]);
     $client->writeEnd();
     
-    $result = $client->select("SELECT {select} FROM {table}", [
+    $result = $client->select("SELECT {select} FROM {table} ORDER BY uint16_c, int8_c", [
         'select' => 'int8_c, int16_c, uint8_c, uint16_c',
         'table' => 'test.int_test'
     ]);
@@ -62,7 +62,7 @@ array(4) {
     ["uint8_c"]=>
     int(8)
     ["uint16_c"]=>
-    int(8)
+    int(0)
   }
   [1]=>
   array(4) {
@@ -73,7 +73,7 @@ array(4) {
     ["uint8_c"]=>
     int(9)
     ["uint16_c"]=>
-    int(9)
+    int(0)
   }
   [2]=>
   array(4) {
@@ -84,7 +84,7 @@ array(4) {
     ["uint8_c"]=>
     int(8)
     ["uint16_c"]=>
-    int(0)
+    int(8)
   }
   [3]=>
   array(4) {
@@ -95,6 +95,6 @@ array(4) {
     ["uint8_c"]=>
     int(9)
     ["uint16_c"]=>
-    int(0)
+    int(9)
   }
 }
