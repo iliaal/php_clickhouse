@@ -508,13 +508,18 @@ static void validateIdentifier(const char *s, size_t len, const char *what, bool
     }
 }
 
+// Max bytes of an exception message that crosses into userland. Bigger
+// than 1024 because real ClickHouse errors with stack hints can run
+// long, smaller than the few KB that would let a verbose dump leak.
+#define CLICKHOUSE_ERROR_MAX_LEN 4096
+
 /*
  * Strip the embedded SQL fragment from a clickhouse-cpp error message
  * before it crosses into userland. Upstream typically appends the full
  * failing query after a "While executing" / "in query" prefix, which
  * leaks any literal a caller placed in a placeholder (passwords with
  * digits-only values still pass our placeholder validator). Cap length
- * at 1024 chars as a final defense.
+ * at CLICKHOUSE_ERROR_MAX_LEN as a final defense.
  */
 static std::string sanitizeError(const char *what)
 {
@@ -536,8 +541,8 @@ static std::string sanitizeError(const char *what)
             break;
         }
     }
-    if (msg.size() > 1024) {
-        msg.resize(1024);
+    if (msg.size() > CLICKHOUSE_ERROR_MAX_LEN) {
+        msg.resize(CLICKHOUSE_ERROR_MAX_LEN);
         msg += "... (truncated)";
     }
     return msg;
