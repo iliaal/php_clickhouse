@@ -4,56 +4,8 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "5ce62d7da7b75f43d0dabe3f2766147a",
+    "content-hash": "d3221306b62716ca07412ebf79d997fd",
     "packages": [
-        {
-            "name": "lizhichao/one-ck",
-            "version": "0.1.13",
-            "source": {
-                "type": "git",
-                "url": "https://github.com/lizhichao/one-ck.git",
-                "reference": "095b354b1d2d7a66e2dce5f7385309911d579a47"
-            },
-            "dist": {
-                "type": "zip",
-                "url": "https://api.github.com/repos/lizhichao/one-ck/zipball/095b354b1d2d7a66e2dce5f7385309911d579a47",
-                "reference": "095b354b1d2d7a66e2dce5f7385309911d579a47",
-                "shasum": ""
-            },
-            "require": {
-                "ext-bcmath": "*",
-                "ext-json": "*",
-                "php": ">=7.2"
-            },
-            "type": "library",
-            "autoload": {
-                "psr-4": {
-                    "OneCk\\": "src/"
-                }
-            },
-            "notification-url": "https://packagist.org/downloads/",
-            "license": [
-                "Apache-2.0"
-            ],
-            "authors": [
-                {
-                    "name": "tanszhe",
-                    "email": "1018595261@qq.com"
-                }
-            ],
-            "description": "clickhouse tcp client",
-            "keywords": [
-                "clickhouse",
-                "client",
-                "php",
-                "tcp"
-            ],
-            "support": {
-                "issues": "https://github.com/lizhichao/one-ck/issues",
-                "source": "https://github.com/lizhichao/one-ck/tree/0.1.13"
-            },
-            "time": "2020-12-16T09:51:08+00:00"
-        },
         {
             "name": "smi2/phpclickhouse",
             "version": "1.26.423",
