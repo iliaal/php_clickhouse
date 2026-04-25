@@ -12,11 +12,11 @@
         <email>neeke@php.net</email>
         <active>yes</active>
     </lead>
-    <date>2019-03-28</date>
+    <date>2023-02-24</date>
     <time>13:00:00</time>
     <version>
-        <release>0.1.0</release>
-        <api>0.1.0</api>
+        <release>0.1.1</release>
+        <api>0.1.1</api>
     </version>
     <stability>
         <release>stable</release>
@@ -24,7 +24,7 @@
     </stability>
     <license uri="http://www.php.net/license/3_01.txt">PHP3.01</license>
     <notes>
-        - First version for pecl.net
+        - Support PHP8.X version for pecl.net
     </notes>
     <contents>
         <dir name="/">
@@ -155,7 +155,7 @@
     <dependencies>
         <required>
             <php>
-                <min>5.4.0</min>
+                <min>7.0.0</min>
             </php>
             <pearinstaller>
                 <min>1.4.0</min>
@@ -165,6 +165,7 @@
     <providesextension>SeasClick</providesextension>
     <extsrcrelease/>
     <changelog>
+        - Support PHP8.X version for pecl.net
     </changelog>
 </package>
 

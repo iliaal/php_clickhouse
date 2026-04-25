@@ -42,6 +42,7 @@ using namespace std;
 
 zend_class_entry *SeasClick_ce, *SeasClickException_ce;
 map<int, Client*> clientMap;
+map<int, Block> clientInsertBlack;
 
 #ifdef COMPILE_DL_SEASCLICK
 extern "C" {
@@ -49,20 +50,26 @@ extern "C" {
 }
 #endif
 
-PHP_FUNCTION(SeasClick_version)
-{
-    SC_RETURN_STRINGL(PHP_SEASCLICK_VERSION, strlen(PHP_SEASCLICK_VERSION));
-}
+// PHP_FUNCTION(SeasClick_version)
+// {
+//     SC_RETURN_STRINGL(PHP_SEASCLICK_VERSION, strlen(PHP_SEASCLICK_VERSION));
+// }
 
 static PHP_METHOD(SEASCLICK_RES_NAME, __construct);
 static PHP_METHOD(SEASCLICK_RES_NAME, __destruct);
 static PHP_METHOD(SEASCLICK_RES_NAME, select);
 static PHP_METHOD(SEASCLICK_RES_NAME, insert);
+static PHP_METHOD(SEASCLICK_RES_NAME, writeStart);
+static PHP_METHOD(SEASCLICK_RES_NAME, write);
+static PHP_METHOD(SEASCLICK_RES_NAME, writeEnd);
 static PHP_METHOD(SEASCLICK_RES_NAME, execute);
 static PHP_METHOD(SEASCLICK_RES_NAME, ping);
 
 ZEND_BEGIN_ARG_INFO_EX(SeasClick_construct, 0, 0, 1)
 ZEND_ARG_INFO(0, connectParams)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(SeasClick_destruct, 0, 0, 0)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(SeasClick_select, 0, 0, 3)
@@ -77,6 +84,18 @@ ZEND_ARG_INFO(0, columns)
 ZEND_ARG_INFO(0, values)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_INFO_EX(SeasClick_writeStart, 0, 0, 2)
+ZEND_ARG_INFO(0, table)
+ZEND_ARG_INFO(0, columns)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(SeasClick_write, 0, 0, 1)
+ZEND_ARG_INFO(0, values)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(SeasClick_writeEnd, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_INFO_EX(SeasClick_execute, 0, 0, 2)
 ZEND_ARG_INFO(0, sql)
 ZEND_ARG_INFO(0, params)
@@ -88,7 +107,7 @@ ZEND_END_ARG_INFO()
 /* {{{ SeasClick_functions[] */
 const zend_function_entry SeasClick_functions[] =
 {
-    PHP_FE(SeasClick_version,	NULL)
+    //PHP_FE(SeasClick_version,	NULL)
     PHP_FE_END
 };
 /* }}} */
@@ -96,11 +115,14 @@ const zend_function_entry SeasClick_functions[] =
 const zend_function_entry SeasClick_methods[] =
 {
     PHP_ME(SEASCLICK_RES_NAME, __construct,   SeasClick_construct, ZEND_ACC_PUBLIC | ZEND_ACC_CTOR)
-    PHP_ME(SEASCLICK_RES_NAME, __destruct,    NULL, ZEND_ACC_PUBLIC | ZEND_ACC_DTOR)
-    PHP_ME(SEASCLICK_RES_NAME, select,   SeasClick_select, ZEND_ACC_PUBLIC)
-    PHP_ME(SEASCLICK_RES_NAME, insert,   SeasClick_insert, ZEND_ACC_PUBLIC)
-    PHP_ME(SEASCLICK_RES_NAME, execute,   SeasClick_execute, ZEND_ACC_PUBLIC)
-    PHP_ME(SEASCLICK_RES_NAME, ping,   SeasClick_ping, ZEND_ACC_PUBLIC)
+    PHP_ME(SEASCLICK_RES_NAME, __destruct,    SeasClick_destruct, ZEND_ACC_PUBLIC | ZEND_ACC_DTOR)
+    PHP_ME(SEASCLICK_RES_NAME, select,        SeasClick_select, ZEND_ACC_PUBLIC)
+    PHP_ME(SEASCLICK_RES_NAME, insert,        SeasClick_insert, ZEND_ACC_PUBLIC)
+    PHP_ME(SEASCLICK_RES_NAME, writeStart,    SeasClick_writeStart, ZEND_ACC_PUBLIC)
+    PHP_ME(SEASCLICK_RES_NAME, write,         SeasClick_write, ZEND_ACC_PUBLIC)
+    PHP_ME(SEASCLICK_RES_NAME, writeEnd,      SeasClick_writeEnd, ZEND_ACC_PUBLIC)
+    PHP_ME(SEASCLICK_RES_NAME, execute,       SeasClick_execute, ZEND_ACC_PUBLIC)
+    PHP_ME(SEASCLICK_RES_NAME, ping,          SeasClick_ping, ZEND_ACC_PUBLIC)
     PHP_FE_END
 };
 
@@ -123,6 +145,7 @@ PHP_MINIT_FUNCTION(SeasClick)
     SeasClickException_ce = zend_register_internal_class_ex(&SeasClickException, zend_exception_get_default(TSRMLS_C), NULL TSRMLS_CC);
 #endif
 
+#if PHP_VERSION_ID <= 70000
     zend_declare_property_stringl(SeasClick_ce, "host", strlen("host"), "127.0.0.1", sizeof("127.0.0.1") - 1, ZEND_ACC_PROTECTED TSRMLS_CC);
     zend_declare_property_long(SeasClick_ce, "port", strlen("port"), 9000, ZEND_ACC_PROTECTED TSRMLS_CC);
     zend_declare_property_stringl(SeasClick_ce, "database", strlen("database"), "default", sizeof("default") - 1, ZEND_ACC_PROTECTED TSRMLS_CC);
@@ -133,6 +156,18 @@ PHP_MINIT_FUNCTION(SeasClick)
     zend_declare_property_long(SeasClick_ce, "retry_count", strlen("retry_count"), 1, ZEND_ACC_PROTECTED TSRMLS_CC);
     zend_declare_property_long(SeasClick_ce, "receive_timeout", strlen("receive_timeout"), 0, ZEND_ACC_PROTECTED TSRMLS_CC);
     zend_declare_property_long(SeasClick_ce, "connect_timeout", strlen("connect_timeout"), 5, ZEND_ACC_PROTECTED TSRMLS_CC);
+#else
+    zend_declare_property_stringl(SeasClick_ce, "host", strlen("host"), "127.0.0.1", sizeof("127.0.0.1") - 1, ZEND_ACC_PROTECTED);
+    zend_declare_property_long(SeasClick_ce, "port", strlen("port"), 9000, ZEND_ACC_PROTECTED);
+    zend_declare_property_stringl(SeasClick_ce, "database", strlen("database"), "default", sizeof("default") - 1, ZEND_ACC_PROTECTED);
+    zend_declare_property_null(SeasClick_ce, "user", strlen("user"), ZEND_ACC_PROTECTED);
+    zend_declare_property_null(SeasClick_ce, "passwd", strlen("passwd"), ZEND_ACC_PROTECTED);
+    zend_declare_property_bool(SeasClick_ce, "compression", strlen("compression"), false, ZEND_ACC_PROTECTED);
+    zend_declare_property_long(SeasClick_ce, "retry_timeout", strlen("retry_timeout"), 5, ZEND_ACC_PROTECTED);
+    zend_declare_property_long(SeasClick_ce, "retry_count", strlen("retry_count"), 1, ZEND_ACC_PROTECTED);
+    zend_declare_property_long(SeasClick_ce, "receive_timeout", strlen("receive_timeout"), 0, ZEND_ACC_PROTECTED);
+    zend_declare_property_long(SeasClick_ce, "connect_timeout", strlen("connect_timeout"), 5, ZEND_ACC_PROTECTED);
+#endif
 
     REGISTER_SC_CLASS_CONST_LONG("FETCH_ONE", (zend_long)SC_FETCH_ONE);
     REGISTER_SC_CLASS_CONST_LONG("FETCH_KEY_PAIR", (zend_long)SC_FETCH_KEY_PAIR);
@@ -204,43 +239,43 @@ PHP_METHOD(SEASCLICK_RES_NAME, __construct)
     if (php_array_get_value(_ht, "host", value))
     {
         convert_to_string(value);
-        zend_update_property_string(SeasClick_ce, this_obj, "host", sizeof("host") - 1, Z_STRVAL_P(value) TSRMLS_CC);
+        sc_zend_update_property_string(SeasClick_ce, this_obj, "host", sizeof("host") - 1, Z_STRVAL_P(value));
     }
 
     if (php_array_get_value(_ht, "port", value))
     {
         convert_to_long(value);
-        zend_update_property_long(SeasClick_ce, this_obj, "port", sizeof("port") - 1, Z_LVAL_P(value) TSRMLS_CC);
+        sc_zend_update_property_long(SeasClick_ce, this_obj, "port", sizeof("port") - 1, Z_LVAL_P(value));
     }
 
     if (php_array_get_value(_ht, "compression", value))
     {
         convert_to_boolean(value);
-        zend_update_property_bool(SeasClick_ce, this_obj, "compression", sizeof("compression") - 1, Z_LVAL_P(value) TSRMLS_CC);
+        sc_zend_update_property_long(SeasClick_ce, this_obj, "compression", sizeof("compression") - 1, Z_LVAL_P(value));
     }
 
     if (php_array_get_value(_ht, "retry_timeout", value))
     {
         convert_to_long(value);
-        zend_update_property_long(SeasClick_ce, this_obj, "retry_timeout", sizeof("retry_timeout") - 1, Z_LVAL_P(value) TSRMLS_CC);
+        sc_zend_update_property_long(SeasClick_ce, this_obj, "retry_timeout", sizeof("retry_timeout") - 1, Z_LVAL_P(value));
     }
 
     if (php_array_get_value(_ht, "retry_count", value))
     {
         convert_to_long(value);
-        zend_update_property_long(SeasClick_ce, this_obj, "retry_count", sizeof("retry_count") - 1, Z_LVAL_P(value) TSRMLS_CC);
+        sc_zend_update_property_long(SeasClick_ce, this_obj, "retry_count", sizeof("retry_count") - 1, Z_LVAL_P(value));
     }
 
     if (php_array_get_value(_ht, "connect_timeout", value))
     {
         convert_to_long(value);
-        zend_update_property_long(SeasClick_ce, this_obj, "connect_timeout", sizeof("connect_timeout") - 1, Z_LVAL_P(value) TSRMLS_CC);
+        sc_zend_update_property_long(SeasClick_ce, this_obj, "connect_timeout", sizeof("connect_timeout") - 1, Z_LVAL_P(value));
     }
 
     if (php_array_get_value(_ht, "receive_timeout", value))
     {
         convert_to_long(value);
-        zend_update_property_long(SeasClick_ce, this_obj, "receive_timeout", sizeof("receive_timeout") - 1, Z_LVAL_P(value) TSRMLS_CC);
+        sc_zend_update_property_long(SeasClick_ce, this_obj, "receive_timeout", sizeof("receive_timeout") - 1, Z_LVAL_P(value));
     }
 
     zval *host = sc_zend_read_property(SeasClick_ce, this_obj, "host", sizeof("host") - 1, 0);
@@ -267,21 +302,21 @@ PHP_METHOD(SEASCLICK_RES_NAME, __construct)
     if (php_array_get_value(_ht, "database", value))
     {
         convert_to_string(value);
-        zend_update_property_string(SeasClick_ce, this_obj, "database", sizeof("database") - 1, Z_STRVAL_P(value) TSRMLS_CC);
+        sc_zend_update_property_string(SeasClick_ce, this_obj, "database", sizeof("database") - 1, Z_STRVAL_P(value));
         Options = Options.SetDefaultDatabase(Z_STRVAL_P(value));
     }
 
     if (php_array_get_value(_ht, "user", value))
     {
         convert_to_string(value);
-        zend_update_property_string(SeasClick_ce, this_obj, "user", sizeof("user") - 1, Z_STRVAL_P(value) TSRMLS_CC);
+        sc_zend_update_property_string(SeasClick_ce, this_obj, "user", sizeof("user") - 1, Z_STRVAL_P(value));
         Options = Options.SetUser(Z_STRVAL_P(value));
     }
 
     if (php_array_get_value(_ht, "passwd", value))
     {
         convert_to_string(value);
-        zend_update_property_string(SeasClick_ce, this_obj, "passwd", sizeof("passwd") - 1, Z_STRVAL_P(value) TSRMLS_CC);
+        sc_zend_update_property_string(SeasClick_ce, this_obj, "passwd", sizeof("passwd") - 1, Z_STRVAL_P(value));
         Options = Options.SetPassword(Z_STRVAL_P(value));
     }
 
@@ -295,7 +330,7 @@ PHP_METHOD(SEASCLICK_RES_NAME, __construct)
     }
     catch (const std::exception& e)
     {
-        sc_zend_throw_exception(SeasClickException_ce, e.what(), 0 TSRMLS_CC);
+        sc_zend_throw_exception_tsrmls_cc(SeasClickException_ce, e.what(), 0);
     }
 
     RETURN_TRUE;
@@ -342,7 +377,7 @@ PHP_METHOD(SEASCLICK_RES_NAME, ping)
         try {
             client->Ping();
         } catch (const std::exception& e) {
-            sc_zend_throw_exception(SeasClickException_ce, e.what(), 0 TSRMLS_CC);
+            sc_zend_throw_exception_tsrmls_cc(SeasClickException_ce, e.what(), 0);
         }
 
         RETURN_TRUE;
@@ -376,6 +411,14 @@ PHP_METHOD(SEASCLICK_RES_NAME, select)
 #endif
     try
     {
+        int key = Z_OBJ_HANDLE(*getThis());
+        Client *client = clientMap.at(key);
+
+        if (clientInsertBlack.count(key))
+        {
+            throw std::runtime_error("The insert operation is now in progress");
+        }
+
         string sql_s = (string)sql;
         if (ZEND_NUM_ARGS() > 1 && params != NULL)
         {
@@ -397,9 +440,6 @@ PHP_METHOD(SEASCLICK_RES_NAME, select)
             }
             SC_HASHTABLE_FOREACH_END();
         }
-
-        int key = Z_OBJ_HANDLE(*getThis());
-        Client *client = clientMap.at(key);
 
         if (!(fetch_mode & SC_FETCH_ONE)) {
             array_init(return_value);
@@ -458,7 +498,7 @@ PHP_METHOD(SEASCLICK_RES_NAME, select)
     }
     catch (const std::exception& e)
     {
-        sc_zend_throw_exception(SeasClickException_ce, e.what(), 0 TSRMLS_CC);
+        sc_zend_throw_exception_tsrmls_cc(SeasClickException_ce, e.what(), 0);
     }
 }
 /* }}} */
@@ -493,6 +533,14 @@ PHP_METHOD(SEASCLICK_RES_NAME, insert)
 
     try
     {
+        int key = Z_OBJ_HANDLE(*getThis());
+        Client *client = clientMap.at(key);
+
+        if (clientInsertBlack.count(key))
+        {
+            throw std::runtime_error("The insert operation is now in progress");
+        }
+
         HashTable *columns_ht = Z_ARRVAL_P(columns);
         HashTable *values_ht = Z_ARRVAL_P(values);
         size_t columns_count = zend_hash_num_elements(columns_ht);
@@ -540,9 +588,6 @@ PHP_METHOD(SEASCLICK_RES_NAME, insert)
         getInsertSql(&sql, table, columns);
         Block blockQuery;
 
-        int key = Z_OBJ_HANDLE(*getThis());
-        Client *client = clientMap.at(key);
-
         client->InsertQuery(sql, [&blockQuery](const Block& block)
         {
             blockQuery = block;
@@ -560,12 +605,189 @@ PHP_METHOD(SEASCLICK_RES_NAME, insert)
         SC_HASHTABLE_FOREACH_END();
 
         client->InsertData(blockInsert);
+        client->InsertDataEnd();
         sc_zval_ptr_dtor(&return_should);
 
     }
     catch (const std::exception& e)
     {
-        sc_zend_throw_exception(SeasClickException_ce, e.what(), 0 TSRMLS_CC);
+        sc_zend_throw_exception_tsrmls_cc(SeasClickException_ce, e.what(), 0);
+    }
+    RETURN_TRUE;
+}
+/* }}} */
+
+/* {{{ proto array insert(string table, array columns, array values)
+ */
+PHP_METHOD(SEASCLICK_RES_NAME, writeStart)
+{
+    char *table = NULL;
+    size_t l_table = 0;
+    zval *columns;
+
+    string sql;
+
+#ifndef FAST_ZPP
+    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "sz", &table, &l_table, &columns) == FAILURE)
+    {
+        return;
+    }
+#else
+#undef IS_UNDEF
+#define IS_UNDEF Z_EXPECTED_LONG
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+    Z_PARAM_STRING(table, l_table)
+    Z_PARAM_ARRAY(columns)
+    ZEND_PARSE_PARAMETERS_END();
+#undef IS_UNDEF
+#define IS_UNDEF 0
+#endif
+
+    try
+    {
+        int key = Z_OBJ_HANDLE(*getThis());
+        Client *client = clientMap.at(key);
+
+        if (clientInsertBlack.count(key))
+        {
+            throw std::runtime_error("The insert operation is now in progress");
+        }
+
+        getInsertSql(&sql, table, columns);
+        Block blockQuery;
+
+        client->InsertQuery(sql, [&blockQuery](const Block& block)
+        {
+            blockQuery = block;
+        }
+                           );
+        
+        clientInsertBlack.insert(std::pair<int, Block>(key, blockQuery));
+    }
+    catch (const std::exception& e)
+    {
+        sc_zend_throw_exception_tsrmls_cc(SeasClickException_ce, e.what(), 0);
+    }
+    RETURN_TRUE;
+}
+/* }}} */
+
+/* {{{ proto array insert(string table, array columns, array values)
+ */
+PHP_METHOD(SEASCLICK_RES_NAME, write)
+{
+    zval *values;
+
+#ifndef FAST_ZPP
+    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "z", &values) == FAILURE)
+    {
+        return;
+    }
+#else
+#undef IS_UNDEF
+#define IS_UNDEF Z_EXPECTED_LONG
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+    Z_PARAM_ARRAY(values)
+    ZEND_PARSE_PARAMETERS_END();
+#undef IS_UNDEF
+#define IS_UNDEF 0
+#endif
+
+    try
+    {
+#if PHP_VERSION_ID < 70000
+        zval **first_data;
+#else
+        zval *first_data;
+#endif
+        HashTable *values_ht = Z_ARRVAL_P(values);
+        sc_zend_hash_get_current_data(values_ht, (void**) &first_data);
+        if (NULL == first_data)
+        {
+            throw std::runtime_error("The conut of data inserted is empty");
+        }
+#if PHP_VERSION_ID < 70000
+        size_t columns_count = zend_hash_num_elements(Z_ARRVAL_P(*first_data));
+#else
+        size_t columns_count = zend_hash_num_elements(Z_ARRVAL_P(first_data));
+#endif
+        zval *return_should;
+        SC_MAKE_STD_ZVAL(return_should);
+        array_init(return_should);
+
+        zval *fzval;
+        zval *pzval;
+        char *str_key;
+        uint32_t str_keylen;
+        int keytype;
+
+        zval *return_tmp;
+        for(size_t i = 0; i < columns_count; i++)
+        {
+            SC_MAKE_STD_ZVAL(return_tmp);
+            array_init(return_tmp);
+
+            SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, pzval)
+            {
+                if (Z_TYPE_P(pzval) != IS_ARRAY)
+                {
+                    throw std::runtime_error("The insert function needs to pass in a two-dimensional array");
+                }
+                fzval = sc_zend_hash_index_find(Z_ARRVAL_P(pzval), i);
+                if (NULL == fzval)
+                {
+                    throw std::runtime_error("The number of parameters inserted per line is inconsistent");
+                }
+                sc_zval_add_ref(fzval);
+                add_next_index_zval(return_tmp, fzval);
+            }
+            SC_HASHTABLE_FOREACH_END();
+
+            add_next_index_zval(return_should, return_tmp);
+        }
+
+
+        int key = Z_OBJ_HANDLE(*getThis());
+        Client *client = clientMap.at(key);
+
+        Block blockQuery = clientInsertBlack.at(key);
+
+        Block blockInsert;
+        size_t index = 0;
+
+        SC_HASHTABLE_FOREACH_START2(Z_ARRVAL_P(return_should), str_key, str_keylen, keytype, pzval)
+        {
+            zvalToBlock(blockInsert, blockQuery, index, pzval);
+            index++;
+        }
+        SC_HASHTABLE_FOREACH_END();
+
+        client->InsertData(blockInsert);
+        sc_zval_ptr_dtor(&return_should);
+    }
+    catch (const std::exception& e)
+    {
+        sc_zend_throw_exception_tsrmls_cc(SeasClickException_ce, e.what(), 0);
+    }
+    RETURN_TRUE;
+}
+/* }}} */
+
+/* {{{ proto array insert(string table, array columns, array values)
+ */
+PHP_METHOD(SEASCLICK_RES_NAME, writeEnd)
+{
+    try
+    {
+        int key = Z_OBJ_HANDLE(*getThis());
+        Client *client = clientMap.at(key);
+        clientInsertBlack.erase(key);
+
+        client->InsertDataEnd();
+    }
+    catch (const std::exception& e)
+    {
+        sc_zend_throw_exception_tsrmls_cc(SeasClickException_ce, e.what(), 0);
     }
     RETURN_TRUE;
 }
@@ -598,6 +820,14 @@ PHP_METHOD(SEASCLICK_RES_NAME, execute)
 
     try
     {
+        int key = Z_OBJ_HANDLE(*getThis());
+        Client *client = clientMap.at(key);
+
+        if (clientInsertBlack.count(key))
+        {
+            throw std::runtime_error("The insert operation is now in progress");
+        }
+
         string sql_s = (string)sql;
         if (ZEND_NUM_ARGS() > 1 && params != NULL)
         {
@@ -620,14 +850,12 @@ PHP_METHOD(SEASCLICK_RES_NAME, execute)
             SC_HASHTABLE_FOREACH_END();
         }
 
-        int key = Z_OBJ_HANDLE(*getThis());
-        Client *client = clientMap.at(key);
         client->Execute(sql_s);
 
     }
     catch (const std::exception& e)
     {
-        sc_zend_throw_exception(SeasClickException_ce, e.what(), 0 TSRMLS_CC);
+        sc_zend_throw_exception_tsrmls_cc(SeasClickException_ce, e.what(), 0);
     }
     RETURN_TRUE;
 }
@@ -643,11 +871,12 @@ PHP_METHOD(SEASCLICK_RES_NAME, __destruct)
         Client *client = clientMap.at(key);
         delete client;
         clientMap.erase(key);
+        clientInsertBlack.erase(key);
 
     }
     catch (const std::exception& e)
     {
-        sc_zend_throw_exception(SeasClickException_ce, e.what(), 0 TSRMLS_CC);
+        sc_zend_throw_exception_tsrmls_cc(SeasClickException_ce, e.what(), 0);
     }
     RETURN_TRUE;
 }
