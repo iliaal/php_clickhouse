@@ -3,6 +3,7 @@
 #include "absl/numeric/int128.h"
 
 #include <atomic>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <string>
