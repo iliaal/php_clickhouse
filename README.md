@@ -60,6 +60,10 @@ Add `extension=clickhouse.so` to your `php.ini`. The build needs a
 C++17-capable compiler (GCC 8+, Clang 7+); LZ4, ZSTD, abseil-int128,
 and CityHash are vendored under `lib/clickhouse-cpp/contrib/`.
 
+Only NTS PHP builds are supported. The extension stores Client state
+in process-global maps; under ZTS the same handle space is shared
+across worker threads, so the wrapper refuses to load.
+
 ### Test server
 
 For development and integration tests, the simplest path is the
@@ -169,6 +173,7 @@ All keys go in the array passed to `new ClickHouse([...])`.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `ssl` | bool | `false` | Enable TLS |
+| `ssl_min_protocol_version` | string | `tls1.2` | Minimum protocol; one of `tls1.0`, `tls1.1`, `tls1.2`, `tls1.3` |
 | `ssl_skip_verify` | bool | `false` | Skip cert validation; dev only |
 | `ssl_use_default_ca` | bool | `true` | Trust the system CA bundle |
 | `ssl_ca_files` | string \| array | (none) | PEM CA file path(s) |

@@ -791,7 +791,12 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
 
     case Type::Code::Tuple:
     {
-        size_t values_count = zend_hash_num_elements(values_ht);
+        // Build one transposed list per tuple field (arity), iterating
+        // every input row to pull row[field]. The previous version
+        // looped by row count instead of arity, so multi-row tuple
+        // inserts walked off the end of tupleType when rowcount != arity.
+        auto tupleType = type->As<TupleType>()->GetTupleType();
+        size_t arity = tupleType.size();
 
         zval *return_should;
         SC_MAKE_STD_ZVAL(return_should);
@@ -801,7 +806,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         zval *pzval;
 
         zval *return_tmp;
-        for(size_t i = 0; i < values_count; i++)
+        for (size_t field = 0; field < arity; field++)
         {
             SC_MAKE_STD_ZVAL(return_tmp);
             array_init(return_tmp);
@@ -810,12 +815,17 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
             {
                 if (Z_TYPE_P(pzval) != IS_ARRAY)
                 {
-                    throw std::runtime_error("The insert function needs to pass in a two-dimensional array");
+                    throw std::runtime_error("Tuple row must be a PHP array");
                 }
-                fzval = sc_zend_hash_index_find(Z_ARRVAL_P(pzval), i);
+                if (zend_hash_num_elements(Z_ARRVAL_P(pzval)) != arity) {
+                    throw std::runtime_error(
+                        "Tuple row arity does not match the column type");
+                }
+                fzval = sc_zend_hash_index_find(Z_ARRVAL_P(pzval), field);
                 if (NULL == fzval)
                 {
-                    throw std::runtime_error("The number of parameters inserted per line is inconsistent");
+                    throw std::runtime_error(
+                        "Tuple row is missing a field value");
                 }
                 sc_zval_add_ref(fzval);
                 add_next_index_zval(return_tmp, fzval);
@@ -825,11 +835,8 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
             add_next_index_zval(return_should, return_tmp);
         }
 
-        auto tupleType = type->As<TupleType>()->GetTupleType();
-        
         std::vector<ColumnRef> columns;
-
-        int tupleTypeIndex = 0;
+        size_t tupleTypeIndex = 0;
 
         SC_HASHTABLE_FOREACH_START2(Z_ARRVAL_P(return_should), str_key, str_keylen, keytype, array_value)
         {
@@ -846,7 +853,6 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         sc_zval_ptr_dtor(&return_should);
 
         return std::make_shared<ColumnTuple>(columns);
-        break;
     }
 
     case Type::Code::LowCardinality:
@@ -987,11 +993,15 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     throw std::runtime_error("insertColumn runtime error.");
 }
 
+// Cast through (zend_long) so signed types (Int8..Int64) keep their
+// sign on the way into PHP, instead of getting reinterpreted as huge
+// unsigned values. Unsigned types up to UINT64_MAX preserve their bit
+// pattern either way; PHP integers are signed 64-bit regardless.
 #define SC_SINGLE_LONG()  \
     if (fetch_mode & SC_FETCH_ONE) { \
-        ZVAL_LONG(arr, (zend_ulong)col); \
+        ZVAL_LONG(arr, (zend_long)col); \
     } else { \
-        sc_add_assoc_long_ex(arr, column_name.c_str(), column_name.length(), (zend_ulong)col); \
+        sc_add_assoc_long_ex(arr, column_name.c_str(), column_name.length(), (zend_long)col); \
     }
 
 #define SC_SINGLE_DOUBLE(val)  \
@@ -1285,7 +1295,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
                 if (fetch_mode & SC_FETCH_ONE) {
                     ZVAL_LONG(arr, (long)col->As<ColumnDateTime>()->At(row));
                 } else {
-                    sc_add_assoc_long_ex(arr, column_name.c_str(), column_name.length(), (zend_ulong)col->As<ColumnDateTime>()->At(row));
+                    sc_add_assoc_long_ex(arr, column_name.c_str(), column_name.length(), (zend_long)col->As<ColumnDateTime>()->At(row));
                 }
             }
         }
@@ -1321,7 +1331,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
             } else if (fetch_mode & SC_FETCH_ONE) {
                 ZVAL_LONG(arr, (long)raw);
             } else {
-                sc_add_assoc_long_ex(arr, column_name.c_str(), column_name.length(), (zend_ulong)raw);
+                sc_add_assoc_long_ex(arr, column_name.c_str(), column_name.length(), (zend_long)raw);
             }
         }
         break;
@@ -1365,7 +1375,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
                 if (fetch_mode & SC_FETCH_ONE) {
                     ZVAL_LONG(arr, (long)col->As<ColumnDate>()->At(row));
                 } else {
-                    sc_add_assoc_long_ex(arr, column_name.c_str(), column_name.length(), (zend_ulong)col->As<ColumnDate>()->At(row));
+                    sc_add_assoc_long_ex(arr, column_name.c_str(), column_name.length(), (zend_long)col->As<ColumnDate>()->At(row));
                 }
             }
         }
@@ -1453,7 +1463,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
             } else if (fetch_mode & SC_FETCH_ONE) {
                 ZVAL_LONG(arr, (long)raw);
             } else {
-                sc_add_assoc_long_ex(arr, column_name.c_str(), column_name.length(), (zend_ulong)raw);
+                sc_add_assoc_long_ex(arr, column_name.c_str(), column_name.length(), (zend_long)raw);
             }
         }
         break;
