@@ -2,9 +2,9 @@
 /**
  * php_clickhouse benchmark.
  *
- * Compares this extension (with and without LZ4 compression) against:
- *   - smi2/phpClickHouse — pure-PHP HTTP client (https://github.com/smi2/phpClickHouse)
- *   - lizhichao/one-ck   — pure-PHP TCP client
+ * Compares this extension (with and without LZ4 compression) against
+ * smi2/phpClickHouse, a pure-PHP HTTP client
+ * (https://github.com/smi2/phpClickHouse).
  *
  * Originally written by ahhhh.wang@gmail.com for SeasClick. Updated for
  * php_clickhouse (PHP 8.4 + clickhouse-cpp v2.6.1).
@@ -15,8 +15,6 @@
  */
 
 require_once __DIR__ . '/vendor/autoload.php';
-
-use OneCk\Client as OneCkClient;
 
 $HOST   = getenv('CLICKHOUSE_HOST') ?: 'clickhouse';
 $TCP    = (int)(getenv('CLICKHOUSE_PORT') ?: '9000');
@@ -42,8 +40,7 @@ $total = 0;
 
 foreach ($testDataSet as $value) {
     [$dataCount, $selectCount, $limit] = $value;
-    $insertData      = initData($dataCount);
-    $insertOneCkData = initOneCkData($dataCount);
+    $insertData = initData($dataCount);
 
     echo "\n##### dataCount: {$dataCount}, selectCount: {$selectCount}, limit: {$limit} #####\n";
 
@@ -59,9 +56,6 @@ foreach ($testDataSet as $value) {
 
     testClickhouseZstd($insertData, $selectCount, $limit, $HOST, $TCP, $USER, $PASSWD);
     $t = end_test($t, 'php_clickhouse (ZSTD)');
-
-    testOneCk($insertOneCkData, $selectCount, $limit, $HOST, $TCP, $USER, $PASSWD);
-    $t = end_test($t, 'one-ck');
 
     total($t0);
 }
@@ -189,48 +183,6 @@ function testPhpClickhouse($insertData, $num, $limit, $host, $port, $user, $pass
         $db->select('SELECT * FROM summing_url_views LIMIT ' . $limit)->rows();
     }
     $db->write('DROP TABLE summing_url_views');
-}
-
-function testOneCk($insertData, $num, $limit, $host, $port, $user, $pass) {
-    $userp = $user !== '' ? $user : 'default';
-    $db = new OneCkClient("tcp://{$host}:{$port}", $userp, $pass, '');
-    $db->query('CREATE DATABASE IF NOT EXISTS test');
-    $db->query('DROP TABLE IF EXISTS summing_url_views');
-    $db->query('
-        CREATE TABLE summing_url_views (
-            event_date Date DEFAULT toDate(event_time),
-            event_time DateTime,
-            site_id    Int32,
-            site_key   String,
-            views      Int32,
-            v_00       Int32,
-            v_55       Int32
-        )
-        ENGINE = SummingMergeTree
-        ORDER BY (site_id, site_key, event_time, event_date)
-        PARTITION BY event_date
-        SETTINGS index_granularity = 8192
-    ');
-    $db->insert('summing_url_views', $insertData);
-    for ($a = 0; $a < $num; $a++) {
-        $db->query('SELECT * FROM summing_url_views LIMIT ' . $limit);
-    }
-    $db->query('DROP TABLE summing_url_views');
-}
-
-function initOneCkData($num) {
-    $rows = [];
-    while ($num--) {
-        $rows[] = [
-            'event_time' => time(),
-            'site_key'   => 'HASH2',
-            'site_id'    => 2345,
-            'views'      => 12,
-            'v_00'       => 9,
-            'v_55'       => 3,
-        ];
-    }
-    return $rows;
 }
 
 function initData($num) {

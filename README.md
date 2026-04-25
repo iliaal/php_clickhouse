@@ -13,7 +13,7 @@ and optional TLS.
 ## Status
 
 Soft fork of [SeasX/SeasClick](https://github.com/SeasX/SeasClick), which
-appears unmaintained — the last accepted external PR there is from 2020
+appears unmaintained. The last accepted external PR there is from 2020,
 and several follow-up PRs have been pending for years. This fork:
 
 - Renames the extension to `php_clickhouse` (module `clickhouse`,
@@ -108,14 +108,14 @@ foreach ($ch->select("SELECT id, ts, tag FROM events ORDER BY id",
 
 * `Array(T)` (single-level)
 * `Date`, `Date32`, `DateTime`, `DateTime64(N[, timezone])`
-* `Time`, `Time64(N)` — server side requires ClickHouse 25.x or later
+* `Time`, `Time64(N)` (server side requires ClickHouse 25.x or later)
 * `Decimal`, `Decimal32`, `Decimal64`, `Decimal128(P, S)` (read/write
   as scaled-integer strings)
 * `Enum8`, `Enum16`
 * `FixedString(N)`
 * `Float32`, `Float64`
 * `Int8` … `Int64`, `UInt8` … `UInt64`
-* `Int128`, `UInt128` (round-trip as decimal strings — PHP integers
+* `Int128`, `UInt128` (round-trip as decimal strings; PHP integers
   are 64-bit)
 * `IPv4`, `IPv6`
 * `LowCardinality(String)`, `LowCardinality(FixedString(N))`
@@ -140,7 +140,7 @@ All keys go in the array passed to `new ClickHouse([...])`.
 | `database` | string | `default` | Default database |
 | `user` | string | `default` | Username |
 | `passwd` | string | (empty) | Password |
-| `endpoints` | array | — | List of `[{host, port}, ...]` for round-robin failover. Tried in order on connect failure. |
+| `endpoints` | array | (none) | List of `[{host, port}, ...]` for round-robin failover. Tried in order on connect failure. |
 
 ### Compression
 
@@ -169,14 +169,13 @@ All keys go in the array passed to `new ClickHouse([...])`.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `ssl` | bool | `false` | Enable TLS |
-| `ssl_skip_verify` | bool | `false` | Skip cert validation. **Dev only.** |
+| `ssl_skip_verify` | bool | `false` | Skip cert validation; dev only |
 | `ssl_use_default_ca` | bool | `true` | Trust the system CA bundle |
-| `ssl_ca_files` | string \| array | — | PEM CA file path(s) |
-| `ssl_ca_directory` | string | — | OpenSSL hashed-cert directory |
+| `ssl_ca_files` | string \| array | (none) | PEM CA file path(s) |
+| `ssl_ca_directory` | string | (none) | OpenSSL hashed-cert directory |
 
 Building without `--enable-clickhouse-openssl` and passing
-`ssl => true` raises `ClickHouseException`; misconfiguration is loud,
-not silent.
+`ssl => true` raises `ClickHouseException` at construct time.
 
 ## Methods
 
@@ -214,34 +213,30 @@ $ch->ping();          // returns true on success, throws on failure
 PHP 8.4.22 / ClickHouse 26.3.9.8 / localhost loopback / `Memory` table
 (no disk).
 
-Compared against:
-
-- [smi2/phpClickHouse](https://github.com/smi2/phpClickHouse) — pure-PHP
-  HTTP client, the most popular pure-PHP option
-- [lizhichao/one-ck](https://github.com/lizhichao/one-ck) — pure-PHP
-  TCP client
+Compared against
+[smi2/phpClickHouse](https://github.com/smi2/phpClickHouse), the
+most popular pure-PHP HTTP client.
 
 Each cell is total wall-clock seconds for `selectCount` queries plus
 a single bulk insert of `dataCount` rows.
 
-| dataCount × selectCount × limit | phpClickHouse (HTTP) | php_clickhouse (uncompressed) | php_clickhouse (LZ4) | php_clickhouse (ZSTD) | one-ck |
-|---|---:|---:|---:|---:|---:|
-| 10000 × 1 × 5000   | 0.112 | 0.085 | 0.074 | 0.023 | 0.030 |
-| 10000 × 1 × 5000   | 0.104 | 0.030 | 0.024 | 0.081 | 0.083 |
-| 10000 × 100 × 5000  | 0.298 | 0.263 | 0.209 | 0.218 | 0.217 |
-| 10000 × 100 × 10000 | 0.303 | 0.210 | 0.265 | 0.215 | 0.218 |
-| 1000 × 200 × 500   | 0.558 | 0.416 | 0.415 | 0.413 | 0.388 |
-| 1000 × 200 × 1000  | 0.611 | 0.408 | 0.410 | 0.395 | 0.394 |
-| 1000 × 500 × 500   | 1.428 | 1.063 | 0.976 | 0.982 | 0.943 |
-| 1000 × 500 × 1000  | 1.383 | 0.959 | 1.025 | 1.030 | 0.973 |
-| 1000 × 800 × 500   | 2.477 | 1.533 | 1.569 | 1.543 | 1.518 |
-| 1000 × 800 × 1000  | 2.498 | 1.588 | 1.563 | 1.519 | 1.497 |
+| dataCount × selectCount × limit | phpClickHouse (HTTP) | php_clickhouse (uncompressed) | php_clickhouse (LZ4) | php_clickhouse (ZSTD) |
+|---|---:|---:|---:|---:|
+| 10000 × 1 × 5000   | 0.112 | 0.085 | 0.074 | 0.023 |
+| 10000 × 1 × 5000   | 0.104 | 0.030 | 0.024 | 0.081 |
+| 10000 × 100 × 5000  | 0.298 | 0.263 | 0.209 | 0.218 |
+| 10000 × 100 × 10000 | 0.303 | 0.210 | 0.265 | 0.215 |
+| 1000 × 200 × 500   | 0.558 | 0.416 | 0.415 | 0.413 |
+| 1000 × 200 × 1000  | 0.611 | 0.408 | 0.410 | 0.395 |
+| 1000 × 500 × 500   | 1.428 | 1.063 | 0.976 | 0.982 |
+| 1000 × 500 × 1000  | 1.383 | 0.959 | 1.025 | 1.030 |
+| 1000 × 800 × 500   | 2.477 | 1.533 | 1.569 | 1.543 |
+| 1000 × 800 × 1000  | 2.498 | 1.588 | 1.563 | 1.519 |
 
-Across the board, the native binary protocol (`php_clickhouse`,
-`one-ck`) is ~30-40% faster than the HTTP client at high select
-counts, and roughly equivalent to one-ck. For small bursts
-(`dataCount=10000, selectCount=1`), php_clickhouse with ZSTD or LZ4 is
-the fastest of the four. To reproduce, see [`bench/`](bench/).
+At high select counts the native binary protocol runs 30-40% faster
+than the HTTP client. On small bursts (`dataCount=10000,
+selectCount=1`), php_clickhouse with ZSTD or LZ4 is fastest. To
+reproduce, see [`bench/`](bench/).
 
 ## License
 

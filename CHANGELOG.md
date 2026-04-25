@@ -61,8 +61,7 @@ own way.
 - README documents installation via [PIE](https://github.com/php/pie),
   a Docker recipe for a local ClickHouse server, the full configuration
   surface, and a benchmark table comparing against
-  [smi2/phpClickHouse](https://github.com/smi2/phpClickHouse) and
-  [lizhichao/one-ck](https://github.com/lizhichao/one-ck).
+  [smi2/phpClickHouse](https://github.com/smi2/phpClickHouse).
 
 ### Changed
 

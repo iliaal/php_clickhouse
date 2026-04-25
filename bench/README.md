@@ -1,15 +1,14 @@
 # php_clickhouse benchmarks
 
-Compares `php_clickhouse` (LZ4, ZSTD, uncompressed) against:
-
-- [smi2/phpClickHouse](https://github.com/smi2/phpClickHouse) — pure-PHP HTTP client
-- [lizhichao/one-ck](https://github.com/lizhichao/one-ck) — pure-PHP TCP client
+Compares `php_clickhouse` (LZ4, ZSTD, uncompressed) against
+[smi2/phpClickHouse](https://github.com/smi2/phpClickHouse), a
+pure-PHP HTTP client.
 
 ## Run
 
 ```sh
 cd bench
-composer update --no-dev          # installs phpClickHouse + one-ck
+composer update --no-dev          # installs phpClickHouse
 CLICKHOUSE_HOST=127.0.0.1 \
 CLICKHOUSE_PORT=9000 \
 CLICKHOUSE_HTTP_PORT=8123 \
