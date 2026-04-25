@@ -33,6 +33,7 @@ extern "C" {
 #include "lib/clickhouse-cpp/clickhouse/types/type_parser.h"
 #include "lib/clickhouse-cpp/clickhouse/columns/factory.h"
 #include "lib/clickhouse-cpp/clickhouse/columns/lowcardinality.h"
+#include "lib/clickhouse-cpp/clickhouse/columns/map.h"
 #include <iostream>
 #include <map>
 #include <sstream>
@@ -165,6 +166,14 @@ ColumnRef createColumn(TypeRef type)
 
     case Type::Code::Map:
     {
+        TypeRef key_type = type->As<MapType>()->GetKeyType();
+        TypeRef value_type = type->As<MapType>()->GetValueType();
+        if (key_type->GetCode() == Type::Code::String &&
+            value_type->GetCode() == Type::Code::String) {
+            return std::make_shared<ColumnMapT<ColumnString, ColumnString>>(
+                std::make_shared<ColumnString>(),
+                std::make_shared<ColumnString>());
+        }
         return CreateColumnByType(type->GetName());
     }
 
@@ -671,6 +680,46 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         throw std::runtime_error("LowCardinality only supported over String / FixedString");
     }
 
+    case Type::Code::Map:
+    {
+        TypeRef key_type = type->As<MapType>()->GetKeyType();
+        TypeRef value_type = type->As<MapType>()->GetValueType();
+        if (key_type->GetCode() != Type::Code::String ||
+            value_type->GetCode() != Type::Code::String) {
+            throw std::runtime_error("Map row write currently only supports Map(String, String)");
+        }
+        auto col = std::make_shared<ColumnMapT<ColumnString, ColumnString>>(
+            std::make_shared<ColumnString>(),
+            std::make_shared<ColumnString>());
+
+        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
+        {
+            if (Z_TYPE_P(array_value) != IS_ARRAY) {
+                throw std::runtime_error("Map row must be a PHP array");
+            }
+            std::vector<std::pair<std::string, std::string>> entries;
+            HashTable *map_ht = Z_ARRVAL_P(array_value);
+            zval *map_val;
+            char *map_key;
+            uint32_t map_keylen;
+            int map_keytype;
+            SC_HASHTABLE_FOREACH_START2(map_ht, map_key, map_keylen, map_keytype, map_val)
+            {
+                if (map_key == NULL) {
+                    continue;
+                }
+                std::string k_str(map_key, map_keylen);
+                convert_to_string(map_val);
+                entries.emplace_back(std::move(k_str),
+                                     std::string(Z_STRVAL_P(map_val), Z_STRLEN_P(map_val)));
+            }
+            SC_HASHTABLE_FOREACH_END();
+            col->Append(entries);
+        }
+        SC_HASHTABLE_FOREACH_END();
+        return col;
+    }
+
     case Type::Code::Void:
     {
         throw std::runtime_error("can't support Void");
@@ -1140,6 +1189,41 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
             sc_add_next_index_stringl(arr, (char*)sv.data(), sv.length(), 1);
         } else {
             SC_SINGLE_STRING((char*)sv.data(), sv.length());
+        }
+        break;
+    }
+
+    case Type::Code::Map:
+    {
+        TypeRef map_type = columnRef->Type();
+        TypeRef key_type = map_type->As<MapType>()->GetKeyType();
+        TypeRef value_type = map_type->As<MapType>()->GetValueType();
+        if (key_type->GetCode() != Type::Code::String ||
+            value_type->GetCode() != Type::Code::String) {
+            throw std::runtime_error("Map row read currently only supports Map(String, String)");
+        }
+        auto map_col = columnRef->As<ColumnMap>();
+        ColumnRef tuple_col = map_col->GetAsColumn(row);
+        auto tup = tuple_col->As<ColumnTuple>();
+        auto keys_col = (*tup)[0]->As<ColumnString>();
+        auto values_col = (*tup)[1]->As<ColumnString>();
+        size_t entry_count = keys_col->Size();
+        zval *map_zv;
+        SC_MAKE_STD_ZVAL(map_zv);
+        array_init(map_zv);
+        for (size_t i = 0; i < entry_count; ++i) {
+            std::string_view k = (*keys_col)[i];
+            std::string_view v = (*values_col)[i];
+            std::string key_buf(k.data(), k.length());
+            sc_add_assoc_stringl_ex(map_zv, key_buf.c_str(), key_buf.length(),
+                                    (char*)v.data(), v.length(), 1);
+        }
+        if (is_array) {
+            add_next_index_zval(arr, map_zv);
+        } else if (fetch_mode & SC_FETCH_ONE) {
+            ZVAL_COPY_VALUE(arr, map_zv);
+        } else {
+            sc_add_assoc_zval_ex(arr, column_name.c_str(), column_name.length(), map_zv);
         }
         break;
     }
