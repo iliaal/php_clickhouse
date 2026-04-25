@@ -140,6 +140,19 @@ const zend_function_entry clickhouse_methods[] =
  */
 PHP_MINIT_FUNCTION(clickhouse)
 {
+#ifdef ZTS
+    // The wrapper keeps Client and in-progress Block state in process-
+    // global maps keyed on Z_OBJ_HANDLE. Under ZTS the same handle space
+    // is shared across worker threads, so two requests can race or
+    // cross-wire each other's clients. Refusing to load is safer than
+    // shipping a quiet thread-safety bug; if you genuinely need ZTS, the
+    // state needs to move into per-thread storage first.
+    php_error(E_CORE_ERROR,
+        "php_clickhouse: ZTS PHP builds are not supported. "
+        "Rebuild PHP with --disable-zts or use the NTS variant.");
+    return FAILURE;
+#endif
+
     zend_class_entry ce_main, ce_exception;
     INIT_CLASS_ENTRY(ce_main, CLICKHOUSE_RES_NAME, clickhouse_methods);
     INIT_CLASS_ENTRY(ce_exception, CLICKHOUSE_EXCEPTION_NAME, NULL);
@@ -156,7 +169,8 @@ PHP_MINIT_FUNCTION(clickhouse)
     zend_declare_property_long(clickhouse_ce, "port", strlen("port"), 9000, ZEND_ACC_PROTECTED);
     zend_declare_property_stringl(clickhouse_ce, "database", strlen("database"), "default", sizeof("default") - 1, ZEND_ACC_PROTECTED);
     zend_declare_property_null(clickhouse_ce, "user", strlen("user"), ZEND_ACC_PROTECTED);
-    zend_declare_property_null(clickhouse_ce, "passwd", strlen("passwd"), ZEND_ACC_PROTECTED);
+    /* No "passwd" property: keeping the secret out of get_object_vars,
+     * var_dump, serialize, and reflection by simply not storing it. */
     zend_declare_property_bool(clickhouse_ce, "compression", strlen("compression"), false, ZEND_ACC_PROTECTED);
     zend_declare_property_long(clickhouse_ce, "retry_timeout", strlen("retry_timeout"), 5, ZEND_ACC_PROTECTED);
     zend_declare_property_long(clickhouse_ce, "retry_count", strlen("retry_count"), 1, ZEND_ACC_PROTECTED);
@@ -354,6 +368,25 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, __construct)
     }
     if (want_ssl) {
         ClientOptions::SSLOptions ssl_opts;
+        // Default to TLS 1.2 minimum so a server speaking only 1.0 / 1.1
+        // is rejected without the caller having to remember to set this.
+        // Caller can override via ssl_min_protocol_version.
+        ssl_opts.SetMinProtocolVersion(0x0303);
+        if (php_array_get_value(_ht, "ssl_min_protocol_version", value)) {
+            convert_to_string(value);
+            const char *s = Z_STRVAL_P(value);
+            int ver = 0;
+            if (strcasecmp(s, "tls1.0") == 0)      ver = 0x0301;
+            else if (strcasecmp(s, "tls1.1") == 0) ver = 0x0302;
+            else if (strcasecmp(s, "tls1.2") == 0) ver = 0x0303;
+            else if (strcasecmp(s, "tls1.3") == 0) ver = 0x0304;
+            else {
+                sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                    "ssl_min_protocol_version must be one of tls1.0, tls1.1, tls1.2, tls1.3", 0);
+                return;
+            }
+            ssl_opts.SetMinProtocolVersion(ver);
+        }
         if (php_array_get_value(_ht, "ssl_skip_verify", value)) {
             convert_to_boolean(value);
             ssl_opts.SetSkipVerification(Z_LVAL_P(value) != 0);
@@ -439,7 +472,6 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, __construct)
     if (php_array_get_value(_ht, "passwd", value))
     {
         convert_to_string(value);
-        sc_zend_update_property_string(clickhouse_ce, this_obj, "passwd", sizeof("passwd") - 1, Z_STRVAL_P(value));
         Options = Options.SetPassword(Z_STRVAL_P(value));
     }
 
@@ -722,10 +754,15 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, select)
         }
 
         std::string qid = (query_id && l_query_id > 0) ? std::string(query_id, l_query_id) : std::string();
-        auto select_cb = [return_value, fetch_mode](const Block &block) {
+        // Track whether FETCH_ONE has already emitted a row, so a multi-
+        // block result returns the very first row and not the first row
+        // of the last block.
+        bool fetched_one = false;
+        auto select_cb = [return_value, fetch_mode, &fetched_one](const Block &block) {
             if (fetch_mode & SC_FETCH_ONE) {
-                if (block.GetRowCount() > 0 && block.GetColumnCount() > 0) {
+                if (!fetched_one && block.GetRowCount() > 0 && block.GetColumnCount() > 0) {
                     convertToZval(return_value, block[0], 0, "", 0, fetch_mode);
+                    fetched_one = true;
                 }
                 return;
             }
