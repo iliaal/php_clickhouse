@@ -37,7 +37,7 @@ function testFloat($client, $deleteTable = false) {
     ]);
     $client->writeEnd();
     
-    $result = $client->select("SELECT {select} FROM {table}", [
+    $result = $client->select("SELECT {select} FROM {table} ORDER BY float64_c DESC, float32_c DESC", [
         'select' => 'float32_c, float64_c',
         'table' => 'test.float_test'
     ]);
@@ -56,16 +56,16 @@ array(4) {
   [0]=>
   array(2) {
     ["float32_c"]=>
-    float(32.32)
+    float(32.31)
     ["float64_c"]=>
-    float(64.64)
+    float(64.68)
   }
   [1]=>
   array(2) {
     ["float32_c"]=>
-    float(32.31)
+    float(32.32)
     ["float64_c"]=>
-    float(64.68)
+    float(64.64)
   }
   [2]=>
   array(2) {

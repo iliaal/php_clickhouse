@@ -39,6 +39,8 @@ jobs:
         with:
           php-version: ${{ matrix.php }}
           tools: phpize, php-config
+          extensions: none, dom, xml, simplexml, tokenizer
+          coverage: none
 
       - name: Install OpenSSL dev (TLS build path)
         run: sudo apt-get update -qq && sudo apt-get install -y libssl-dev
