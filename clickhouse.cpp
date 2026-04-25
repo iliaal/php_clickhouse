@@ -34,7 +34,6 @@ extern "C" {
 #include "lib/clickhouse-cpp/clickhouse/error_codes.h"
 #include "lib/clickhouse-cpp/clickhouse/types/type_parser.h"
 #include "typesToPhp.hpp"
-#include <iostream>
 #include <map>
 #include <sstream>
 
@@ -43,7 +42,7 @@ using namespace std;
 
 zend_class_entry *clickhouse_ce, *clickhouse_exception_ce;
 map<int, Client*> clientMap;
-map<int, Block> clientInsertBlack;
+map<int, Block> clientInsertBlock;
 
 static std::string sanitizeError(const char *what);
 
@@ -52,11 +51,6 @@ extern "C" {
     ZEND_GET_MODULE(clickhouse)
 }
 #endif
-
-// PHP_FUNCTION(clickhouse_version)
-// {
-//     SC_RETURN_STRINGL(PHP_CLICKHOUSE_VERSION, strlen(PHP_CLICKHOUSE_VERSION));
-// }
 
 static PHP_METHOD(CLICKHOUSE_RES_NAME, __construct);
 static PHP_METHOD(CLICKHOUSE_RES_NAME, __destruct);
@@ -114,7 +108,6 @@ ZEND_END_ARG_INFO()
 /* {{{ clickhouse_functions[] */
 const zend_function_entry clickhouse_functions[] =
 {
-    //PHP_FE(clickhouse_version,	NULL)
     PHP_FE_END
 };
 /* }}} */
@@ -224,20 +217,10 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, __construct)
 {
     zval *connectParams;
 
-#ifndef FAST_ZPP
     if (zend_parse_parameters(ZEND_NUM_ARGS(), "z", &connectParams) == FAILURE)
     {
         return;
     }
-#else
-#undef IS_UNDEF
-#define IS_UNDEF Z_EXPECTED_LONG
-    ZEND_PARSE_PARAMETERS_START(1, 1)
-    Z_PARAM_ARRAY(connectParams)
-    ZEND_PARSE_PARAMETERS_END();
-#undef IS_UNDEF
-#define IS_UNDEF 0
-#endif
 
     HashTable *_ht = Z_ARRVAL_P(connectParams);
     zval *value;
@@ -710,30 +693,16 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, select)
     char *query_id = NULL;
     size_t l_query_id = 0;
 
-#ifndef FAST_ZPP
     if (zend_parse_parameters(ZEND_NUM_ARGS(), "s|zls", &sql, &l_sql, &params, &fetch_mode, &query_id, &l_query_id) == FAILURE)
     {
         return;
     }
-#else
-#undef IS_UNDEF
-#define IS_UNDEF Z_EXPECTED_LONG
-    ZEND_PARSE_PARAMETERS_START(1, 4)
-    Z_PARAM_STRING(sql, l_sql)
-    Z_PARAM_OPTIONAL
-    Z_PARAM_ARRAY(params)
-    Z_PARAM_LONG(fetch_mode)
-    Z_PARAM_STRING(query_id, l_query_id)
-    ZEND_PARSE_PARAMETERS_END();
-#undef IS_UNDEF
-#define IS_UNDEF 0
-#endif
     try
     {
         int key = Z_OBJ_HANDLE(*getThis());
         Client *client = getClient(key);
 
-        if (clientInsertBlack.count(key))
+        if (clientInsertBlock.count(key))
         {
             throw std::runtime_error("The insert operation is now in progress");
         }
@@ -835,24 +804,10 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, insert)
 
     string sql;
 
-#ifndef FAST_ZPP
     if (zend_parse_parameters(ZEND_NUM_ARGS(), "szz|s", &table, &l_table, &columns, &values, &query_id, &l_query_id) == FAILURE)
     {
         return;
     }
-#else
-#undef IS_UNDEF
-#define IS_UNDEF Z_EXPECTED_LONG
-    ZEND_PARSE_PARAMETERS_START(3, 4)
-    Z_PARAM_STRING(table, l_table)
-    Z_PARAM_ARRAY(columns)
-    Z_PARAM_ARRAY(values)
-    Z_PARAM_OPTIONAL
-    Z_PARAM_STRING(query_id, l_query_id)
-    ZEND_PARSE_PARAMETERS_END();
-#undef IS_UNDEF
-#define IS_UNDEF 0
-#endif
 
     // Storage for return_should lives in the function frame so that an
     // exception thrown by BeginInsert / SendInsertBlock / EndInsert can
@@ -867,7 +822,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, insert)
         int key = Z_OBJ_HANDLE(*getThis());
         Client *client = getClient(key);
 
-        if (clientInsertBlack.count(key))
+        if (clientInsertBlock.count(key))
         {
             throw std::runtime_error("The insert operation is now in progress");
         }
@@ -961,30 +916,17 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, writeStart)
 
     string sql;
 
-#ifndef FAST_ZPP
     if (zend_parse_parameters(ZEND_NUM_ARGS(), "sz|s", &table, &l_table, &columns, &query_id, &l_query_id) == FAILURE)
     {
         return;
     }
-#else
-#undef IS_UNDEF
-#define IS_UNDEF Z_EXPECTED_LONG
-    ZEND_PARSE_PARAMETERS_START(2, 3)
-    Z_PARAM_STRING(table, l_table)
-    Z_PARAM_ARRAY(columns)
-    Z_PARAM_OPTIONAL
-    Z_PARAM_STRING(query_id, l_query_id)
-    ZEND_PARSE_PARAMETERS_END();
-#undef IS_UNDEF
-#define IS_UNDEF 0
-#endif
 
     try
     {
         int key = Z_OBJ_HANDLE(*getThis());
         Client *client = getClient(key);
 
-        if (clientInsertBlack.count(key))
+        if (clientInsertBlock.count(key))
         {
             throw std::runtime_error("The insert operation is now in progress");
         }
@@ -995,7 +937,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, writeStart)
             ? client->BeginInsert(sql, std::string(query_id, l_query_id))
             : client->BeginInsert(sql);
 
-        clientInsertBlack.insert(std::pair<int, Block>(key, blockQuery));
+        clientInsertBlock.insert(std::pair<int, Block>(key, blockQuery));
     }
     catch (const std::exception& e)
     {
@@ -1011,20 +953,10 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, write)
 {
     zval *values;
 
-#ifndef FAST_ZPP
     if (zend_parse_parameters(ZEND_NUM_ARGS(), "z", &values) == FAILURE)
     {
         return;
     }
-#else
-#undef IS_UNDEF
-#define IS_UNDEF Z_EXPECTED_LONG
-    ZEND_PARSE_PARAMETERS_START(1, 1)
-    Z_PARAM_ARRAY(values)
-    ZEND_PARSE_PARAMETERS_END();
-#undef IS_UNDEF
-#define IS_UNDEF 0
-#endif
 
     zval _return_should_storage;
     zval *return_should = NULL;
@@ -1078,8 +1010,8 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, write)
         int key = Z_OBJ_HANDLE(*getThis());
         Client *client = getClient(key);
 
-        auto blockIt = clientInsertBlack.find(key);
-        if (blockIt == clientInsertBlack.end()) {
+        auto blockIt = clientInsertBlock.find(key);
+        if (blockIt == clientInsertBlock.end()) {
             throw std::runtime_error("write() called without a matching writeStart()");
         }
         Block &blockQuery = blockIt->second;
@@ -1120,12 +1052,12 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, writeEnd)
     {
         int key = Z_OBJ_HANDLE(*getThis());
         Client *client = getClient(key);
-        if (!clientInsertBlack.count(key)) {
+        if (!clientInsertBlock.count(key)) {
             throw std::runtime_error("writeEnd() called without a matching writeStart()");
         }
 
         client->EndInsert();
-        clientInsertBlack.erase(key);
+        clientInsertBlock.erase(key);
     }
     catch (const std::exception& e)
     {
@@ -1146,30 +1078,17 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, execute)
     char *query_id = NULL;
     size_t l_query_id = 0;
 
-#ifndef FAST_ZPP
     if (zend_parse_parameters(ZEND_NUM_ARGS(), "s|zs", &sql, &l_sql, &params, &query_id, &l_query_id) == FAILURE)
     {
         return;
     }
-#else
-#undef IS_UNDEF
-#define IS_UNDEF Z_EXPECTED_LONG
-    ZEND_PARSE_PARAMETERS_START(1, 3)
-    Z_PARAM_STRING(sql, l_sql)
-    Z_PARAM_OPTIONAL
-    Z_PARAM_ARRAY(params)
-    Z_PARAM_STRING(query_id, l_query_id)
-    ZEND_PARSE_PARAMETERS_END();
-#undef IS_UNDEF
-#define IS_UNDEF 0
-#endif
 
     try
     {
         int key = Z_OBJ_HANDLE(*getThis());
         Client *client = getClient(key);
 
-        if (clientInsertBlack.count(key))
+        if (clientInsertBlock.count(key))
         {
             throw std::runtime_error("The insert operation is now in progress");
         }
@@ -1215,9 +1134,9 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, __destruct)
     // If a script left writeStart()/write() pending without writeEnd(),
     // close the insert stream first so the server doesn't see a half-open
     // transaction. Swallow errors — destructors must not throw.
-    if (clientInsertBlack.count(key)) {
+    if (clientInsertBlock.count(key)) {
         try { client->EndInsert(); } catch (...) {}
-        clientInsertBlack.erase(key);
+        clientInsertBlock.erase(key);
     }
 
     delete client;

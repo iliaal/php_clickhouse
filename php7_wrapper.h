@@ -16,18 +16,12 @@
   +----------------------------------------------------------------------+
 */
 
-#if !defined(ZEND_ACC_IMPLICIT_PUBLIC)
-# define ZEND_ACC_IMPLICIT_PUBLIC ZEND_ACC_PUBLIC
-#endif
-
-#define sc_zend_throw_exception zend_throw_exception
 #define sc_zend_throw_exception_tsrmls_cc(a, b, c) zend_throw_exception(a, b, c)
 
 #define sc_zend_hash_index_update   zend_hash_index_update
 #define sc_zend_hash_find   zend_hash_str_find
 #define sc_zend_hash_index_find   zend_hash_index_find
 #define SC_MAKE_STD_ZVAL(p)             zval _stack_zval_##p; p = &(_stack_zval_##p)
-#define SC_RETURN_STRINGL(k, l) RETURN_STRINGL(k, l)
 #define sc_zval_ptr_dtor(p)  zval_ptr_dtor(*p)
 #define sc_zval_add_ref(p)   Z_TRY_ADDREF_P(p)
 #define sc_add_assoc_long_ex                  add_assoc_long_ex
@@ -61,15 +55,6 @@ static inline void sc_zend_update_property_long(zend_class_entry *scope, zval *o
     zend_update_property_long(scope, object, name, name_length, value);
 #else
     zend_update_property_long(scope, Z_OBJ_P(object), name, name_length, value);
-#endif
-}
-
-static inline void sc_zend_update_property_bool(zend_class_entry *scope, zval *object, const char *name, size_t name_length, zend_long value)
-{
-#if PHP_VERSION_ID < 80000
-    zend_update_property_bool(scope, object, name, name_length, value);
-#else
-    zend_update_property_bool(scope, Z_OBJ_P(object), name, name_length, value);
 #endif
 }
 
