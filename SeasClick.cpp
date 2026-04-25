@@ -320,6 +320,54 @@ PHP_METHOD(SEASCLICK_RES_NAME, __construct)
         convert_to_long(value);
         Options = Options.SetMaxCompressionChunkSize((unsigned int)Z_LVAL_P(value));
     }
+#ifdef WITH_OPENSSL
+    bool want_ssl = false;
+    if (php_array_get_value(_ht, "ssl", value)) {
+        convert_to_boolean(value);
+        want_ssl = (Z_LVAL_P(value) != 0);
+    }
+    if (want_ssl) {
+        ClientOptions::SSLOptions ssl_opts;
+        if (php_array_get_value(_ht, "ssl_skip_verify", value)) {
+            convert_to_boolean(value);
+            ssl_opts.SetSkipVerification(Z_LVAL_P(value) != 0);
+        }
+        if (php_array_get_value(_ht, "ssl_use_default_ca", value)) {
+            convert_to_boolean(value);
+            ssl_opts.SetUseDefaultCALocations(Z_LVAL_P(value) != 0);
+        }
+        if (php_array_get_value(_ht, "ssl_ca_directory", value)) {
+            convert_to_string(value);
+            ssl_opts.SetPathToCADirectory(std::string(Z_STRVAL_P(value), Z_STRLEN_P(value)));
+        }
+        if (php_array_get_value(_ht, "ssl_ca_files", value)) {
+            std::vector<std::string> files;
+            if (Z_TYPE_P(value) == IS_STRING) {
+                files.emplace_back(Z_STRVAL_P(value), Z_STRLEN_P(value));
+            } else if (Z_TYPE_P(value) == IS_ARRAY) {
+                HashTable *fh = Z_ARRVAL_P(value);
+                zval *fv;
+                ZEND_HASH_FOREACH_VAL(fh, fv) {
+                    convert_to_string(fv);
+                    files.emplace_back(Z_STRVAL_P(fv), Z_STRLEN_P(fv));
+                } ZEND_HASH_FOREACH_END();
+            }
+            ssl_opts.SetPathToCAFiles(files);
+        }
+        Options = Options.SetSSLOptions(ssl_opts);
+    }
+#else
+    if (php_array_get_value(_ht, "ssl", value)) {
+        convert_to_boolean(value);
+        if (Z_LVAL_P(value) != 0) {
+            sc_zend_throw_exception_tsrmls_cc(SeasClickException_ce,
+                "SeasClick was built without TLS support. Reconfigure with --enable-SeasClick-openssl",
+                0);
+            RETURN_FALSE;
+        }
+    }
+#endif
+
     if (php_array_get_value(_ht, "endpoints", value) && Z_TYPE_P(value) == IS_ARRAY) {
         std::vector<Endpoint> eps;
         HashTable *eps_ht = Z_ARRVAL_P(value);
