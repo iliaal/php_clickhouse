@@ -129,6 +129,34 @@ ColumnRef createColumn(TypeRef type)
     {
         return std::make_shared<ColumnDate>();
     }
+    case Type::Code::Date32:
+    {
+        return std::make_shared<ColumnDate32>();
+    }
+    case Type::Code::Time:
+    {
+        return std::make_shared<ColumnTime>();
+    }
+    case Type::Code::Time64:
+    {
+        return std::make_shared<ColumnTime64>(type->As<Time64Type>()->GetPrecision());
+    }
+    case Type::Code::Int128:
+    {
+        return std::make_shared<ColumnInt128>();
+    }
+    case Type::Code::UInt128:
+    {
+        return std::make_shared<ColumnUInt128>();
+    }
+    case Type::Code::Decimal:
+    case Type::Code::Decimal32:
+    case Type::Code::Decimal64:
+    case Type::Code::Decimal128:
+    {
+        auto dt = type->As<DecimalType>();
+        return std::make_shared<ColumnDecimal>(dt->GetPrecision(), dt->GetScale());
+    }
 
     case Type::Code::Array:
     {
@@ -492,6 +520,112 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
 
         return value;
         break;
+    }
+    case Type::Code::Date32:
+    {
+        auto value = std::make_shared<ColumnDate32>();
+        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
+        {
+            if (Z_TYPE_P(array_value) == IS_STRING && memchr(Z_STRVAL_P(array_value), '-', Z_STRLEN_P(array_value)) != NULL) {
+                value->Append((std::time_t)to_time_t(Z_STRVAL_P(array_value)));
+            } else {
+                convert_to_long(array_value);
+                value->Append((std::time_t)Z_LVAL_P(array_value));
+            }
+        }
+        SC_HASHTABLE_FOREACH_END();
+        return value;
+    }
+    case Type::Code::Time:
+    {
+        auto value = std::make_shared<ColumnTime>();
+        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
+        {
+            convert_to_long(array_value);
+            value->Append((int32_t)Z_LVAL_P(array_value));
+        }
+        SC_HASHTABLE_FOREACH_END();
+        return value;
+    }
+    case Type::Code::Time64:
+    {
+        size_t precision = type->As<Time64Type>()->GetPrecision();
+        auto value = std::make_shared<ColumnTime64>(precision);
+        int64_t scale = 1;
+        for (size_t i = 0; i < precision; ++i) scale *= 10;
+        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
+        {
+            if (Z_TYPE_P(array_value) == IS_DOUBLE) {
+                value->Append((int64_t)(Z_DVAL_P(array_value) * scale));
+            } else {
+                convert_to_long(array_value);
+                value->Append((int64_t)Z_LVAL_P(array_value) * scale);
+            }
+        }
+        SC_HASHTABLE_FOREACH_END();
+        return value;
+    }
+    case Type::Code::Int128:
+    {
+        auto value = std::make_shared<ColumnInt128>();
+        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
+        {
+            if (Z_TYPE_P(array_value) == IS_STRING) {
+                Int128 v = 0;
+                bool neg = false;
+                const char *s = Z_STRVAL_P(array_value);
+                size_t len = Z_STRLEN_P(array_value);
+                size_t i = 0;
+                if (len > 0 && (s[0] == '-' || s[0] == '+')) { neg = (s[0] == '-'); i = 1; }
+                for (; i < len; ++i) {
+                    if (s[i] < '0' || s[i] > '9') break;
+                    v = v * 10 + (s[i] - '0');
+                }
+                value->Append(neg ? -v : v);
+            } else {
+                convert_to_long(array_value);
+                value->Append(Int128(Z_LVAL_P(array_value)));
+            }
+        }
+        SC_HASHTABLE_FOREACH_END();
+        return value;
+    }
+    case Type::Code::UInt128:
+    {
+        auto value = std::make_shared<ColumnUInt128>();
+        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
+        {
+            if (Z_TYPE_P(array_value) == IS_STRING) {
+                UInt128 v = 0;
+                const char *s = Z_STRVAL_P(array_value);
+                size_t len = Z_STRLEN_P(array_value);
+                for (size_t i = 0; i < len; ++i) {
+                    if (s[i] < '0' || s[i] > '9') break;
+                    v = v * 10 + (s[i] - '0');
+                }
+                value->Append(v);
+            } else {
+                convert_to_long(array_value);
+                value->Append(UInt128((uint64_t)Z_LVAL_P(array_value)));
+            }
+        }
+        SC_HASHTABLE_FOREACH_END();
+        return value;
+    }
+    case Type::Code::Decimal:
+    case Type::Code::Decimal32:
+    case Type::Code::Decimal64:
+    case Type::Code::Decimal128:
+    {
+        auto dt = type->As<DecimalType>();
+        auto value = std::make_shared<ColumnDecimal>(dt->GetPrecision(), dt->GetScale());
+        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
+        {
+            convert_to_string(array_value);
+            value->Append(std::string(Z_STRVAL_P(array_value), Z_STRLEN_P(array_value)));
+        }
+        SC_HASHTABLE_FOREACH_END();
+        return value;
     }
 
     case Type::Code::Array:
@@ -877,8 +1011,6 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
         break;
     }
     case Type::Code::Float32:
-    case Type::Code::Decimal:
-    case Type::Code::Decimal32:
     {
         auto col = (*columnRef->As<ColumnFloat32>())[row];
         stringstream stream;
@@ -896,7 +1028,6 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
         break;
     }
     case Type::Code::Float64:
-    case Type::Code::Decimal64:
     {
         auto col = (*columnRef->As<ColumnFloat64>())[row];
         if (is_array)
@@ -906,6 +1037,26 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
         else
         {
             SC_SINGLE_DOUBLE((double)col);
+        }
+        break;
+    }
+    case Type::Code::Decimal:
+    case Type::Code::Decimal32:
+    case Type::Code::Decimal64:
+    case Type::Code::Decimal128:
+    {
+        auto col = columnRef->As<ColumnDecimal>();
+        if (!col) {
+            throw std::runtime_error("Decimal read: column downcast failed");
+        }
+        Int128 raw = col->At(row);
+        std::stringstream ss;
+        ss << raw;
+        std::string s = ss.str();
+        if (is_array) {
+            sc_add_next_index_stringl(arr, (char*)s.c_str(), s.length(), 1);
+        } else {
+            SC_SINGLE_STRING((char*)s.c_str(), s.length());
         }
         break;
     }
@@ -1062,7 +1213,121 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
         }
         break;
     }
-
+    case Type::Code::Date32:
+    {
+        auto col = columnRef->As<ColumnDate32>();
+        std::time_t t = col->At(row);
+        if (fetch_mode & SC_FETCH_DATE_AS_STRINGS) {
+            char buffer[16];
+            size_t l = strftime(buffer, sizeof(buffer), "%Y-%m-%d", gmtime(&t));
+            if (is_array) {
+                sc_add_next_index_stringl(arr, buffer, l, 1);
+            } else {
+                SC_SINGLE_STRING(buffer, l);
+            }
+        } else {
+            if (is_array) {
+                add_next_index_long(arr, (long)t);
+            } else if (fetch_mode & SC_FETCH_ONE) {
+                ZVAL_LONG(arr, (long)t);
+            } else {
+                sc_add_assoc_long_ex(arr, column_name.c_str(), column_name.length(), (zend_long)t);
+            }
+        }
+        break;
+    }
+    case Type::Code::Time:
+    {
+        auto col = columnRef->As<ColumnTime>();
+        int32_t v = col->At(row);
+        if (fetch_mode & SC_FETCH_DATE_AS_STRINGS) {
+            int abs_v = v < 0 ? -v : v;
+            char buffer[16];
+            int l = snprintf(buffer, sizeof(buffer), "%s%02d:%02d:%02d",
+                             v < 0 ? "-" : "", abs_v / 3600, (abs_v / 60) % 60, abs_v % 60);
+            if (is_array) {
+                sc_add_next_index_stringl(arr, buffer, l, 1);
+            } else {
+                SC_SINGLE_STRING(buffer, l);
+            }
+        } else {
+            if (is_array) {
+                add_next_index_long(arr, (long)v);
+            } else if (fetch_mode & SC_FETCH_ONE) {
+                ZVAL_LONG(arr, (long)v);
+            } else {
+                sc_add_assoc_long_ex(arr, column_name.c_str(), column_name.length(), (zend_long)v);
+            }
+        }
+        break;
+    }
+    case Type::Code::Time64:
+    {
+        auto col = columnRef->As<ColumnTime64>();
+        size_t precision = columnRef->Type()->As<Time64Type>()->GetPrecision();
+        int64_t scale = 1;
+        for (size_t i = 0; i < precision; ++i) scale *= 10;
+        int64_t raw = col->At(row);
+        if (fetch_mode & SC_FETCH_DATE_AS_STRINGS) {
+            int64_t whole = raw / scale;
+            int64_t frac = raw % scale;
+            if (frac < 0) frac = -frac;
+            int64_t abs_whole = whole < 0 ? -whole : whole;
+            char buffer[64];
+            int l = snprintf(buffer, sizeof(buffer), "%s%02lld:%02lld:%02lld",
+                             whole < 0 ? "-" : "",
+                             (long long)(abs_whole / 3600),
+                             (long long)((abs_whole / 60) % 60),
+                             (long long)(abs_whole % 60));
+            if (precision > 0 && l > 0) {
+                int w = snprintf(buffer + l, sizeof(buffer) - l, ".%0*lld",
+                                 (int)precision, (long long)frac);
+                if (w > 0) l += w;
+            }
+            if (is_array) {
+                sc_add_next_index_stringl(arr, buffer, l, 1);
+            } else {
+                SC_SINGLE_STRING(buffer, l);
+            }
+        } else {
+            if (is_array) {
+                add_next_index_long(arr, (long)raw);
+            } else if (fetch_mode & SC_FETCH_ONE) {
+                ZVAL_LONG(arr, (long)raw);
+            } else {
+                sc_add_assoc_long_ex(arr, column_name.c_str(), column_name.length(), (zend_ulong)raw);
+            }
+        }
+        break;
+    }
+    case Type::Code::Int128:
+    {
+        auto col = columnRef->As<ColumnInt128>();
+        Int128 v = col->At(row);
+        std::stringstream ss;
+        ss << v;
+        std::string s = ss.str();
+        if (is_array) {
+            sc_add_next_index_stringl(arr, (char*)s.c_str(), s.length(), 1);
+        } else {
+            SC_SINGLE_STRING((char*)s.c_str(), s.length());
+        }
+        break;
+    }
+    case Type::Code::UInt128:
+    {
+        auto col = columnRef->As<ColumnUInt128>();
+        UInt128 v = col->At(row);
+        std::stringstream ss;
+        ss << v;
+        std::string s = ss.str();
+        if (is_array) {
+            sc_add_next_index_stringl(arr, (char*)s.c_str(), s.length(), 1);
+        } else {
+            SC_SINGLE_STRING((char*)s.c_str(), s.length());
+        }
+        break;
+    }
     case Type::Code::Array:
     {
         auto array = columnRef->As<ColumnArray>();
