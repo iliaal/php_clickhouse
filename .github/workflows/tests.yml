@@ -156,7 +156,11 @@ jobs:
           CLICKHOUSE_PASSWD: test
           NO_INTERACTION: 1
         run: |
-          export LD_PRELOAD=$(clang -print-file-name=libclang_rt.asan-x86_64.so)
+          # PHP itself was built with -fsanitize=address, so the ASan runtime
+          # is already embedded in /tmp/php-asan/bin/php. Do not LD_PRELOAD
+          # libclang_rt.asan-x86_64.so on top of that — ASan aborts with
+          # "incompatible ASan runtimes" when two runtimes land in the same
+          # address space.
           export TEST_PHP_EXECUTABLE=/tmp/php-asan/bin/php
           export TEST_PHP_ARGS="-d extension=$(pwd)/modules/clickhouse.so"
           /tmp/php-asan/bin/php run-tests.php --show-diff --asan -g FAIL,BORK,LEAK,XLEAK tests/
