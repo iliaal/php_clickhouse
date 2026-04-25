@@ -58,13 +58,6 @@ static inline void sc_zend_update_property_long(zend_class_entry *scope, zval *o
 #endif
 }
 
-#define SC_HASHTABLE_FOREACH_START2(ht, k, klen, ktype, _val) zend_string *_foreach_key;\
-    ZEND_HASH_FOREACH_STR_KEY_VAL(ht, _foreach_key, _val);\
-    if (!_foreach_key) {k = NULL; klen = 0; ktype = 0;}\
-    else {k = _foreach_key->val, klen=_foreach_key->len; ktype = 1;} {
-
-#define SC_HASHTABLE_FOREACH_END()                 } ZEND_HASH_FOREACH_END();
-
 #define sc_add_next_index_stringl(arr, str, len, dup)    add_next_index_stringl(arr, str, len)
 
 static inline int sc_zend_hash_get_current_data(HashTable *ht, void **v)
