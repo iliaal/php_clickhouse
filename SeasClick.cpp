@@ -76,17 +76,20 @@ ZEND_BEGIN_ARG_INFO_EX(SeasClick_select, 0, 0, 1)
 ZEND_ARG_INFO(0, sql)
 ZEND_ARG_INFO(0, params)
 ZEND_ARG_INFO(0, fetch_mode)
+ZEND_ARG_INFO(0, query_id)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(SeasClick_insert, 0, 0, 3)
 ZEND_ARG_INFO(0, table)
 ZEND_ARG_INFO(0, columns)
 ZEND_ARG_INFO(0, values)
+ZEND_ARG_INFO(0, query_id)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(SeasClick_writeStart, 0, 0, 2)
 ZEND_ARG_INFO(0, table)
 ZEND_ARG_INFO(0, columns)
+ZEND_ARG_INFO(0, query_id)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(SeasClick_write, 0, 0, 1)
@@ -99,6 +102,7 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_INFO_EX(SeasClick_execute, 0, 0, 1)
 ZEND_ARG_INFO(0, sql)
 ZEND_ARG_INFO(0, params)
+ZEND_ARG_INFO(0, query_id)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(SeasClick_ping, 0, 0, 0)
@@ -232,8 +236,16 @@ PHP_METHOD(SEASCLICK_RES_NAME, __construct)
 
     if (php_array_get_value(_ht, "compression", value))
     {
-        convert_to_boolean(value);
-        sc_zend_update_property_long(SeasClick_ce, this_obj, "compression", sizeof("compression") - 1, Z_LVAL_P(value));
+        long cv = 0;
+        if (Z_TYPE_P(value) == IS_STRING) {
+            const char *s = Z_STRVAL_P(value);
+            if (strcasecmp(s, "lz4") == 0) cv = 1;
+            else if (strcasecmp(s, "zstd") == 0) cv = 2;
+        } else {
+            convert_to_boolean(value);
+            cv = Z_LVAL_P(value);
+        }
+        sc_zend_update_property_long(SeasClick_ce, this_obj, "compression", sizeof("compression") - 1, cv);
     }
 
     if (php_array_get_value(_ht, "retry_timeout", value))
@@ -276,9 +288,59 @@ PHP_METHOD(SEASCLICK_RES_NAME, __construct)
                             .SetConnectionRecvTimeout(std::chrono::seconds(Z_LVAL_P(receive_timeout)))
                             .SetConnectionConnectTimeout(std::chrono::seconds(Z_LVAL_P(connect_timeout)))
                             .SetPingBeforeQuery(false);
-    if (Z_LVAL_P(compression) == 1)
-    {
-        Options = Options.SetCompressionMethod(CompressionMethod::LZ4);
+    long cv = Z_LVAL_P(compression);
+    if (cv == 1) Options = Options.SetCompressionMethod(CompressionMethod::LZ4);
+    else if (cv == 2) Options = Options.SetCompressionMethod(CompressionMethod::ZSTD);
+
+    if (php_array_get_value(_ht, "send_timeout", value)) {
+        convert_to_long(value);
+        Options = Options.SetConnectionSendTimeout(std::chrono::seconds(Z_LVAL_P(value)));
+    }
+    if (php_array_get_value(_ht, "tcp_nodelay", value)) {
+        convert_to_boolean(value);
+        Options = Options.TcpNoDelay(Z_LVAL_P(value) != 0);
+    }
+    if (php_array_get_value(_ht, "tcp_keepalive", value)) {
+        convert_to_boolean(value);
+        Options = Options.TcpKeepAlive(Z_LVAL_P(value) != 0);
+    }
+    if (php_array_get_value(_ht, "tcp_keepalive_idle", value)) {
+        convert_to_long(value);
+        Options = Options.SetTcpKeepAliveIdle(std::chrono::seconds(Z_LVAL_P(value)));
+    }
+    if (php_array_get_value(_ht, "tcp_keepalive_intvl", value)) {
+        convert_to_long(value);
+        Options = Options.SetTcpKeepAliveInterval(std::chrono::seconds(Z_LVAL_P(value)));
+    }
+    if (php_array_get_value(_ht, "tcp_keepalive_cnt", value)) {
+        convert_to_long(value);
+        Options = Options.SetTcpKeepAliveCount((unsigned int)Z_LVAL_P(value));
+    }
+    if (php_array_get_value(_ht, "max_compression_chunk_size", value)) {
+        convert_to_long(value);
+        Options = Options.SetMaxCompressionChunkSize((unsigned int)Z_LVAL_P(value));
+    }
+    if (php_array_get_value(_ht, "endpoints", value) && Z_TYPE_P(value) == IS_ARRAY) {
+        std::vector<Endpoint> eps;
+        HashTable *eps_ht = Z_ARRVAL_P(value);
+        zval *ep_zv;
+        char *ep_k;
+        uint32_t ep_klen;
+        int ep_kt;
+        SC_HASHTABLE_FOREACH_START2(eps_ht, ep_k, ep_klen, ep_kt, ep_zv) {
+            if (Z_TYPE_P(ep_zv) != IS_ARRAY) continue;
+            HashTable *eh = Z_ARRVAL_P(ep_zv);
+            zval *hz = sc_zend_hash_find(eh, (char*)"host", 4);
+            zval *pz = sc_zend_hash_find(eh, (char*)"port", 4);
+            if (!hz) continue;
+            convert_to_string(hz);
+            Endpoint e;
+            e.host = std::string(Z_STRVAL_P(hz), Z_STRLEN_P(hz));
+            if (pz) { convert_to_long(pz); e.port = (uint16_t)Z_LVAL_P(pz); }
+            eps.push_back(std::move(e));
+        }
+        SC_HASHTABLE_FOREACH_END();
+        if (!eps.empty()) Options = Options.SetEndpoints(eps);
     }
 
     if (php_array_get_value(_ht, "database", value))
@@ -373,20 +435,23 @@ PHP_METHOD(SEASCLICK_RES_NAME, select)
     size_t l_sql = 0;
     zval* params = NULL;
     zend_long fetch_mode = 0;
+    char *query_id = NULL;
+    size_t l_query_id = 0;
 
 #ifndef FAST_ZPP
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "s|zl", &sql, &l_sql, &params, &fetch_mode) == FAILURE)
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "s|zls", &sql, &l_sql, &params, &fetch_mode, &query_id, &l_query_id) == FAILURE)
     {
         return;
     }
 #else
 #undef IS_UNDEF
 #define IS_UNDEF Z_EXPECTED_LONG
-    ZEND_PARSE_PARAMETERS_START(1, 3)
+    ZEND_PARSE_PARAMETERS_START(1, 4)
     Z_PARAM_STRING(sql, l_sql)
     Z_PARAM_OPTIONAL
     Z_PARAM_ARRAY(params)
     Z_PARAM_LONG(fetch_mode)
+    Z_PARAM_STRING(query_id, l_query_id)
     ZEND_PARSE_PARAMETERS_END();
 #undef IS_UNDEF
 #define IS_UNDEF 0
@@ -427,7 +492,8 @@ PHP_METHOD(SEASCLICK_RES_NAME, select)
             array_init(return_value);
         }
 
-        client->Select(sql_s, [return_value, fetch_mode](const Block &block) {
+        std::string qid = (query_id && l_query_id > 0) ? std::string(query_id, l_query_id) : std::string();
+        auto select_cb = [return_value, fetch_mode](const Block &block) {
             if (fetch_mode & SC_FETCH_ONE) {
                 if (block.GetRowCount() > 0 && block.GetColumnCount() > 0) {
                     convertToZval(return_value, block[0], 0, "", 0, fetch_mode);
@@ -476,7 +542,12 @@ PHP_METHOD(SEASCLICK_RES_NAME, select)
                 }
                 add_next_index_zval(return_value, return_tmp);
             }
-        });
+        };
+        if (!qid.empty()) {
+            client->Select(sql_s, qid, select_cb);
+        } else {
+            client->Select(sql_s, select_cb);
+        }
     }
     catch (const std::exception& e)
     {
@@ -493,21 +564,25 @@ PHP_METHOD(SEASCLICK_RES_NAME, insert)
     size_t l_table = 0;
     zval *columns;
     zval *values;
+    char *query_id = NULL;
+    size_t l_query_id = 0;
 
     string sql;
 
 #ifndef FAST_ZPP
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "szz", &table, &l_table, &columns, &values) == FAILURE)
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "szz|s", &table, &l_table, &columns, &values, &query_id, &l_query_id) == FAILURE)
     {
         return;
     }
 #else
 #undef IS_UNDEF
 #define IS_UNDEF Z_EXPECTED_LONG
-    ZEND_PARSE_PARAMETERS_START(3, 3)
+    ZEND_PARSE_PARAMETERS_START(3, 4)
     Z_PARAM_STRING(table, l_table)
     Z_PARAM_ARRAY(columns)
     Z_PARAM_ARRAY(values)
+    Z_PARAM_OPTIONAL
+    Z_PARAM_STRING(query_id, l_query_id)
     ZEND_PARSE_PARAMETERS_END();
 #undef IS_UNDEF
 #define IS_UNDEF 0
@@ -569,7 +644,9 @@ PHP_METHOD(SEASCLICK_RES_NAME, insert)
 
         getInsertSql(&sql, table, columns);
 
-        Block blockQuery = client->BeginInsert(sql);
+        Block blockQuery = (query_id && l_query_id > 0)
+            ? client->BeginInsert(sql, std::string(query_id, l_query_id))
+            : client->BeginInsert(sql);
 
         Block blockInsert;
         size_t index = 0;
@@ -601,20 +678,24 @@ PHP_METHOD(SEASCLICK_RES_NAME, writeStart)
     char *table = NULL;
     size_t l_table = 0;
     zval *columns;
+    char *query_id = NULL;
+    size_t l_query_id = 0;
 
     string sql;
 
 #ifndef FAST_ZPP
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "sz", &table, &l_table, &columns) == FAILURE)
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "sz|s", &table, &l_table, &columns, &query_id, &l_query_id) == FAILURE)
     {
         return;
     }
 #else
 #undef IS_UNDEF
 #define IS_UNDEF Z_EXPECTED_LONG
-    ZEND_PARSE_PARAMETERS_START(2, 2)
+    ZEND_PARSE_PARAMETERS_START(2, 3)
     Z_PARAM_STRING(table, l_table)
     Z_PARAM_ARRAY(columns)
+    Z_PARAM_OPTIONAL
+    Z_PARAM_STRING(query_id, l_query_id)
     ZEND_PARSE_PARAMETERS_END();
 #undef IS_UNDEF
 #define IS_UNDEF 0
@@ -632,7 +713,9 @@ PHP_METHOD(SEASCLICK_RES_NAME, writeStart)
 
         getInsertSql(&sql, table, columns);
 
-        Block blockQuery = client->BeginInsert(sql);
+        Block blockQuery = (query_id && l_query_id > 0)
+            ? client->BeginInsert(sql, std::string(query_id, l_query_id))
+            : client->BeginInsert(sql);
 
         clientInsertBlack.insert(std::pair<int, Block>(key, blockQuery));
     }
@@ -764,19 +847,22 @@ PHP_METHOD(SEASCLICK_RES_NAME, execute)
     char *sql = NULL;
     size_t l_sql = 0;
     zval* params = NULL;
+    char *query_id = NULL;
+    size_t l_query_id = 0;
 
 #ifndef FAST_ZPP
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "s|z", &sql, &l_sql, &params) == FAILURE)
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "s|zs", &sql, &l_sql, &params, &query_id, &l_query_id) == FAILURE)
     {
         return;
     }
 #else
 #undef IS_UNDEF
 #define IS_UNDEF Z_EXPECTED_LONG
-    ZEND_PARSE_PARAMETERS_START(1, 2)
+    ZEND_PARSE_PARAMETERS_START(1, 3)
     Z_PARAM_STRING(sql, l_sql)
     Z_PARAM_OPTIONAL
     Z_PARAM_ARRAY(params)
+    Z_PARAM_STRING(query_id, l_query_id)
     ZEND_PARSE_PARAMETERS_END();
 #undef IS_UNDEF
 #define IS_UNDEF 0
@@ -814,7 +900,11 @@ PHP_METHOD(SEASCLICK_RES_NAME, execute)
             SC_HASHTABLE_FOREACH_END();
         }
 
-        client->Execute(sql_s);
+        if (query_id && l_query_id > 0) {
+            client->Execute(Query(sql_s, std::string(query_id, l_query_id)));
+        } else {
+            client->Execute(sql_s);
+        }
 
     }
     catch (const std::exception& e)
