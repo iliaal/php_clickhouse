@@ -19,3 +19,24 @@ Patch: change `SendQuery(query.GetText())` to `SendQuery(query)` in
 `Client::Impl::BeginInsert`.
 
 This is exercised by `tests/028.phpt` (writeStart query_id propagation).
+
+## clickhouse/columns/string.cpp: `memcpy(NULL, 0)` UB on empty string_view
+
+`StringBlock::AppendUnsafe` calls `memcpy(pos, str.data(), str.size())`
+unconditionally. When `str` was constructed from an empty
+`std::string`, `str.data()` is allowed to be `NULL`, and libc's memcpy
+declares argument 2 with `__attribute__((nonnull))` regardless of the
+size. UBSan flags every empty append as undefined behavior:
+
+```
+runtime error: null pointer passed as argument 2,
+  which is declared to never be null
+```
+
+Every libc no-ops `memcpy(_, NULL, 0)` in practice, so the bug is
+benign on real workloads, but the false-positive UBSan trip noised the
+extension's ASan job and obscured real findings.
+
+Patch: guard the `memcpy` with `if (str.size() > 0)`. This is
+exercised by `tests/018.phpt` (LowCardinality(String) with empty
+values).

@@ -66,11 +66,14 @@ When bumping it:
 1. Drop the new release into `lib/clickhouse-cpp/clickhouse/` and
    `lib/clickhouse-cpp/contrib/` (keep cityhash, lz4, zstd, absl;
    skip gtest, ut, bench, tests).
-2. Update the source list in `config.m4`. The list there is
+2. Re-apply (or drop, if upstreamed) every patch listed in
+   `lib/clickhouse-cpp/LOCAL_PATCHES.md`. Bumping without this step
+   silently regresses the fixes the test suite depends on.
+3. Update the source list in `config.m4`. The list there is
    alphabetical by directory; keep that order.
-3. Run the full test suite against ClickHouse `latest` (the test
+4. Run the full test suite against ClickHouse `latest` (the test
    server in CI is `clickhouse/clickhouse-server:latest`).
-4. Note any breaking changes in `CHANGELOG.md` under the unreleased
+5. Note any breaking changes in `CHANGELOG.md` under the unreleased
    section.
 
 ## Releases
