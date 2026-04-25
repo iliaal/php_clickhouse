@@ -243,6 +243,55 @@ ColumnRef createColumn(TypeRef type)
     }
 }
 
+// Build a column of plain integer cells from a PHP rows array. Used by
+// every signed and unsigned integer type that doesn't accept hex
+// strings (UInt8/16, Int8..Int64).
+template <typename TCol>
+static ColumnRef appendIntColumn(HashTable *values_ht)
+{
+    auto value = std::make_shared<TCol>();
+    zval *array_value;
+    ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
+        convert_to_long(array_value);
+        value->Append(Z_LVAL_P(array_value));
+    } ZEND_HASH_FOREACH_END();
+    return value;
+}
+
+// Build an unsigned integer column with a hex-string fast path. UInt32
+// and UInt64 both accept "0x..." strings as a way to land values in the
+// upper half of the range that a PHP signed long can't represent.
+template <typename TCol, typename TStrtoul>
+static ColumnRef appendUIntColumnWithHex(HashTable *values_ht, TStrtoul strtoul_fn)
+{
+    auto value = std::make_shared<TCol>();
+    zval *array_value;
+    ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
+        if (Z_TYPE_P(array_value) == IS_STRING && Z_STRLEN_P(array_value) >= 3 &&
+            *Z_STRVAL_P(array_value) == '0' &&
+            (*(Z_STRVAL_P(array_value) + 1) == 'x' || *(Z_STRVAL_P(array_value) + 1) == 'X')) {
+            value->Append(strtoul_fn(Z_STRVAL_P(array_value), NULL, 0));
+        } else {
+            convert_to_long(array_value);
+            value->Append(Z_LVAL_P(array_value));
+        }
+    } ZEND_HASH_FOREACH_END();
+    return value;
+}
+
+// Build a Float32/Float64 column from a PHP rows array.
+template <typename TCol>
+static ColumnRef appendFloatColumn(HashTable *values_ht)
+{
+    auto value = std::make_shared<TCol>();
+    zval *array_value;
+    ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
+        convert_to_double(array_value);
+        value->Append(Z_DVAL_P(array_value));
+    } ZEND_HASH_FOREACH_END();
+    return value;
+}
+
 ColumnRef insertColumn(TypeRef type, zval *value_zval)
 {
     zval *array_value;
@@ -259,129 +308,21 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     switch (type->GetCode())
     {
     case Type::Code::UInt64:
-    {
-        auto value = std::make_shared<ColumnUInt64>();
-
-        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
-        {
-            if (
-                Z_TYPE_P(array_value) == IS_STRING && Z_STRLEN_P(array_value) >= 3
-                && (
-                    *Z_STRVAL_P(array_value) == '0' &&
-                    ((*(Z_STRVAL_P(array_value) + 1) == 'x') || *(Z_STRVAL_P(array_value) + 1) == 'X')
-                )
-            ) {
-                value->Append(strtoull(Z_STRVAL_P(array_value), NULL, 0));
-            } else {
-                convert_to_long(array_value);
-                value->Append(Z_LVAL_P(array_value));
-            }
-        }
-        SC_HASHTABLE_FOREACH_END();
-
-        return value;
-    }
+        return appendUIntColumnWithHex<ColumnUInt64>(values_ht, strtoull);
     case Type::Code::UInt8:
-    {
-        auto value = std::make_shared<ColumnUInt8>();
-
-        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
-        {
-            convert_to_long(array_value);
-            value->Append(Z_LVAL_P(array_value));
-        }
-        SC_HASHTABLE_FOREACH_END();
-
-        return value;
-    }
+        return appendIntColumn<ColumnUInt8>(values_ht);
     case Type::Code::UInt16:
-    {
-        auto value = std::make_shared<ColumnUInt16>();
-
-        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
-        {
-            convert_to_long(array_value);
-            value->Append(Z_LVAL_P(array_value));
-        }
-        SC_HASHTABLE_FOREACH_END();
-
-        return value;
-    }
+        return appendIntColumn<ColumnUInt16>(values_ht);
     case Type::Code::UInt32:
-    {
-        auto value = std::make_shared<ColumnUInt32>();
-
-        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
-        {
-            if (
-                Z_TYPE_P(array_value) == IS_STRING && Z_STRLEN_P(array_value) >= 3
-                && (
-                    *Z_STRVAL_P(array_value) == '0' &&
-                    ((*(Z_STRVAL_P(array_value) + 1) == 'x') || *(Z_STRVAL_P(array_value) + 1) == 'X')
-                )) {
-                    value->Append(strtoul(Z_STRVAL_P(array_value), NULL, 0));
-                } else {
-                    convert_to_long(array_value);
-                    value->Append(Z_LVAL_P(array_value));
-                }
-        }
-        SC_HASHTABLE_FOREACH_END();
-
-        return value;
-    }
-
+        return appendUIntColumnWithHex<ColumnUInt32>(values_ht, strtoul);
     case Type::Code::Int8:
-    {
-        auto value = std::make_shared<ColumnInt8>();
-
-        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
-        {
-            convert_to_long(array_value);
-            value->Append(Z_LVAL_P(array_value));
-        }
-        SC_HASHTABLE_FOREACH_END();
-
-        return value;
-    }
+        return appendIntColumn<ColumnInt8>(values_ht);
     case Type::Code::Int16:
-    {
-        auto value = std::make_shared<ColumnInt16>();
-
-        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
-        {
-            convert_to_long(array_value);
-            value->Append(Z_LVAL_P(array_value));
-        }
-        SC_HASHTABLE_FOREACH_END();
-
-        return value;
-    }
+        return appendIntColumn<ColumnInt16>(values_ht);
     case Type::Code::Int32:
-    {
-        auto value = std::make_shared<ColumnInt32>();
-
-        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
-        {
-            convert_to_long(array_value);
-            value->Append(Z_LVAL_P(array_value));
-        }
-        SC_HASHTABLE_FOREACH_END();
-
-        return value;
-    }
+        return appendIntColumn<ColumnInt32>(values_ht);
     case Type::Code::Int64:
-    {
-        auto value = std::make_shared<ColumnInt64>();
-
-        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
-        {
-            convert_to_long(array_value);
-            value->Append(Z_LVAL_P(array_value));
-        }
-        SC_HASHTABLE_FOREACH_END();
-
-        return value;
-    }
+        return appendIntColumn<ColumnInt64>(values_ht);
 
     case Type::Code::UUID:
     {
@@ -416,31 +357,9 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     }
 
     case Type::Code::Float32:
-    {
-        auto value = std::make_shared<ColumnFloat32>();
-
-        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
-        {
-            convert_to_double(array_value);
-            value->Append(Z_DVAL_P(array_value));
-        }
-        SC_HASHTABLE_FOREACH_END();
-
-        return value;
-    }
+        return appendFloatColumn<ColumnFloat32>(values_ht);
     case Type::Code::Float64:
-    {
-        auto value = std::make_shared<ColumnFloat64>();
-
-        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
-        {
-            convert_to_double(array_value);
-            value->Append(Z_DVAL_P(array_value));
-        }
-        SC_HASHTABLE_FOREACH_END();
-
-        return value;
-    }
+        return appendFloatColumn<ColumnFloat64>(values_ht);
 
     case Type::Code::String:
     {
@@ -995,115 +914,91 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         sc_add_assoc_stringl_ex(arr, column_name.c_str(), column_name.length(), val, len, 1); \
     }
 
+// Emit a Unix epoch as either a long or a strftime-formatted string,
+// dispatched on fetch_mode and is_array. Used by DateTime, Date, and
+// Date32 reads which all share the same shape modulo the format string
+// and whether to emit NULL on a non-positive timestamp.
+static void emitEpoch(zval *arr, std::time_t t, const char *fmt,
+                      const string& column_name, int8_t is_array, long fetch_mode,
+                      bool null_if_nonpositive)
+{
+    if (fetch_mode & SC_FETCH_DATE_AS_STRINGS) {
+        if (null_if_nonpositive && t <= 0) {
+            if (is_array) {
+                add_next_index_null(arr);
+            } else if (fetch_mode & SC_FETCH_ONE) {
+                ZVAL_NULL(arr);
+            } else {
+                sc_add_assoc_null_ex(arr, column_name.c_str(), column_name.length());
+            }
+            return;
+        }
+        char buffer[32];
+        size_t l = strftime(buffer, sizeof(buffer), fmt, gmtime(&t));
+        if (is_array) {
+            sc_add_next_index_stringl(arr, buffer, l, 1);
+        } else {
+            SC_SINGLE_STRING(buffer, l);
+        }
+    } else {
+        if (is_array) {
+            add_next_index_long(arr, (zend_long)t);
+        } else if (fetch_mode & SC_FETCH_ONE) {
+            ZVAL_LONG(arr, (zend_long)t);
+        } else {
+            sc_add_assoc_long_ex(arr, column_name.c_str(), column_name.length(), (zend_long)t);
+        }
+    }
+}
+
+// Read one integer column cell (UInt8..UInt64, Int8..Int64, IPv4) and
+// emit it as a PHP long. The fetch-mode dispatch is identical across
+// all eight integer column types, so they all route through here.
+template <typename TCol>
+static inline void emitIntColumn(zval *arr, const ColumnRef& columnRef, int row,
+                                 const string& column_name, int8_t is_array, long fetch_mode)
+{
+    auto col_ptr = columnRef->As<TCol>();
+    if (!col_ptr) {
+        throw std::runtime_error("Integer column downcast failed");
+    }
+    auto col = (*col_ptr)[row];
+    if (is_array) {
+        add_next_index_long(arr, (long)col);
+    } else {
+        SC_SINGLE_LONG();
+    }
+}
+
 void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column_name, int8_t is_array, long fetch_mode)
 {
     switch (columnRef->Type()->GetCode())
     {
     case Type::Code::UInt64:
-    {
-        auto col = (*columnRef->As<ColumnUInt64>())[row];
-        if (is_array)
-        {
-            add_next_index_long(arr, (long)col);
-        }
-        else
-        {
-            SC_SINGLE_LONG();
-        }
+        emitIntColumn<ColumnUInt64>(arr, columnRef, row, column_name, is_array, fetch_mode);
         break;
-    }
     case Type::Code::UInt8:
-    {
-        auto col = (*columnRef->As<ColumnUInt8>())[row];
-        if (is_array)
-        {
-            add_next_index_long(arr, (long)col);
-        }
-        else
-        {
-            SC_SINGLE_LONG();
-        }
+        emitIntColumn<ColumnUInt8>(arr, columnRef, row, column_name, is_array, fetch_mode);
         break;
-    }
     case Type::Code::UInt16:
-    {
-        auto col = (*columnRef->As<ColumnUInt16>())[row];
-        if (is_array)
-        {
-            add_next_index_long(arr, (long)col);
-        }
-        else
-        {
-            SC_SINGLE_LONG();
-        }
+        emitIntColumn<ColumnUInt16>(arr, columnRef, row, column_name, is_array, fetch_mode);
         break;
-    }
     case Type::Code::UInt32:
     case Type::Code::IPv4:
-    {
-        auto col = (*columnRef->As<ColumnUInt32>())[row];
-        if (is_array)
-        {
-            add_next_index_long(arr, (long)col);
-        }
-        else
-        {
-            SC_SINGLE_LONG();
-        }
+        emitIntColumn<ColumnUInt32>(arr, columnRef, row, column_name, is_array, fetch_mode);
         break;
-    }
     case Type::Code::Int8:
-    {
-        auto col = (*columnRef->As<ColumnInt8>())[row];
-        if (is_array)
-        {
-            add_next_index_long(arr, (long)col);
-        }
-        else
-        {
-            SC_SINGLE_LONG();
-        }
+        emitIntColumn<ColumnInt8>(arr, columnRef, row, column_name, is_array, fetch_mode);
         break;
-    }
     case Type::Code::Int16:
-    {
-        auto col = (*columnRef->As<ColumnInt16>())[row];
-        if (is_array)
-        {
-            add_next_index_long(arr, (long)col);
-        }
-        else
-        {
-            SC_SINGLE_LONG();
-        }
+        emitIntColumn<ColumnInt16>(arr, columnRef, row, column_name, is_array, fetch_mode);
         break;
-    }
     case Type::Code::Int32:
-    {
-        auto col = (*columnRef->As<ColumnInt32>())[row];
-        if (is_array)
-        {
-            add_next_index_long(arr, (long)col);
-        }
-        else
-        {
-            SC_SINGLE_LONG();
-        }
+        emitIntColumn<ColumnInt32>(arr, columnRef, row, column_name, is_array, fetch_mode);
         break;
-    }
     case Type::Code::Int64:
-    {
-        auto col = (*columnRef->As<ColumnInt64>())[row];
-        if (is_array)
-        {
-            add_next_index_long(arr, (long)col);
-        }
-        else
-        {
-            SC_SINGLE_LONG();
-        }
+        emitIntColumn<ColumnInt64>(arr, columnRef, row, column_name, is_array, fetch_mode);
         break;
-    }
     case Type::Code::UUID:
     {
         stringstream first;
@@ -1236,46 +1131,8 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
     case Type::Code::DateTime:
     {
         auto col = columnRef->As<ColumnDateTime>();
-        if (is_array)
-        {
-            if (fetch_mode & SC_FETCH_DATE_AS_STRINGS) {
-                char buffer[32];
-                size_t l;
-                std::time_t t = (long)col->As<ColumnDateTime>()->At(row);
-                if (t > 0) {
-                    l = strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", gmtime(&t));
-                    sc_add_next_index_stringl(arr, buffer, l, 1);
-                } else {
-                    add_next_index_null(arr);
-                }
-            } else {
-                add_next_index_long(arr, (long)col->As<ColumnDateTime>()->At(row));
-            }
-        }
-        else
-        {
-            if (fetch_mode & SC_FETCH_DATE_AS_STRINGS) {
-                char buffer[32];
-                size_t l;
-                std::time_t t = (long)col->As<ColumnDateTime>()->At(row);
-                if (t > 0) {
-                    l = strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", gmtime(&t));
-                    SC_SINGLE_STRING(buffer, l);
-                } else {
-                    if (fetch_mode & SC_FETCH_ONE) {
-                        ZVAL_NULL(arr);
-                    } else {
-                        sc_add_assoc_null_ex(arr, column_name.c_str(), column_name.length());
-                    }
-                }
-            } else {
-                if (fetch_mode & SC_FETCH_ONE) {
-                    ZVAL_LONG(arr, (long)col->As<ColumnDateTime>()->At(row));
-                } else {
-                    sc_add_assoc_long_ex(arr, column_name.c_str(), column_name.length(), (zend_long)col->As<ColumnDateTime>()->At(row));
-                }
-            }
-        }
+        emitEpoch(arr, (std::time_t)col->At(row), "%Y-%m-%d %H:%M:%S",
+                  column_name, is_array, fetch_mode, /*null_if_nonpositive=*/true);
         break;
     }
     case Type::Code::DateTime64:
@@ -1316,69 +1173,15 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
     case Type::Code::Date:
     {
         auto col = columnRef->As<ColumnDate>();
-        if (is_array)
-        {
-            if (fetch_mode & SC_FETCH_DATE_AS_STRINGS) {
-                char buffer[16];
-                size_t l;
-                std::time_t t = (long)col->As<ColumnDate>()->At(row);
-                if (t > 0) {
-                    l = strftime(buffer, sizeof(buffer), "%Y-%m-%d", gmtime(&t));
-                    sc_add_next_index_stringl(arr, buffer, l, 1);
-                } else {
-                    add_next_index_null(arr);
-                }
-            } else {
-                add_next_index_long(arr, (long)col->As<ColumnDate>()->At(row));
-            }
-        }
-        else
-        {
-            if (fetch_mode & SC_FETCH_DATE_AS_STRINGS) {
-                char buffer[16];
-                size_t l;
-                std::time_t t = (long)col->As<ColumnDate>()->At(row);
-                if (t > 0) {
-                    l = strftime(buffer, sizeof(buffer), "%Y-%m-%d", gmtime(&t));
-                    SC_SINGLE_STRING(buffer, l);
-                } else {
-                    if (fetch_mode & SC_FETCH_ONE) {
-                        ZVAL_NULL(arr);
-                    } else {
-                        sc_add_assoc_null_ex(arr, column_name.c_str(), column_name.length());
-                    }
-                }
-            } else {
-                if (fetch_mode & SC_FETCH_ONE) {
-                    ZVAL_LONG(arr, (long)col->As<ColumnDate>()->At(row));
-                } else {
-                    sc_add_assoc_long_ex(arr, column_name.c_str(), column_name.length(), (zend_long)col->As<ColumnDate>()->At(row));
-                }
-            }
-        }
+        emitEpoch(arr, (std::time_t)col->At(row), "%Y-%m-%d",
+                  column_name, is_array, fetch_mode, /*null_if_nonpositive=*/true);
         break;
     }
     case Type::Code::Date32:
     {
         auto col = columnRef->As<ColumnDate32>();
-        std::time_t t = col->At(row);
-        if (fetch_mode & SC_FETCH_DATE_AS_STRINGS) {
-            char buffer[16];
-            size_t l = strftime(buffer, sizeof(buffer), "%Y-%m-%d", gmtime(&t));
-            if (is_array) {
-                sc_add_next_index_stringl(arr, buffer, l, 1);
-            } else {
-                SC_SINGLE_STRING(buffer, l);
-            }
-        } else {
-            if (is_array) {
-                add_next_index_long(arr, (long)t);
-            } else if (fetch_mode & SC_FETCH_ONE) {
-                ZVAL_LONG(arr, (long)t);
-            } else {
-                sc_add_assoc_long_ex(arr, column_name.c_str(), column_name.length(), (zend_long)t);
-            }
-        }
+        emitEpoch(arr, (std::time_t)col->At(row), "%Y-%m-%d",
+                  column_name, is_array, fetch_mode, /*null_if_nonpositive=*/false);
         break;
     }
     case Type::Code::Time:
