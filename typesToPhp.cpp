@@ -31,6 +31,8 @@ extern "C" {
 #include "lib/clickhouse-cpp/clickhouse/client.h"
 #include "lib/clickhouse-cpp/clickhouse/error_codes.h"
 #include "lib/clickhouse-cpp/clickhouse/types/type_parser.h"
+#include "lib/clickhouse-cpp/clickhouse/columns/factory.h"
+#include "lib/clickhouse-cpp/clickhouse/columns/lowcardinality.h"
 #include <iostream>
 #include <map>
 #include <sstream>
@@ -118,6 +120,10 @@ ColumnRef createColumn(TypeRef type)
     {
         return std::make_shared<ColumnDateTime>();
     }
+    case Type::Code::DateTime64:
+    {
+        return std::make_shared<ColumnDateTime64>(type->As<DateTime64Type>()->GetPrecision());
+    }
     case Type::Code::Date:
     {
         return std::make_shared<ColumnDate>();
@@ -125,49 +131,41 @@ ColumnRef createColumn(TypeRef type)
 
     case Type::Code::Array:
     {
-        return std::make_shared<ColumnArray>(createColumn(type->GetItemType()));
+        return std::make_shared<ColumnArray>(createColumn(type->As<ArrayType>()->GetItemType()));
     }
 
     case Type::Code::Enum8:
     {
-        std::vector<Type::EnumItem> enum_items;
-
-        auto enumType = EnumType(type);
-
-        for (auto ei = enumType.BeginValueToName(); ; )
-        {
-            enum_items.push_back(
-                Type::EnumItem {ei->second, (int8_t)ei->first});
-            if (++ei == enumType.EndValueToName())
-            {
-                break;
-            }
-        }
-
-        return std::make_shared<ColumnEnum8>(Type::CreateEnum8(enum_items));
+        return std::make_shared<ColumnEnum8>(type);
     }
     case Type::Code::Enum16:
     {
-        std::vector<Type::EnumItem> enum_items;
-
-        auto enumType = EnumType(type);
-
-        for (auto ei = enumType.BeginValueToName(); ; )
-        {
-            enum_items.push_back(
-                Type::EnumItem {ei->second, (int16_t)ei->first});
-            if (++ei == enumType.EndValueToName())
-            {
-                break;
-            }
-        }
-
-        return std::make_shared<ColumnEnum16>(Type::CreateEnum16(enum_items));
+        return std::make_shared<ColumnEnum16>(type);
     }
 
     case Type::Code::Nullable:
     {
-        return std::make_shared<ColumnNullable>(createColumn(type->GetNestedType()), std::make_shared<ColumnUInt8>());
+        return std::make_shared<ColumnNullable>(createColumn(type->As<NullableType>()->GetNestedType()), std::make_shared<ColumnUInt8>());
+    }
+
+    case Type::Code::LowCardinality:
+    {
+        TypeRef nested = type->As<LowCardinalityType>()->GetNestedType();
+        if (nested->GetCode() == Type::Code::String) {
+            return std::make_shared<ColumnLowCardinalityT<ColumnString>>();
+        }
+        if (nested->GetCode() == Type::Code::FixedString) {
+            string typeName = nested->GetName();
+            typeName.erase(typeName.find("FixedString("), 12);
+            typeName.erase(typeName.find(")"), 1);
+            return std::make_shared<ColumnLowCardinalityT<ColumnFixedString>>(std::stoi(typeName));
+        }
+        throw std::runtime_error("LowCardinality only supported over String / FixedString");
+    }
+
+    case Type::Code::Map:
+    {
+        return CreateColumnByType(type->GetName());
     }
 
     case Type::Code::Tuple:
@@ -179,6 +177,9 @@ ColumnRef createColumn(TypeRef type)
     {
         throw std::runtime_error("can't support Void");
     }
+
+    default:
+        return CreateColumnByType(type->GetName());
     }
 
     throw std::runtime_error("createColumn runtime error.");
@@ -336,7 +337,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         {
             if (Z_TYPE_P(array_value) == IS_NULL)
             {
-                value->Append(UInt128(0, 0));
+                value->Append(UUID{0, 0});
             }
             else
             {
@@ -353,7 +354,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 string second = value_string.substr(16, 16);
                 uint64_t i_first = std::stoull(first, nullptr, 16);
                 uint64_t i_second = std::stoull(second, nullptr, 16);
-                value->Append(UInt128(i_first, i_second));
+                value->Append(UUID{i_first, i_second});
             }
         }
         SC_HASHTABLE_FOREACH_END();
@@ -438,6 +439,29 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         return value;
         break;
     }
+    case Type::Code::DateTime64:
+    {
+        size_t precision = type->As<DateTime64Type>()->GetPrecision();
+        auto value = std::make_shared<ColumnDateTime64>(precision);
+        int64_t scale = 1;
+        for (size_t i = 0; i < precision; ++i) scale *= 10;
+
+        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
+        {
+            if (Z_TYPE_P(array_value) == IS_STRING && memchr(Z_STRVAL_P(array_value), '-', Z_STRLEN_P(array_value)) != NULL) {
+                value->Append((int64_t)to_time_t(Z_STRVAL_P(array_value), false) * scale);
+            } else if (Z_TYPE_P(array_value) == IS_DOUBLE) {
+                value->Append((int64_t)(Z_DVAL_P(array_value) * scale));
+            } else {
+                convert_to_long(array_value);
+                value->Append((int64_t)Z_LVAL_P(array_value) * scale);
+            }
+        }
+        SC_HASHTABLE_FOREACH_END();
+
+        return value;
+        break;
+    }
     case Type::Code::Date:
     {
         auto value = std::make_shared<ColumnDate>();
@@ -463,13 +487,14 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
 
     case Type::Code::Array:
     {
-        if (type->GetItemType()->GetCode() == Type::Array)
+        TypeRef item_type = type->As<ArrayType>()->GetItemType();
+        if (item_type->GetCode() == Type::Array)
         {
             throw std::runtime_error("can't support Multidimensional Arrays");
         }
 
-        auto value = std::make_shared<ColumnArray>(createColumn(type->GetItemType()));
-        auto child = createColumn(type->GetItemType());
+        auto value = std::make_shared<ColumnArray>(createColumn(item_type));
+        auto child = createColumn(item_type);
 
         SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
         {
@@ -478,7 +503,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 throw std::runtime_error("The inserted data is not an array type");
             }
 
-            child->Append(insertColumn(type->GetItemType(), array_value));
+            child->Append(insertColumn(item_type, array_value));
 
             value->AppendAsColumn(child);
             child->Clear();
@@ -491,21 +516,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
 
     case Type::Code::Enum8:
     {
-        std::vector<Type::EnumItem> enum_items;
-
-        auto enumType = EnumType(type);
-
-        for (auto ei = enumType.BeginValueToName(); ; )
-        {
-            enum_items.push_back(
-                Type::EnumItem {ei->second, (int8_t)ei->first});
-            if (++ei == enumType.EndValueToName())
-            {
-                break;
-            }
-        }
-
-        auto value = std::make_shared<ColumnEnum8>(Type::CreateEnum8(enum_items));
+        auto value = std::make_shared<ColumnEnum8>(type);
 
         SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
         {
@@ -527,21 +538,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     }
     case Type::Code::Enum16:
     {
-        std::vector<Type::EnumItem> enum_items;
-
-        auto enumType = EnumType(type);
-
-        for (auto ei = enumType.BeginValueToName(); ; )
-        {
-            enum_items.push_back(
-                Type::EnumItem {ei->second, (int16_t)ei->first});
-            if (++ei == enumType.EndValueToName())
-            {
-                break;
-            }
-        }
-
-        auto value = std::make_shared<ColumnEnum16>(Type::CreateEnum16(enum_items));
+        auto value = std::make_shared<ColumnEnum16>(type);
 
         SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
         {
@@ -579,7 +576,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         }
         SC_HASHTABLE_FOREACH_END();
 
-        ColumnRef child = insertColumn(type->GetNestedType(), value_zval);
+        ColumnRef child = insertColumn(type->As<NullableType>()->GetNestedType(), value_zval);
 
         return std::make_shared<ColumnNullable>(child, nulls);
         break;
@@ -621,7 +618,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
             add_next_index_zval(return_should, return_tmp);
         }
 
-        auto tupleType = type->GetTupleType();
+        auto tupleType = type->As<TupleType>()->GetTupleType();
         
         std::vector<ColumnRef> columns;
 
@@ -643,6 +640,35 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
 
         return std::make_shared<ColumnTuple>(columns);
         break;
+    }
+
+    case Type::Code::LowCardinality:
+    {
+        TypeRef nested = type->As<LowCardinalityType>()->GetNestedType();
+        if (nested->GetCode() == Type::Code::String) {
+            auto value = std::make_shared<ColumnLowCardinalityT<ColumnString>>();
+            SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
+            {
+                convert_to_string(array_value);
+                value->Append(std::string_view(Z_STRVAL_P(array_value), Z_STRLEN_P(array_value)));
+            }
+            SC_HASHTABLE_FOREACH_END();
+            return value;
+        }
+        if (nested->GetCode() == Type::Code::FixedString) {
+            string typeName = nested->GetName();
+            typeName.erase(typeName.find("FixedString("), 12);
+            typeName.erase(typeName.find(")"), 1);
+            auto value = std::make_shared<ColumnLowCardinalityT<ColumnFixedString>>(std::stoi(typeName));
+            SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
+            {
+                convert_to_string(array_value);
+                value->Append(std::string_view(Z_STRVAL_P(array_value), Z_STRLEN_P(array_value)));
+            }
+            SC_HASHTABLE_FOREACH_END();
+            return value;
+        }
+        throw std::runtime_error("LowCardinality only supported over String / FixedString");
     }
 
     case Type::Code::Void:
@@ -839,11 +865,11 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
         auto col = (*columnRef->As<ColumnString>())[row];
         if (is_array)
         {
-            sc_add_next_index_stringl(arr, (char*)col.c_str(), col.length(), 1);
+            sc_add_next_index_stringl(arr, (char*)col.data(), col.length(), 1);
         }
         else
         {
-            SC_SINGLE_STRING((char*)col.c_str(), col.length());
+            SC_SINGLE_STRING((char*)col.data(), col.length());
         }
         break;
     }
@@ -853,11 +879,11 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
         auto col = (*columnRef->As<ColumnFixedString>())[row];
         if (is_array)
         {
-            sc_add_next_index_stringl(arr, (char*)col.c_str(), col.length(), 1);
+            sc_add_next_index_stringl(arr, (char*)col.data(), col.length(), 1);
         }
         else
         {
-            SC_SINGLE_STRING((char*)col.c_str(), strlen((char*)col.c_str()));
+            SC_SINGLE_STRING((char*)col.data(), col.length());
         }
         break;
     }
@@ -903,6 +929,41 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
                 } else {
                     sc_add_assoc_long_ex(arr, column_name.c_str(), column_name.length(), (zend_ulong)col->As<ColumnDateTime>()->At(row));
                 }
+            }
+        }
+        break;
+    }
+    case Type::Code::DateTime64:
+    {
+        auto col = columnRef->As<ColumnDateTime64>();
+        size_t precision = columnRef->Type()->As<DateTime64Type>()->GetPrecision();
+        int64_t scale = 1;
+        for (size_t i = 0; i < precision; ++i) scale *= 10;
+        int64_t raw = col->At(row);
+        std::time_t whole = (std::time_t)(raw / scale);
+        int64_t frac = raw % scale;
+        if (frac < 0) { frac = -frac; }
+
+        if (fetch_mode & SC_FETCH_DATE_AS_STRINGS) {
+            char buffer[64];
+            size_t l = strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", gmtime(&whole));
+            if (precision > 0) {
+                int written = snprintf(buffer + l, sizeof(buffer) - l, ".%0*lld",
+                                       (int)precision, (long long)frac);
+                if (written > 0) l += (size_t)written;
+            }
+            if (is_array) {
+                sc_add_next_index_stringl(arr, buffer, l, 1);
+            } else {
+                SC_SINGLE_STRING(buffer, l);
+            }
+        } else {
+            if (is_array) {
+                add_next_index_long(arr, (long)raw);
+            } else if (fetch_mode & SC_FETCH_ONE) {
+                ZVAL_LONG(arr, (long)raw);
+            } else {
+                sc_add_assoc_long_ex(arr, column_name.c_str(), column_name.length(), (zend_ulong)raw);
             }
         }
         break;
@@ -988,11 +1049,11 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
         auto array = columnRef->As<ColumnEnum8>();
         if (is_array)
         {
-            sc_add_next_index_stringl(arr, (char*)array->NameAt(row).c_str(), array->NameAt(row).length(), 1);
+            sc_add_next_index_stringl(arr, (char*)array->NameAt(row).data(), array->NameAt(row).length(), 1);
         }
         else
         {
-            SC_SINGLE_STRING((char*)array->NameAt(row).c_str(), array->NameAt(row).length());
+            SC_SINGLE_STRING((char*)array->NameAt(row).data(), array->NameAt(row).length());
         }
         break;
     }
@@ -1001,11 +1062,11 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
         auto array = columnRef->As<ColumnEnum16>();
         if (is_array)
         {
-            sc_add_next_index_stringl(arr, (char*)array->NameAt(row).c_str(), array->NameAt(row).length(), 1);
+            sc_add_next_index_stringl(arr, (char*)array->NameAt(row).data(), array->NameAt(row).length(), 1);
         }
         else
         {
-            SC_SINGLE_STRING((char*)array->NameAt(row).c_str(), array->NameAt(row).length());
+            SC_SINGLE_STRING((char*)array->NameAt(row).data(), array->NameAt(row).length());
         }
         break;
     }
@@ -1060,6 +1121,25 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
             {
                 sc_add_assoc_zval_ex(arr, column_name.c_str(), column_name.length(), return_tmp);
             }
+        }
+        break;
+    }
+
+    case Type::Code::LowCardinality:
+    {
+        TypeRef nested = columnRef->Type()->As<LowCardinalityType>()->GetNestedType();
+        std::string_view sv;
+        if (nested->GetCode() == Type::Code::String) {
+            sv = columnRef->As<ColumnLowCardinalityT<ColumnString>>()->At(row);
+        } else if (nested->GetCode() == Type::Code::FixedString) {
+            sv = columnRef->As<ColumnLowCardinalityT<ColumnFixedString>>()->At(row);
+        } else {
+            throw std::runtime_error("LowCardinality read only supports String / FixedString");
+        }
+        if (is_array) {
+            sc_add_next_index_stringl(arr, (char*)sv.data(), sv.length(), 1);
+        } else {
+            SC_SINGLE_STRING((char*)sv.data(), sv.length());
         }
         break;
     }

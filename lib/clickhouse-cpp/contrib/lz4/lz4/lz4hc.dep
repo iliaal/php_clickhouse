@@ -1,0 +1,5 @@
+lib/clickhouse-cpp/contrib/lz4/lz4/lz4hc.lo: \
+ /home/ilia/ai/SeasClick/lib/clickhouse-cpp/contrib/lz4/lz4/lz4hc.c \
+ /home/ilia/ai/SeasClick/lib/clickhouse-cpp/contrib/lz4/lz4/lz4hc.h \
+ /home/ilia/ai/SeasClick/lib/clickhouse-cpp/contrib/lz4/lz4/lz4.h \
+ /home/ilia/ai/SeasClick/lib/clickhouse-cpp/contrib/lz4/lz4/lz4.c

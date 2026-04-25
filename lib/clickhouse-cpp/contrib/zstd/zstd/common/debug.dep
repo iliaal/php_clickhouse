@@ -1,0 +1,3 @@
+lib/clickhouse-cpp/contrib/zstd/zstd/common/debug.lo: \
+ /home/ilia/ai/SeasClick/lib/clickhouse-cpp/contrib/zstd/zstd/common/debug.c \
+ /home/ilia/ai/SeasClick/lib/clickhouse-cpp/contrib/zstd/zstd/common/debug.h

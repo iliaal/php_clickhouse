@@ -11,7 +11,9 @@ template <
     typename TChar,
     typename TTraits = std::char_traits<TChar>
 >
-class StringViewImpl {
+class
+[[deprecated("Obsolete due to C++17's std::string_view. Will be removed in next major release (3.0) ")]]
+StringViewImpl {
 public:
     using size_type = size_t;
     using traits_type = TTraits;
@@ -73,6 +75,11 @@ public:
 
     inline size_type size() const noexcept {
         return size_;
+    }
+
+    // to mimic std::string and std::string_view
+    inline size_type length() const noexcept {
+        return size();
     }
 
 public:
