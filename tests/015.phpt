@@ -1,14 +1,11 @@
 --TEST--
 ClickHouse Exception test
 --SKIPIF--
-<?php if (!extension_loaded("SeasClick")) print "skip"; ?>
+<?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--
 <?php
-$config = [
-    "host"        => "clickhouse",
-    "port"        => "9000",
-    "compression" => true,
-];
+require __DIR__ . "/_clickhouse.inc";
+$config = clickhouse_test_config();
 
 $deleteTable = true;
 $client = new ClickHouse($config);
@@ -19,4 +16,4 @@ try {
 }
 ?>
 --EXPECT--
-string(18) "ClickHouseException"
+string(19) "ClickHouseException"

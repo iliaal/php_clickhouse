@@ -1,10 +1,10 @@
 --TEST--
-Check for SeasClick presence
+Check for ClickHouse extension presence
 --SKIPIF--
-<?php if (!extension_loaded("SeasClick")) print "skip"; ?>
+<?php if (!extension_loaded("clickhouse")) print "skip"; ?>
 --FILE--
 <?php 
-echo "SeasClick extension is available";
+echo "ClickHouse extension is available";
 /*
 	you can add regression tests for your extension here
 

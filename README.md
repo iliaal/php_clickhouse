@@ -50,7 +50,9 @@ git clone https://github.com/iliaal/php_clickhouse.git
 cd php_clickhouse
 phpize
 ./configure                              # default build
-./configure --enable-clickhouse-openssl  # with TLS, requires libssl-dev
+./configure --enable-clickhouse-openssl  # with TLS, requires OpenSSL development headers
+                                         #   (libssl-dev on Debian/Ubuntu, openssl-devel
+                                         #    on RHEL/Fedora, openssl-dev on Alpine)
 make && sudo make install
 ```
 

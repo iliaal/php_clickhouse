@@ -8,9 +8,9 @@ require __DIR__ . "/_clickhouse.inc";
 
 $c = new ClickHouse(clickhouse_test_config());
 
-$qid_select = "seasclick-test-016-sel-" . bin2hex(random_bytes(4));
-$qid_insert = "seasclick-test-016-ins-" . bin2hex(random_bytes(4));
-$qid_drop   = "seasclick-test-016-drop-" . bin2hex(random_bytes(4));
+$qid_select = "clickhouse-test-q-sel-" . bin2hex(random_bytes(4));
+$qid_insert = "clickhouse-test-q-ins-" . bin2hex(random_bytes(4));
+$qid_drop   = "clickhouse-test-q-drop-" . bin2hex(random_bytes(4));
 
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
 $c->execute("DROP TABLE IF EXISTS test.qid_t");
