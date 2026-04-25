@@ -1,16 +1,12 @@
 --TEST--
 SeasClick testFloat
 --SKIPIF--
-<?php if (!extension_loaded("SeasClick")) print "skip"; ?>
+<?php require __DIR__ . "/_clickhouse.inc"; seasclick_skip_if_no_server(); ?>
 --FILE--
 <?php
-$config = [
-    "host" => "clickhouse",
-    "port" => "9000",
-    "compression" => true
-];
+require __DIR__ . "/_clickhouse.inc";
 
-clientTest($config);
+clientTest(seasclick_test_config());
 
 function clientTest($config)
 {
@@ -22,7 +18,8 @@ function clientTest($config)
 }
 
 function testFloat($client, $deleteTable = false) {
-    $client->execute("CREATE TABLE IF NOT EXISTS test.float_test (float32_c Float32, float64_c Float64) ENGINE = Memory");
+    $client->execute("DROP TABLE IF EXISTS test.float_test");
+    $client->execute("CREATE TABLE test.float_test (float32_c Float32, float64_c Float64) ENGINE = Memory");
 
     $client->insert("test.float_test",[
         'float32_c', 'float64_c'

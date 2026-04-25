@@ -1,16 +1,12 @@
 --TEST--
 SeasClick testUUID
 --SKIPIF--
-<?php if (!extension_loaded("SeasClick")) print "skip"; ?>
+<?php require __DIR__ . "/_clickhouse.inc"; seasclick_skip_if_no_server(); ?>
 --FILE--
 <?php
-$config = [
-    "host" => "clickhouse",
-    "port" => "9000",
-    "compression" => true
-];
+require __DIR__ . "/_clickhouse.inc";
 
-clientTest($config);
+clientTest(seasclick_test_config());
 
 function clientTest($config)
 {
@@ -22,7 +18,8 @@ function clientTest($config)
 }
 
 function testUUID($client, $deleteTable = false) {
-    $client->execute("CREATE TABLE IF NOT EXISTS test.uuid_test (uuid_c UUID, uuid2_c UUID) ENGINE = Memory");
+    $client->execute("DROP TABLE IF EXISTS test.uuid_test");
+    $client->execute("CREATE TABLE test.uuid_test (uuid_c UUID, uuid2_c UUID) ENGINE = Memory");
 
     $client->insert("test.uuid_test",[
         'uuid_c', 'uuid2_c'
@@ -40,7 +37,7 @@ function testUUID($client, $deleteTable = false) {
     ]);
     $client->writeEnd();
     
-    $result = $client->select("SELECT {select} FROM {table}", [
+    $result = $client->select("SELECT {select} FROM {table} ORDER BY uuid_c, uuid2_c", [
         'select' => 'uuid_c, uuid2_c',
         'table' => 'test.uuid_test'
     ]);
@@ -59,9 +56,9 @@ array(4) {
   [0]=>
   array(2) {
     ["uuid_c"]=>
-    string(32) "31249a1b7b0542709f37c609b48a9bb2"
+    string(32) "00000000000000009f37c609b48a9bb2"
     ["uuid2_c"]=>
-    string(32) "31249a1b7b0542709f37c609b48a9bb2"
+    string(32) "00000000000000000000000000000000"
   }
   [1]=>
   array(2) {
@@ -73,7 +70,7 @@ array(4) {
   [2]=>
   array(2) {
     ["uuid_c"]=>
-    string(32) "00000000000000009f37c609b48a9bb2"
+    string(32) "31249a1b7b0542709f37c609b48a9bb2"
     ["uuid2_c"]=>
     string(32) "00000000000000000000000000000000"
   }
@@ -82,6 +79,6 @@ array(4) {
     ["uuid_c"]=>
     string(32) "31249a1b7b0542709f37c609b48a9bb2"
     ["uuid2_c"]=>
-    string(32) "00000000000000000000000000000000"
+    string(32) "31249a1b7b0542709f37c609b48a9bb2"
   }
 }

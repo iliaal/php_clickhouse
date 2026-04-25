@@ -1,16 +1,12 @@
 --TEST--
 SeasClick testInt
 --SKIPIF--
-<?php if (!extension_loaded("SeasClick")) print "skip"; ?>
+<?php require __DIR__ . "/_clickhouse.inc"; seasclick_skip_if_no_server(); ?>
 --FILE--
 <?php
-$config = [
-    "host" => "clickhouse",
-    "port" => "9000",
-    "compression" => true
-];
+require __DIR__ . "/_clickhouse.inc";
 
-clientTest($config);
+clientTest(seasclick_test_config());
 
 function clientTest($config)
 {
@@ -22,7 +18,8 @@ function clientTest($config)
 }
 
 function testUInt($client, $deleteTable = false) {
-    $client->execute("CREATE TABLE IF NOT EXISTS test.int_test (int8_c Int8, int16_c Int16, uint8_c UInt8, uint16_c UInt16) ENGINE = Memory");
+    $client->execute("DROP TABLE IF EXISTS test.int_test");
+    $client->execute("CREATE TABLE test.int_test (int8_c Int8, int16_c Int16, uint8_c UInt8, uint16_c UInt16) ENGINE = Memory");
 
     $client->insert("test.int_test",[
         'int8_c','int16_c','uint8_c','uint16_c'
