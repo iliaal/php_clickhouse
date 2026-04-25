@@ -1,15 +1,15 @@
 --TEST--
-SeasClick ZSTD compression round-trip
+ClickHouse ZSTD compression round-trip
 --SKIPIF--
-<?php require __DIR__ . "/_clickhouse.inc"; seasclick_skip_if_no_server(); ?>
+<?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-$config = seasclick_test_config();
+$config = clickhouse_test_config();
 $config["compression"] = "zstd";
 
-$c = new SeasClick($config);
+$c = new ClickHouse($config);
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
 $c->execute("DROP TABLE IF EXISTS test.zstd_t");
 $c->execute("CREATE TABLE test.zstd_t (id UInt32, payload String) ENGINE = Memory");

@@ -1,8 +1,8 @@
 /*
   +----------------------------------------------------------------------+
-  | SeasClick                                                            |
+  | php_clickhouse                                                       |
   +----------------------------------------------------------------------+
-  | Copyright (c) 1997-2018 The PHP Group                                |
+  | Copyright (c) 1997-2026 The PHP Group                                |
   +----------------------------------------------------------------------+
   | This source file is subject to version 3.01 of the PHP license,      |
   | that is bundled with this package in the file LICENSE, and is        |
@@ -12,7 +12,8 @@
   | obtain it through the world-wide-web, please send a note to          |
   | license@php.net so we can mail you a copy immediately.               |
   +----------------------------------------------------------------------+
-  | Author:  SeasX Group <ahhhh.wang@gmail.com>                          |
+  | Author: Ilia Alshanetsky <ilia@ilia.ws>                              |
+  | Original SeasClick author: SeasX Group <ahhhh.wang@gmail.com>        |
   +----------------------------------------------------------------------+
 */
 #ifdef HAVE_CONFIG_H
@@ -27,7 +28,7 @@ extern "C" {
 #include "php7_wrapper.h"
 }
 
-#include "php_SeasClick.h"
+#include "php_clickhouse.h"
 
 #include "lib/clickhouse-cpp/clickhouse/client.h"
 #include "lib/clickhouse-cpp/clickhouse/error_codes.h"
@@ -40,138 +41,143 @@ extern "C" {
 using namespace clickhouse;
 using namespace std;
 
-zend_class_entry *SeasClick_ce, *SeasClickException_ce;
+zend_class_entry *clickhouse_ce, *clickhouse_exception_ce;
 map<int, Client*> clientMap;
 map<int, Block> clientInsertBlack;
 
-#ifdef COMPILE_DL_SEASCLICK
+#ifdef COMPILE_DL_CLICKHOUSE
 extern "C" {
-    ZEND_GET_MODULE(SeasClick)
+    ZEND_GET_MODULE(clickhouse)
 }
 #endif
 
-// PHP_FUNCTION(SeasClick_version)
+// PHP_FUNCTION(clickhouse_version)
 // {
-//     SC_RETURN_STRINGL(PHP_SEASCLICK_VERSION, strlen(PHP_SEASCLICK_VERSION));
+//     SC_RETURN_STRINGL(PHP_CLICKHOUSE_VERSION, strlen(PHP_CLICKHOUSE_VERSION));
 // }
 
-static PHP_METHOD(SEASCLICK_RES_NAME, __construct);
-static PHP_METHOD(SEASCLICK_RES_NAME, __destruct);
-static PHP_METHOD(SEASCLICK_RES_NAME, select);
-static PHP_METHOD(SEASCLICK_RES_NAME, insert);
-static PHP_METHOD(SEASCLICK_RES_NAME, writeStart);
-static PHP_METHOD(SEASCLICK_RES_NAME, write);
-static PHP_METHOD(SEASCLICK_RES_NAME, writeEnd);
-static PHP_METHOD(SEASCLICK_RES_NAME, execute);
-static PHP_METHOD(SEASCLICK_RES_NAME, ping);
+static PHP_METHOD(CLICKHOUSE_RES_NAME, __construct);
+static PHP_METHOD(CLICKHOUSE_RES_NAME, __destruct);
+static PHP_METHOD(CLICKHOUSE_RES_NAME, select);
+static PHP_METHOD(CLICKHOUSE_RES_NAME, insert);
+static PHP_METHOD(CLICKHOUSE_RES_NAME, writeStart);
+static PHP_METHOD(CLICKHOUSE_RES_NAME, write);
+static PHP_METHOD(CLICKHOUSE_RES_NAME, writeEnd);
+static PHP_METHOD(CLICKHOUSE_RES_NAME, execute);
+static PHP_METHOD(CLICKHOUSE_RES_NAME, ping);
 
-ZEND_BEGIN_ARG_INFO_EX(SeasClick_construct, 0, 0, 1)
+ZEND_BEGIN_ARG_INFO_EX(clickhouse_construct, 0, 0, 1)
 ZEND_ARG_INFO(0, connectParams)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_INFO_EX(SeasClick_destruct, 0, 0, 0)
+ZEND_BEGIN_ARG_INFO_EX(clickhouse_destruct, 0, 0, 0)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_INFO_EX(SeasClick_select, 0, 0, 1)
+ZEND_BEGIN_ARG_INFO_EX(clickhouse_select, 0, 0, 1)
 ZEND_ARG_INFO(0, sql)
 ZEND_ARG_INFO(0, params)
 ZEND_ARG_INFO(0, fetch_mode)
 ZEND_ARG_INFO(0, query_id)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_INFO_EX(SeasClick_insert, 0, 0, 3)
+ZEND_BEGIN_ARG_INFO_EX(clickhouse_insert, 0, 0, 3)
 ZEND_ARG_INFO(0, table)
 ZEND_ARG_INFO(0, columns)
 ZEND_ARG_INFO(0, values)
 ZEND_ARG_INFO(0, query_id)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_INFO_EX(SeasClick_writeStart, 0, 0, 2)
+ZEND_BEGIN_ARG_INFO_EX(clickhouse_writeStart, 0, 0, 2)
 ZEND_ARG_INFO(0, table)
 ZEND_ARG_INFO(0, columns)
 ZEND_ARG_INFO(0, query_id)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_INFO_EX(SeasClick_write, 0, 0, 1)
+ZEND_BEGIN_ARG_INFO_EX(clickhouse_write, 0, 0, 1)
 ZEND_ARG_INFO(0, values)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_INFO_EX(SeasClick_writeEnd, 0, 0, 0)
+ZEND_BEGIN_ARG_INFO_EX(clickhouse_writeEnd, 0, 0, 0)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_INFO_EX(SeasClick_execute, 0, 0, 1)
+ZEND_BEGIN_ARG_INFO_EX(clickhouse_execute, 0, 0, 1)
 ZEND_ARG_INFO(0, sql)
 ZEND_ARG_INFO(0, params)
 ZEND_ARG_INFO(0, query_id)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_INFO_EX(SeasClick_ping, 0, 0, 0)
+ZEND_BEGIN_ARG_INFO_EX(clickhouse_ping, 0, 0, 0)
 ZEND_END_ARG_INFO()
 
-/* {{{ SeasClick_functions[] */
-const zend_function_entry SeasClick_functions[] =
+/* {{{ clickhouse_functions[] */
+const zend_function_entry clickhouse_functions[] =
 {
-    //PHP_FE(SeasClick_version,	NULL)
+    //PHP_FE(clickhouse_version,	NULL)
     PHP_FE_END
 };
 /* }}} */
 
-const zend_function_entry SeasClick_methods[] =
+const zend_function_entry clickhouse_methods[] =
 {
-    PHP_ME(SEASCLICK_RES_NAME, __construct,   SeasClick_construct, ZEND_ACC_PUBLIC | ZEND_ACC_CTOR)
-    PHP_ME(SEASCLICK_RES_NAME, __destruct,    SeasClick_destruct, ZEND_ACC_PUBLIC)
-    PHP_ME(SEASCLICK_RES_NAME, select,        SeasClick_select, ZEND_ACC_PUBLIC)
-    PHP_ME(SEASCLICK_RES_NAME, insert,        SeasClick_insert, ZEND_ACC_PUBLIC)
-    PHP_ME(SEASCLICK_RES_NAME, writeStart,    SeasClick_writeStart, ZEND_ACC_PUBLIC)
-    PHP_ME(SEASCLICK_RES_NAME, write,         SeasClick_write, ZEND_ACC_PUBLIC)
-    PHP_ME(SEASCLICK_RES_NAME, writeEnd,      SeasClick_writeEnd, ZEND_ACC_PUBLIC)
-    PHP_ME(SEASCLICK_RES_NAME, execute,       SeasClick_execute, ZEND_ACC_PUBLIC)
-    PHP_ME(SEASCLICK_RES_NAME, ping,          SeasClick_ping, ZEND_ACC_PUBLIC)
+    PHP_ME(CLICKHOUSE_RES_NAME, __construct,   clickhouse_construct, ZEND_ACC_PUBLIC | ZEND_ACC_CTOR)
+    PHP_ME(CLICKHOUSE_RES_NAME, __destruct,    clickhouse_destruct, ZEND_ACC_PUBLIC)
+    PHP_ME(CLICKHOUSE_RES_NAME, select,        clickhouse_select, ZEND_ACC_PUBLIC)
+    PHP_ME(CLICKHOUSE_RES_NAME, insert,        clickhouse_insert, ZEND_ACC_PUBLIC)
+    PHP_ME(CLICKHOUSE_RES_NAME, writeStart,    clickhouse_writeStart, ZEND_ACC_PUBLIC)
+    PHP_ME(CLICKHOUSE_RES_NAME, write,         clickhouse_write, ZEND_ACC_PUBLIC)
+    PHP_ME(CLICKHOUSE_RES_NAME, writeEnd,      clickhouse_writeEnd, ZEND_ACC_PUBLIC)
+    PHP_ME(CLICKHOUSE_RES_NAME, execute,       clickhouse_execute, ZEND_ACC_PUBLIC)
+    PHP_ME(CLICKHOUSE_RES_NAME, ping,          clickhouse_ping, ZEND_ACC_PUBLIC)
     PHP_FE_END
 };
 
-#define REGISTER_SC_CLASS_CONST_LONG(const_name, value) \
-	zend_declare_class_constant_long(SeasClick_ce, const_name, sizeof(const_name)-1, (zend_long)value);
+#define REGISTER_CLICKHOUSE_CONST_LONG(const_name, value) \
+	zend_declare_class_constant_long(clickhouse_ce, const_name, sizeof(const_name)-1, (zend_long)value);
 
 /* {{{ PHP_MINIT_FUNCTION
  */
-PHP_MINIT_FUNCTION(SeasClick)
+PHP_MINIT_FUNCTION(clickhouse)
 {
-    zend_class_entry SeasClick, SeasClickException;
-    INIT_CLASS_ENTRY(SeasClick, SEASCLICK_RES_NAME, SeasClick_methods);
-    INIT_CLASS_ENTRY(SeasClickException, "SeasClickException", NULL);
+    zend_class_entry ce_main, ce_exception;
+    INIT_CLASS_ENTRY(ce_main, CLICKHOUSE_RES_NAME, clickhouse_methods);
+    INIT_CLASS_ENTRY(ce_exception, CLICKHOUSE_EXCEPTION_NAME, NULL);
 
-    SeasClick_ce = zend_register_internal_class_ex(&SeasClick, NULL);
-    SeasClickException_ce = zend_register_internal_class_ex(&SeasClickException, zend_ce_exception);
+    clickhouse_ce = zend_register_internal_class_ex(&ce_main, NULL);
+    clickhouse_exception_ce = zend_register_internal_class_ex(&ce_exception, zend_ce_exception);
 
-    zend_declare_property_stringl(SeasClick_ce, "host", strlen("host"), "127.0.0.1", sizeof("127.0.0.1") - 1, ZEND_ACC_PROTECTED);
-    zend_declare_property_long(SeasClick_ce, "port", strlen("port"), 9000, ZEND_ACC_PROTECTED);
-    zend_declare_property_stringl(SeasClick_ce, "database", strlen("database"), "default", sizeof("default") - 1, ZEND_ACC_PROTECTED);
-    zend_declare_property_null(SeasClick_ce, "user", strlen("user"), ZEND_ACC_PROTECTED);
-    zend_declare_property_null(SeasClick_ce, "passwd", strlen("passwd"), ZEND_ACC_PROTECTED);
-    zend_declare_property_bool(SeasClick_ce, "compression", strlen("compression"), false, ZEND_ACC_PROTECTED);
-    zend_declare_property_long(SeasClick_ce, "retry_timeout", strlen("retry_timeout"), 5, ZEND_ACC_PROTECTED);
-    zend_declare_property_long(SeasClick_ce, "retry_count", strlen("retry_count"), 1, ZEND_ACC_PROTECTED);
-    zend_declare_property_long(SeasClick_ce, "receive_timeout", strlen("receive_timeout"), 0, ZEND_ACC_PROTECTED);
-    zend_declare_property_long(SeasClick_ce, "connect_timeout", strlen("connect_timeout"), 5, ZEND_ACC_PROTECTED);
+    /* Back-compat aliases for the original SeasClick name. Deprecated;
+     * removed in the next major release. */
+    zend_register_class_alias(CLICKHOUSE_RES_NAME_LEGACY, clickhouse_ce);
+    zend_register_class_alias(CLICKHOUSE_EXCEPTION_NAME_LEGACY, clickhouse_exception_ce);
 
-    REGISTER_SC_CLASS_CONST_LONG("FETCH_ONE", (zend_long)SC_FETCH_ONE);
-    REGISTER_SC_CLASS_CONST_LONG("FETCH_KEY_PAIR", (zend_long)SC_FETCH_KEY_PAIR);
-    REGISTER_SC_CLASS_CONST_LONG("DATE_AS_STRINGS", (zend_long)SC_FETCH_DATE_AS_STRINGS);
-    REGISTER_SC_CLASS_CONST_LONG("FETCH_COLUMN", (zend_long)SC_FETCH_COLUMN);
+    zend_declare_property_stringl(clickhouse_ce, "host", strlen("host"), "127.0.0.1", sizeof("127.0.0.1") - 1, ZEND_ACC_PROTECTED);
+    zend_declare_property_long(clickhouse_ce, "port", strlen("port"), 9000, ZEND_ACC_PROTECTED);
+    zend_declare_property_stringl(clickhouse_ce, "database", strlen("database"), "default", sizeof("default") - 1, ZEND_ACC_PROTECTED);
+    zend_declare_property_null(clickhouse_ce, "user", strlen("user"), ZEND_ACC_PROTECTED);
+    zend_declare_property_null(clickhouse_ce, "passwd", strlen("passwd"), ZEND_ACC_PROTECTED);
+    zend_declare_property_bool(clickhouse_ce, "compression", strlen("compression"), false, ZEND_ACC_PROTECTED);
+    zend_declare_property_long(clickhouse_ce, "retry_timeout", strlen("retry_timeout"), 5, ZEND_ACC_PROTECTED);
+    zend_declare_property_long(clickhouse_ce, "retry_count", strlen("retry_count"), 1, ZEND_ACC_PROTECTED);
+    zend_declare_property_long(clickhouse_ce, "receive_timeout", strlen("receive_timeout"), 0, ZEND_ACC_PROTECTED);
+    zend_declare_property_long(clickhouse_ce, "connect_timeout", strlen("connect_timeout"), 5, ZEND_ACC_PROTECTED);
 
-    SeasClick_ce->ce_flags |= ZEND_ACC_FINAL;
+    REGISTER_CLICKHOUSE_CONST_LONG("FETCH_ONE", (zend_long)SC_FETCH_ONE);
+    REGISTER_CLICKHOUSE_CONST_LONG("FETCH_KEY_PAIR", (zend_long)SC_FETCH_KEY_PAIR);
+    REGISTER_CLICKHOUSE_CONST_LONG("DATE_AS_STRINGS", (zend_long)SC_FETCH_DATE_AS_STRINGS);
+    REGISTER_CLICKHOUSE_CONST_LONG("FETCH_COLUMN", (zend_long)SC_FETCH_COLUMN);
+
+    clickhouse_ce->ce_flags |= ZEND_ACC_FINAL;
     return SUCCESS;
 }
 /* }}} */
 
 /* {{{ PHP_MINFO_FUNCTION
  */
-PHP_MINFO_FUNCTION(SeasClick)
+PHP_MINFO_FUNCTION(clickhouse)
 {
     php_info_print_table_start();
-    php_info_print_table_header(2, "SeasClick support", "enabled");
-    php_info_print_table_row(2, "Version", PHP_SEASCLICK_VERSION);
+    php_info_print_table_header(2, "ClickHouse support", "enabled");
+    php_info_print_table_row(2, "Version", PHP_CLICKHOUSE_VERSION);
     php_info_print_table_row(2, "Author", "SeasX Group[email: ahhhh.wang@gmail.com], Ilia Alshanetsky");
     php_info_print_table_end();
 
@@ -179,26 +185,26 @@ PHP_MINFO_FUNCTION(SeasClick)
 }
 /* }}} */
 
-/* {{{ SeasClick_module_entry
+/* {{{ clickhouse_module_entry
  */
-zend_module_entry SeasClick_module_entry =
+zend_module_entry clickhouse_module_entry =
 {
     STANDARD_MODULE_HEADER,
-    SEASCLICK_RES_NAME,
-    SeasClick_functions,
-    PHP_MINIT(SeasClick),
+    CLICKHOUSE_RES_NAME,
+    clickhouse_functions,
+    PHP_MINIT(clickhouse),
     NULL,
     NULL,
     NULL,
-    PHP_MINFO(SeasClick),
-    PHP_SEASCLICK_VERSION,
+    PHP_MINFO(clickhouse),
+    PHP_CLICKHOUSE_VERSION,
     STANDARD_MODULE_PROPERTIES
 };
 /* }}} */
 
 /* {{{ proto object __construct(array connectParams)
  */
-PHP_METHOD(SEASCLICK_RES_NAME, __construct)
+PHP_METHOD(CLICKHOUSE_RES_NAME, __construct)
 {
     zval *connectParams;
 
@@ -225,13 +231,13 @@ PHP_METHOD(SEASCLICK_RES_NAME, __construct)
     if (php_array_get_value(_ht, "host", value))
     {
         convert_to_string(value);
-        sc_zend_update_property_string(SeasClick_ce, this_obj, "host", sizeof("host") - 1, Z_STRVAL_P(value));
+        sc_zend_update_property_string(clickhouse_ce, this_obj, "host", sizeof("host") - 1, Z_STRVAL_P(value));
     }
 
     if (php_array_get_value(_ht, "port", value))
     {
         convert_to_long(value);
-        sc_zend_update_property_long(SeasClick_ce, this_obj, "port", sizeof("port") - 1, Z_LVAL_P(value));
+        sc_zend_update_property_long(clickhouse_ce, this_obj, "port", sizeof("port") - 1, Z_LVAL_P(value));
     }
 
     if (php_array_get_value(_ht, "compression", value))
@@ -245,40 +251,40 @@ PHP_METHOD(SEASCLICK_RES_NAME, __construct)
             convert_to_boolean(value);
             cv = Z_LVAL_P(value);
         }
-        sc_zend_update_property_long(SeasClick_ce, this_obj, "compression", sizeof("compression") - 1, cv);
+        sc_zend_update_property_long(clickhouse_ce, this_obj, "compression", sizeof("compression") - 1, cv);
     }
 
     if (php_array_get_value(_ht, "retry_timeout", value))
     {
         convert_to_long(value);
-        sc_zend_update_property_long(SeasClick_ce, this_obj, "retry_timeout", sizeof("retry_timeout") - 1, Z_LVAL_P(value));
+        sc_zend_update_property_long(clickhouse_ce, this_obj, "retry_timeout", sizeof("retry_timeout") - 1, Z_LVAL_P(value));
     }
 
     if (php_array_get_value(_ht, "retry_count", value))
     {
         convert_to_long(value);
-        sc_zend_update_property_long(SeasClick_ce, this_obj, "retry_count", sizeof("retry_count") - 1, Z_LVAL_P(value));
+        sc_zend_update_property_long(clickhouse_ce, this_obj, "retry_count", sizeof("retry_count") - 1, Z_LVAL_P(value));
     }
 
     if (php_array_get_value(_ht, "connect_timeout", value))
     {
         convert_to_long(value);
-        sc_zend_update_property_long(SeasClick_ce, this_obj, "connect_timeout", sizeof("connect_timeout") - 1, Z_LVAL_P(value));
+        sc_zend_update_property_long(clickhouse_ce, this_obj, "connect_timeout", sizeof("connect_timeout") - 1, Z_LVAL_P(value));
     }
 
     if (php_array_get_value(_ht, "receive_timeout", value))
     {
         convert_to_long(value);
-        sc_zend_update_property_long(SeasClick_ce, this_obj, "receive_timeout", sizeof("receive_timeout") - 1, Z_LVAL_P(value));
+        sc_zend_update_property_long(clickhouse_ce, this_obj, "receive_timeout", sizeof("receive_timeout") - 1, Z_LVAL_P(value));
     }
 
-    zval *host = sc_zend_read_property(SeasClick_ce, this_obj, "host", sizeof("host") - 1, 0);
-    zval *port = sc_zend_read_property(SeasClick_ce, this_obj, "port", sizeof("port") - 1, 0);
-    zval *compression = sc_zend_read_property(SeasClick_ce, this_obj, "compression", sizeof("compression") - 1, 0);
-    zval *retry_timeout = sc_zend_read_property(SeasClick_ce, this_obj, "retry_timeout", sizeof("retry_timeout") - 1, 0);
-    zval *retry_count = sc_zend_read_property(SeasClick_ce, this_obj, "retry_count", sizeof("retry_count") - 1, 0);
-    zval *receive_timeout = sc_zend_read_property(SeasClick_ce, this_obj, "receive_timeout", sizeof("receive_timeout") - 1, 0);
-    zval *connect_timeout = sc_zend_read_property(SeasClick_ce, this_obj, "connect_timeout", sizeof("connect_timeout") - 1, 0);
+    zval *host = sc_zend_read_property(clickhouse_ce, this_obj, "host", sizeof("host") - 1, 0);
+    zval *port = sc_zend_read_property(clickhouse_ce, this_obj, "port", sizeof("port") - 1, 0);
+    zval *compression = sc_zend_read_property(clickhouse_ce, this_obj, "compression", sizeof("compression") - 1, 0);
+    zval *retry_timeout = sc_zend_read_property(clickhouse_ce, this_obj, "retry_timeout", sizeof("retry_timeout") - 1, 0);
+    zval *retry_count = sc_zend_read_property(clickhouse_ce, this_obj, "retry_count", sizeof("retry_count") - 1, 0);
+    zval *receive_timeout = sc_zend_read_property(clickhouse_ce, this_obj, "receive_timeout", sizeof("receive_timeout") - 1, 0);
+    zval *connect_timeout = sc_zend_read_property(clickhouse_ce, this_obj, "connect_timeout", sizeof("connect_timeout") - 1, 0);
 
     ClientOptions Options = ClientOptions()
                             .SetHost(Z_STRVAL_P(host))
@@ -360,8 +366,8 @@ PHP_METHOD(SEASCLICK_RES_NAME, __construct)
     if (php_array_get_value(_ht, "ssl", value)) {
         convert_to_boolean(value);
         if (Z_LVAL_P(value) != 0) {
-            sc_zend_throw_exception_tsrmls_cc(SeasClickException_ce,
-                "SeasClick was built without TLS support. Reconfigure with --enable-SeasClick-openssl",
+            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                "php_clickhouse was built without TLS support. Reconfigure with --enable-clickhouse-openssl",
                 0);
             RETURN_FALSE;
         }
@@ -394,21 +400,21 @@ PHP_METHOD(SEASCLICK_RES_NAME, __construct)
     if (php_array_get_value(_ht, "database", value))
     {
         convert_to_string(value);
-        sc_zend_update_property_string(SeasClick_ce, this_obj, "database", sizeof("database") - 1, Z_STRVAL_P(value));
+        sc_zend_update_property_string(clickhouse_ce, this_obj, "database", sizeof("database") - 1, Z_STRVAL_P(value));
         Options = Options.SetDefaultDatabase(Z_STRVAL_P(value));
     }
 
     if (php_array_get_value(_ht, "user", value))
     {
         convert_to_string(value);
-        sc_zend_update_property_string(SeasClick_ce, this_obj, "user", sizeof("user") - 1, Z_STRVAL_P(value));
+        sc_zend_update_property_string(clickhouse_ce, this_obj, "user", sizeof("user") - 1, Z_STRVAL_P(value));
         Options = Options.SetUser(Z_STRVAL_P(value));
     }
 
     if (php_array_get_value(_ht, "passwd", value))
     {
         convert_to_string(value);
-        sc_zend_update_property_string(SeasClick_ce, this_obj, "passwd", sizeof("passwd") - 1, Z_STRVAL_P(value));
+        sc_zend_update_property_string(clickhouse_ce, this_obj, "passwd", sizeof("passwd") - 1, Z_STRVAL_P(value));
         Options = Options.SetPassword(Z_STRVAL_P(value));
     }
 
@@ -422,7 +428,7 @@ PHP_METHOD(SEASCLICK_RES_NAME, __construct)
     }
     catch (const std::exception& e)
     {
-        sc_zend_throw_exception_tsrmls_cc(SeasClickException_ce, e.what(), 0);
+        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, e.what(), 0);
     }
 
     RETURN_TRUE;
@@ -461,7 +467,7 @@ void getInsertSql(string *sql, char *table_name, zval *columns)
 
 /* {{{ proto bool ping()
  */
-PHP_METHOD(SEASCLICK_RES_NAME, ping)
+PHP_METHOD(CLICKHOUSE_RES_NAME, ping)
 {
         int key = Z_OBJ_HANDLE(*getThis());
         Client *client = clientMap.at(key);
@@ -469,7 +475,7 @@ PHP_METHOD(SEASCLICK_RES_NAME, ping)
         try {
             client->Ping();
         } catch (const std::exception& e) {
-            sc_zend_throw_exception_tsrmls_cc(SeasClickException_ce, e.what(), 0);
+            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, e.what(), 0);
         }
 
         RETURN_TRUE;
@@ -477,7 +483,7 @@ PHP_METHOD(SEASCLICK_RES_NAME, ping)
 
 /* {{{ proto array select(string sql, array params, int mode)
  */
-PHP_METHOD(SEASCLICK_RES_NAME, select)
+PHP_METHOD(CLICKHOUSE_RES_NAME, select)
 {
     char *sql = NULL;
     size_t l_sql = 0;
@@ -599,14 +605,14 @@ PHP_METHOD(SEASCLICK_RES_NAME, select)
     }
     catch (const std::exception& e)
     {
-        sc_zend_throw_exception_tsrmls_cc(SeasClickException_ce, e.what(), 0);
+        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, e.what(), 0);
     }
 }
 /* }}} */
 
 /* {{{ proto array insert(string table, array columns, array values)
  */
-PHP_METHOD(SEASCLICK_RES_NAME, insert)
+PHP_METHOD(CLICKHOUSE_RES_NAME, insert)
 {
     char *table = NULL;
     size_t l_table = 0;
@@ -713,7 +719,7 @@ PHP_METHOD(SEASCLICK_RES_NAME, insert)
     }
     catch (const std::exception& e)
     {
-        sc_zend_throw_exception_tsrmls_cc(SeasClickException_ce, e.what(), 0);
+        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, e.what(), 0);
     }
     RETURN_TRUE;
 }
@@ -721,7 +727,7 @@ PHP_METHOD(SEASCLICK_RES_NAME, insert)
 
 /* {{{ proto array insert(string table, array columns, array values)
  */
-PHP_METHOD(SEASCLICK_RES_NAME, writeStart)
+PHP_METHOD(CLICKHOUSE_RES_NAME, writeStart)
 {
     char *table = NULL;
     size_t l_table = 0;
@@ -769,7 +775,7 @@ PHP_METHOD(SEASCLICK_RES_NAME, writeStart)
     }
     catch (const std::exception& e)
     {
-        sc_zend_throw_exception_tsrmls_cc(SeasClickException_ce, e.what(), 0);
+        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, e.what(), 0);
     }
     RETURN_TRUE;
 }
@@ -777,7 +783,7 @@ PHP_METHOD(SEASCLICK_RES_NAME, writeStart)
 
 /* {{{ proto array insert(string table, array columns, array values)
  */
-PHP_METHOD(SEASCLICK_RES_NAME, write)
+PHP_METHOD(CLICKHOUSE_RES_NAME, write)
 {
     zval *values;
 
@@ -862,7 +868,7 @@ PHP_METHOD(SEASCLICK_RES_NAME, write)
     }
     catch (const std::exception& e)
     {
-        sc_zend_throw_exception_tsrmls_cc(SeasClickException_ce, e.what(), 0);
+        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, e.what(), 0);
     }
     RETURN_TRUE;
 }
@@ -870,7 +876,7 @@ PHP_METHOD(SEASCLICK_RES_NAME, write)
 
 /* {{{ proto array insert(string table, array columns, array values)
  */
-PHP_METHOD(SEASCLICK_RES_NAME, writeEnd)
+PHP_METHOD(CLICKHOUSE_RES_NAME, writeEnd)
 {
     try
     {
@@ -882,7 +888,7 @@ PHP_METHOD(SEASCLICK_RES_NAME, writeEnd)
     }
     catch (const std::exception& e)
     {
-        sc_zend_throw_exception_tsrmls_cc(SeasClickException_ce, e.what(), 0);
+        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, e.what(), 0);
     }
     RETURN_TRUE;
 }
@@ -890,7 +896,7 @@ PHP_METHOD(SEASCLICK_RES_NAME, writeEnd)
 
 /* {{{ proto bool execute(string sql, array params)
  */
-PHP_METHOD(SEASCLICK_RES_NAME, execute)
+PHP_METHOD(CLICKHOUSE_RES_NAME, execute)
 {
     char *sql = NULL;
     size_t l_sql = 0;
@@ -957,7 +963,7 @@ PHP_METHOD(SEASCLICK_RES_NAME, execute)
     }
     catch (const std::exception& e)
     {
-        sc_zend_throw_exception_tsrmls_cc(SeasClickException_ce, e.what(), 0);
+        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, e.what(), 0);
     }
     RETURN_TRUE;
 }
@@ -965,7 +971,7 @@ PHP_METHOD(SEASCLICK_RES_NAME, execute)
 
 /* {{{ proto array __destruct()
  */
-PHP_METHOD(SEASCLICK_RES_NAME, __destruct)
+PHP_METHOD(CLICKHOUSE_RES_NAME, __destruct)
 {
     try
     {
@@ -978,7 +984,7 @@ PHP_METHOD(SEASCLICK_RES_NAME, __destruct)
     }
     catch (const std::exception& e)
     {
-        sc_zend_throw_exception_tsrmls_cc(SeasClickException_ce, e.what(), 0);
+        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, e.what(), 0);
     }
     RETURN_TRUE;
 }

@@ -1,13 +1,13 @@
 <?php
 /**
- * Shared helpers for SeasClick phpt tests.
+ * Shared helpers for php_clickhouse phpt tests.
  *
  * Read connection settings from the environment so tests work both in
  * a docker-compose layout (host=clickhouse) and against a local
  * server started via the README's docker run snippet.
  */
 
-function seasclick_test_config(): array
+function clickhouse_test_config(): array
 {
     $config = [
         "host"        => getenv("CLICKHOUSE_HOST") ?: "clickhouse",
@@ -27,12 +27,12 @@ function seasclick_test_config(): array
 
 /**
  * For use inside --SKIPIF-- sections: prints "skip ..." and exits if
- * the SeasClick extension is missing or the server isn't reachable.
+ * the clickhouse extension is missing or the server isn't reachable.
  */
-function seasclick_skip_if_no_server(): void
+function clickhouse_skip_if_no_server(): void
 {
-    if (!extension_loaded("SeasClick")) {
-        print "skip SeasClick extension not loaded";
+    if (!extension_loaded("clickhouse")) {
+        print "skip clickhouse extension not loaded";
         exit;
     }
     $h = getenv("CLICKHOUSE_HOST") ?: "clickhouse";
@@ -44,3 +44,7 @@ function seasclick_skip_if_no_server(): void
     }
     fclose($sock);
 }
+
+/* Back-compat aliases — old function names kept for one release. */
+function seasclick_test_config(): array { return clickhouse_test_config(); }
+function seasclick_skip_if_no_server(): void { clickhouse_skip_if_no_server(); }

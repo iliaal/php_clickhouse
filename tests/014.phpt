@@ -1,5 +1,5 @@
 --TEST--
-SeasClick Fetch Key Pair
+ClickHouse Fetch Key Pair
 --SKIPIF--
 <?php if (!extension_loaded("SeasClick")) print "skip"; ?>
 --FILE--
@@ -11,7 +11,7 @@ $config = [
 ];
 
 $deleteTable = true;
-$client = new SeasClick($config);
+$client = new ClickHouse($config);
 $client->execute('CREATE DATABASE IF NOT EXISTS test');
 
 $client->execute("CREATE TABLE IF NOT EXISTS test.single_val_fetch (
@@ -100,7 +100,7 @@ $expected[1]['uuid2_c'] = '00000000000000000000000000000000';
 $client->insert('test.single_val_fetch', $fields, [array_values($data[0]), array_values($data[1])]);
 
 foreach ($fields as $field) {
-    $result = $client->select("SELECT {$field}, {$field} FROM test.single_val_fetch ORDER BY int64_c ASC", [], SeasClick::FETCH_KEY_PAIR);
+    $result = $client->select("SELECT {$field}, {$field} FROM test.single_val_fetch ORDER BY int64_c ASC", [], ClickHouse::FETCH_KEY_PAIR);
 
     $res = var_export($result, true);
     $exp = var_export([(string)$expected[0][$field] => $expected[0][$field], (string)$expected[1][$field] => $expected[1][$field]], true);

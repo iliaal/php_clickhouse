@@ -31,3 +31,31 @@
 *.out
 *.app
 vendor
+
+# phpize / autotools build artifacts
+.deps/
+.libs/
+*.dep
+*.loT
+Makefile
+Makefile.fragments
+Makefile.objects
+acinclude.m4
+autom4te.cache/
+build/
+config.h
+config.h.in
+config.log
+config.nice
+config.status
+configure
+configure.ac
+configure.in
+install-sh
+libtool
+ltmain.sh
+missing
+mkinstalldirs
+run-tests.php
+modules/
+# Windows build script (kept tracked)

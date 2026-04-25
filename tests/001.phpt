@@ -18,4 +18,4 @@ echo "SeasClick extension is available";
 */
 ?>
 --EXPECT--
-SeasClick extension is available
+ClickHouse extension is available

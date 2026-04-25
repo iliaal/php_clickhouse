@@ -1,16 +1,16 @@
 --TEST--
-SeasClick Time and Time64 round-trip
+ClickHouse Time and Time64 round-trip
 --SKIPIF--
 <?php
 require __DIR__ . "/_clickhouse.inc";
-seasclick_skip_if_no_server();
-$c = new SeasClick(seasclick_test_config());
+clickhouse_skip_if_no_server();
+$c = new ClickHouse(clickhouse_test_config());
 try {
     $c->execute("DROP TABLE IF EXISTS test._time_probe");
     $c->execute("CREATE DATABASE IF NOT EXISTS test");
     $c->execute("CREATE TABLE test._time_probe (t Time) ENGINE = Memory");
     $c->execute("DROP TABLE test._time_probe");
-} catch (SeasClickException $e) {
+} catch (ClickHouseException $e) {
     print "skip ClickHouse build does not support Time / Time64";
     exit;
 }
@@ -19,7 +19,7 @@ try {
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-$c = new SeasClick(seasclick_test_config());
+$c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
 $c->execute("DROP TABLE IF EXISTS test.time_t");
 $c->execute("CREATE TABLE test.time_t (id UInt32, t Time, t3 Time64(3)) ENGINE = Memory");
@@ -32,7 +32,7 @@ $c->insert("test.time_t", ["id", "t", "t3"], [
     [3, -3600, -3600],  // -01:00:00 / -01:00:00.000
 ]);
 
-$rows = $c->select("SELECT id, t, t3 FROM test.time_t ORDER BY id", [], SeasClick::DATE_AS_STRINGS);
+$rows = $c->select("SELECT id, t, t3 FROM test.time_t ORDER BY id", [], ClickHouse::DATE_AS_STRINGS);
 foreach ($rows as $r) {
     echo $r["id"], "|", $r["t"], "|", $r["t3"], "\n";
 }

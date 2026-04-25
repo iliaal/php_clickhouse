@@ -1,12 +1,12 @@
 --TEST--
-SeasClick LowCardinality(String) and LowCardinality(FixedString)
+ClickHouse LowCardinality(String) and LowCardinality(FixedString)
 --SKIPIF--
-<?php require __DIR__ . "/_clickhouse.inc"; seasclick_skip_if_no_server(); ?>
+<?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-$c = new SeasClick(seasclick_test_config());
+$c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
 $c->execute("DROP TABLE IF EXISTS test.lc_t");
 $c->execute("SET allow_suspicious_low_cardinality_types = 1");
@@ -28,8 +28,8 @@ foreach ($rows as $r) {
     echo $r["id"], "|", $r["env"], "|", trim($r["code"]), "\n";
 }
 
-echo "distinct env: ", $c->select("SELECT count(DISTINCT env) FROM test.lc_t", [], SeasClick::FETCH_ONE), "\n";
-echo "distinct code: ", $c->select("SELECT count(DISTINCT code) FROM test.lc_t", [], SeasClick::FETCH_ONE), "\n";
+echo "distinct env: ", $c->select("SELECT count(DISTINCT env) FROM test.lc_t", [], ClickHouse::FETCH_ONE), "\n";
+echo "distinct code: ", $c->select("SELECT count(DISTINCT code) FROM test.lc_t", [], ClickHouse::FETCH_ONE), "\n";
 
 $c->execute("DROP TABLE test.lc_t");
 ?>

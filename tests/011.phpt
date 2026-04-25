@@ -1,5 +1,5 @@
 --TEST--
-SeasClick Single Value Fetch
+ClickHouse Single Value Fetch
 --SKIPIF--
 <?php if (!extension_loaded("SeasClick")) print "skip"; ?>
 --FILE--
@@ -11,7 +11,7 @@ $config = [
 ];
 
 $deleteTable = true;
-$client = new SeasClick($config);
+$client = new ClickHouse($config);
 $client->execute('CREATE DATABASE IF NOT EXISTS test');
 
 $client->execute("CREATE TABLE IF NOT EXISTS test.single_val_fetch (
@@ -107,7 +107,7 @@ $client->insert('test.single_val_fetch', $fields, [array_values($data[0]), array
 
 foreach ($fields as $field) {
     for ($i = 1; $i < 3; $i++) {
-        $result = $client->select("SELECT {$field} FROM test.single_val_fetch WHERE int64_c = {i}", ['i' => $i], SeasClick::FETCH_ONE);
+        $result = $client->select("SELECT {$field} FROM test.single_val_fetch WHERE int64_c = {i}", ['i' => $i], ClickHouse::FETCH_ONE);
         $match = $result === $expected[$i-1][$field] ? 'OK' : 'FAIL';
         echo $field, ': ', var_export($result, true), ' - ', var_export($expected[$i - 1][$field], true), ' - ', $match, "\n";
     }

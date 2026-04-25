@@ -1,8 +1,8 @@
 /*
   +----------------------------------------------------------------------+
-  | SeasClick                                                            |
+  | php_clickhouse                                                       |
   +----------------------------------------------------------------------+
-  | Copyright (c) 1997-2018 The PHP Group                                |
+  | Copyright (c) 1997-2026 The PHP Group                                |
   +----------------------------------------------------------------------+
   | This source file is subject to version 3.01 of the PHP license,      |
   | that is bundled with this package in the file LICENSE, and is        |
@@ -12,7 +12,7 @@
   | obtain it through the world-wide-web, please send a note to          |
   | license@php.net so we can mail you a copy immediately.               |
   +----------------------------------------------------------------------+
-  | Author:  SeasX Group <ahhhh.wang@gmail.com>                          |
+  | Author: Ilia Alshanetsky <ilia@ilia.ws>                              |
   +----------------------------------------------------------------------+
 */
 #ifdef HAVE_CONFIG_H
@@ -26,7 +26,7 @@ extern "C" {
 #include "php7_wrapper.h"
 };
 
-#include "php_SeasClick.h"
+#include "php_clickhouse.h"
 
 #include "lib/clickhouse-cpp/clickhouse/client.h"
 #include "lib/clickhouse-cpp/clickhouse/error_codes.h"

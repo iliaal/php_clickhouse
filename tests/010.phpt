@@ -1,5 +1,5 @@
 --TEST--
-SeasClick testDate
+ClickHouse testDate
 --SKIPIF--
 <?php if (!extension_loaded("SeasClick")) print "skip"; ?>
 --FILE--
@@ -15,7 +15,7 @@ clientTest($config);
 function clientTest($config)
 {
     $deleteTable = true;
-    $client = new SeasClick($config);
+    $client = new ClickHouse($config);
     $client->execute("CREATE DATABASE IF NOT EXISTS test");
 
     testTuple($client, $deleteTable);
