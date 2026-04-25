@@ -115,7 +115,7 @@ const zend_function_entry SeasClick_functions[] =
 const zend_function_entry SeasClick_methods[] =
 {
     PHP_ME(SEASCLICK_RES_NAME, __construct,   SeasClick_construct, ZEND_ACC_PUBLIC | ZEND_ACC_CTOR)
-    PHP_ME(SEASCLICK_RES_NAME, __destruct,    SeasClick_destruct, ZEND_ACC_PUBLIC | ZEND_ACC_DTOR)
+    PHP_ME(SEASCLICK_RES_NAME, __destruct,    SeasClick_destruct, ZEND_ACC_PUBLIC)
     PHP_ME(SEASCLICK_RES_NAME, select,        SeasClick_select, ZEND_ACC_PUBLIC)
     PHP_ME(SEASCLICK_RES_NAME, insert,        SeasClick_insert, ZEND_ACC_PUBLIC)
     PHP_ME(SEASCLICK_RES_NAME, writeStart,    SeasClick_writeStart, ZEND_ACC_PUBLIC)
@@ -137,26 +137,9 @@ PHP_MINIT_FUNCTION(SeasClick)
     INIT_CLASS_ENTRY(SeasClick, SEASCLICK_RES_NAME, SeasClick_methods);
     INIT_CLASS_ENTRY(SeasClickException, "SeasClickException", NULL);
 
-#if PHP_VERSION_ID >= 70000
     SeasClick_ce = zend_register_internal_class_ex(&SeasClick, NULL);
     SeasClickException_ce = zend_register_internal_class_ex(&SeasClickException, zend_ce_exception);
-#else
-    SeasClick_ce = zend_register_internal_class_ex(&SeasClick, NULL, NULL TSRMLS_CC);
-    SeasClickException_ce = zend_register_internal_class_ex(&SeasClickException, zend_exception_get_default(TSRMLS_C), NULL TSRMLS_CC);
-#endif
 
-#if PHP_VERSION_ID <= 70000
-    zend_declare_property_stringl(SeasClick_ce, "host", strlen("host"), "127.0.0.1", sizeof("127.0.0.1") - 1, ZEND_ACC_PROTECTED TSRMLS_CC);
-    zend_declare_property_long(SeasClick_ce, "port", strlen("port"), 9000, ZEND_ACC_PROTECTED TSRMLS_CC);
-    zend_declare_property_stringl(SeasClick_ce, "database", strlen("database"), "default", sizeof("default") - 1, ZEND_ACC_PROTECTED TSRMLS_CC);
-    zend_declare_property_null(SeasClick_ce, "user", strlen("user"), ZEND_ACC_PROTECTED TSRMLS_CC);
-    zend_declare_property_null(SeasClick_ce, "passwd", strlen("passwd"), ZEND_ACC_PROTECTED TSRMLS_CC);
-    zend_declare_property_bool(SeasClick_ce, "compression", strlen("compression"), false, ZEND_ACC_PROTECTED TSRMLS_CC);
-    zend_declare_property_long(SeasClick_ce, "retry_timeout", strlen("retry_timeout"), 5, ZEND_ACC_PROTECTED TSRMLS_CC);
-    zend_declare_property_long(SeasClick_ce, "retry_count", strlen("retry_count"), 1, ZEND_ACC_PROTECTED TSRMLS_CC);
-    zend_declare_property_long(SeasClick_ce, "receive_timeout", strlen("receive_timeout"), 0, ZEND_ACC_PROTECTED TSRMLS_CC);
-    zend_declare_property_long(SeasClick_ce, "connect_timeout", strlen("connect_timeout"), 5, ZEND_ACC_PROTECTED TSRMLS_CC);
-#else
     zend_declare_property_stringl(SeasClick_ce, "host", strlen("host"), "127.0.0.1", sizeof("127.0.0.1") - 1, ZEND_ACC_PROTECTED);
     zend_declare_property_long(SeasClick_ce, "port", strlen("port"), 9000, ZEND_ACC_PROTECTED);
     zend_declare_property_stringl(SeasClick_ce, "database", strlen("database"), "default", sizeof("default") - 1, ZEND_ACC_PROTECTED);
@@ -167,7 +150,6 @@ PHP_MINIT_FUNCTION(SeasClick)
     zend_declare_property_long(SeasClick_ce, "retry_count", strlen("retry_count"), 1, ZEND_ACC_PROTECTED);
     zend_declare_property_long(SeasClick_ce, "receive_timeout", strlen("receive_timeout"), 0, ZEND_ACC_PROTECTED);
     zend_declare_property_long(SeasClick_ce, "connect_timeout", strlen("connect_timeout"), 5, ZEND_ACC_PROTECTED);
-#endif
 
     REGISTER_SC_CLASS_CONST_LONG("FETCH_ONE", (zend_long)SC_FETCH_ONE);
     REGISTER_SC_CLASS_CONST_LONG("FETCH_KEY_PAIR", (zend_long)SC_FETCH_KEY_PAIR);
@@ -217,7 +199,7 @@ PHP_METHOD(SEASCLICK_RES_NAME, __construct)
     zval *connectParams;
 
 #ifndef FAST_ZPP
-    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "z", &connectParams) == FAILURE)
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "z", &connectParams) == FAILURE)
     {
         return;
     }
@@ -393,7 +375,7 @@ PHP_METHOD(SEASCLICK_RES_NAME, select)
     zend_long fetch_mode = 0;
 
 #ifndef FAST_ZPP
-    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s|zl", &sql, &l_sql, &params, &fetch_mode) == FAILURE)
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "s|zl", &sql, &l_sql, &params, &fetch_mode) == FAILURE)
     {
         return;
     }
@@ -515,7 +497,7 @@ PHP_METHOD(SEASCLICK_RES_NAME, insert)
     string sql;
 
 #ifndef FAST_ZPP
-    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "szz", &table, &l_table, &columns, &values) == FAILURE)
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "szz", &table, &l_table, &columns, &values) == FAILURE)
     {
         return;
     }
@@ -628,7 +610,7 @@ PHP_METHOD(SEASCLICK_RES_NAME, writeStart)
     string sql;
 
 #ifndef FAST_ZPP
-    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "sz", &table, &l_table, &columns) == FAILURE)
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "sz", &table, &l_table, &columns) == FAILURE)
     {
         return;
     }
@@ -679,7 +661,7 @@ PHP_METHOD(SEASCLICK_RES_NAME, write)
     zval *values;
 
 #ifndef FAST_ZPP
-    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "z", &values) == FAILURE)
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "z", &values) == FAILURE)
     {
         return;
     }
@@ -695,22 +677,14 @@ PHP_METHOD(SEASCLICK_RES_NAME, write)
 
     try
     {
-#if PHP_VERSION_ID < 70000
-        zval **first_data;
-#else
         zval *first_data;
-#endif
         HashTable *values_ht = Z_ARRVAL_P(values);
         sc_zend_hash_get_current_data(values_ht, (void**) &first_data);
         if (NULL == first_data)
         {
             throw std::runtime_error("The conut of data inserted is empty");
         }
-#if PHP_VERSION_ID < 70000
-        size_t columns_count = zend_hash_num_elements(Z_ARRVAL_P(*first_data));
-#else
         size_t columns_count = zend_hash_num_elements(Z_ARRVAL_P(first_data));
-#endif
         zval *return_should;
         SC_MAKE_STD_ZVAL(return_should);
         array_init(return_should);
@@ -802,7 +776,7 @@ PHP_METHOD(SEASCLICK_RES_NAME, execute)
     zval* params = NULL;
 
 #ifndef FAST_ZPP
-    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s|z", &sql, &l_sql, &params) == FAILURE)
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "s|z", &sql, &l_sql, &params) == FAILURE)
     {
         return;
     }
