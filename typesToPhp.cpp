@@ -1148,8 +1148,29 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
         break;
     }
     case Type::Code::FixedString:
+    {
+        // ColumnFixedString::At returns a string_view over the full fixed-size
+        // buffer, including trailing NULs added by ClickHouse to pad short
+        // values up to the column's declared width. Trim trailing NULs so the
+        // PHP-side value matches the original input.
+        auto col = (*columnRef->As<ColumnFixedString>())[row];
+        size_t len = col.length();
+        while (len > 0 && col.data()[len - 1] == '\0') {
+            --len;
+        }
+        if (is_array)
+        {
+            sc_add_next_index_stringl(arr, (char*)col.data(), len, 1);
+        }
+        else
+        {
+            SC_SINGLE_STRING((char*)col.data(), len);
+        }
+        break;
+    }
     case Type::Code::IPv6:
     {
+        // IPv6 is always 16 raw bytes; trailing NULs are meaningful, don't trim.
         auto col = (*columnRef->As<ColumnFixedString>())[row];
         if (is_array)
         {

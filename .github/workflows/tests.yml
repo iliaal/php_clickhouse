@@ -43,6 +43,9 @@ jobs:
       - name: Install OpenSSL dev (TLS build path)
         run: sudo apt-get update -qq && sudo apt-get install -y libssl-dev
 
+      - name: Naming-consistency guard (no stray SeasClick references)
+        run: ./scripts/check-no-seasclick.sh
+
       - name: Build extension (no TLS)
         run: |
           phpize
@@ -59,13 +62,9 @@ jobs:
         run: |
           export TEST_PHP_EXECUTABLE=$(which php)
           export TEST_PHP_ARGS="-d extension=$(pwd)/modules/clickhouse.so"
-          RESULT=$(php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK tests/ 2>&1)
-          echo "$RESULT"
-          FAILED=$(echo "$RESULT" | grep 'Tests failed' | grep -oP '\d+' | head -1)
-          if [ "$FAILED" -gt 0 ]; then
-            echo "::error::$FAILED test(s) failed"
-            exit 1
-          fi
+          # run-tests.php exits non-zero on failures, zero on all-pass /
+          # all-skip. Let its exit code drive the step.
+          php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK tests/
 
       - name: Rebuild with TLS (verifies SSL build path)
         run: |
@@ -152,8 +151,4 @@ jobs:
           export LD_PRELOAD=$(clang -print-file-name=libclang_rt.asan-x86_64.so)
           export TEST_PHP_EXECUTABLE=/tmp/php-asan/bin/php
           export TEST_PHP_ARGS="-d extension=$(pwd)/modules/clickhouse.so"
-          /tmp/php-asan/bin/php run-tests.php --show-diff --asan -g FAIL,BORK,LEAK,XLEAK tests/ 2>&1 | tee /tmp/test-output.txt || true
-          if grep -qP 'Tests failed\s*:\s*[1-9]' /tmp/test-output.txt; then
-            echo "::error::Tests failed under ASAN"
-            exit 1
-          fi
+          /tmp/php-asan/bin/php run-tests.php --show-diff --asan -g FAIL,BORK,LEAK,XLEAK tests/
