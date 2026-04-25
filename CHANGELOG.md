@@ -7,6 +7,124 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-04-25
+
+Hardening release on top of 0.5.0. Closes a SQL-injection class
+through the `{placeholder}` substitution, fixes a handful of
+lifecycle crashes around `__construct` failure and orphan
+`writeStart`, and resolves several smaller correctness bugs in the
+data path. Two upstream clickhouse-cpp v2.6.1 bugs are patched
+locally and queued for upstream.
+
+### Security
+
+- `select()` and `execute()` placeholder substitution validates each
+  value against an identifier-and-numerics character set; quotes,
+  semicolons, backslashes, and other SQL meta-characters are
+  rejected before the SQL is built. Closes an injection class that
+  was reachable any time a caller fed user input through `$params`.
+- `insert()` and `writeStart()` validate table and column
+  identifiers against ClickHouse identifier syntax. Empty names,
+  leading digits, and shell-meta characters throw before the INSERT
+  is built.
+- New `ssl_min_protocol_version` config knob (default `tls1.2`) so
+  a server speaking only deprecated TLS versions fails closed
+  without explicit config.
+- `ClickHouseException` messages strip the SQL fragment that
+  clickhouse-cpp appends to its errors, so a literal placed in a
+  placeholder can't leak back to userland through `e.what()`.
+- The `passwd` config key is consumed into `ClientOptions` and
+  discarded; it's no longer stored as a PHP-object property, so
+  `var_dump`, `serialize`, and reflection don't expose it.
+- ZTS PHP builds refuse to load with an `E_CORE_ERROR`. Process-
+  global Client state would race on shared handle space.
+
+### Added
+
+- 9 new phpt tests (025-033) covering `ping()`, BC aliases, TLS
+  round-trip, `writeStart` query_id propagation, default-database
+  config, error paths, placeholder rejection, identifier
+  rejection, and object-lifecycle paths.
+
+### Fixed
+
+- `__construct` no longer `RETURN_TRUE`s on connection failure; the
+  half-constructed object never reaches userland.
+- Every `clientMap.at(key)` site routed through a `getClient()`
+  helper that throws `ClickHouseException` on miss. `ping()`
+  previously did the lookup outside its `try` block, so
+  `std::out_of_range` escaped the PHP boundary unhandled.
+- `__destruct` silently no-ops when no client was registered, and
+  calls `EndInsert()` if a `writeStart()` was left dangling so the
+  server doesn't see a half-open insert.
+- `write()` and `writeEnd()` reject calls without a matching
+  `writeStart()`. `writeEnd()` erases the in-progress flag only
+  after `EndInsert()` returns.
+- `Date` insert: dropped the `tm_gmtoff` shift so raw epoch ints
+  round-trip TZ-independently.
+- `Nullable(Enum8)` / `Nullable(Enum16)`: NULL rows no longer crash
+  inside `ColumnEnum::Append`.
+- `Decimal` reads apply column scale before formatting. A value
+  inserted as `12345.6789012345` now reads back as
+  `12345.6789012345`, not the unscaled storage integer.
+- `Int128` / `UInt128` string parse rejects malformed input and
+  detects overflow during accumulation.
+- `to_time_t()` uses `timegm()` instead of `mktime()` so Date and
+  DateTime string round-trips don't drift by the runner's TZ.
+- `FETCH_ONE` select returns the first row of the result, not the
+  first row of the last block.
+- `Tuple` insert iterates by tuple arity and validates per-row
+  arity, fixing an out-of-bounds read when row count differed
+  from arity.
+- Signed integer reads (Int8..Int64) cast through `zend_long`;
+  negative values no longer surface as huge unsigned numbers.
+- `tcp_keepalive_cnt`, `max_compression_chunk_size`, and endpoint
+  port bounds-check before truncating.
+- Unknown `compression` strings throw instead of silently
+  disabling compression.
+- HashTable leaks in `insert()` / `write()` error paths.
+- Six tests previously TODO-skipped now run.
+
+### Changed
+
+- LICENSE replaced with the canonical PHP-3.01 text (the file
+  previously held Apache 2.0, contradicting every source-file
+  header, `composer.json`, and the README's license section).
+- README documents `Tuple` insert as supported (was listed as
+  read-only).
+- README benchmark section dropped the unmaintained
+  `lizhichao/one-ck` comparison column.
+
+### For contributors
+
+- Vendored `clickhouse-cpp` v2.6.1 patched for two upstream bugs:
+  `Client::Impl::BeginInsert` was dropping `query_id` from the wire
+  packet, and `ColumnStringBlock::AppendUnsafe` called `memcpy`
+  with a NULL source on empty `string_view`. Both documented in
+  `lib/clickhouse-cpp/LOCAL_PATCHES.md`. The empty-string fix has
+  an upstream PR at clickhouse-cpp#489.
+- `CONTRIBUTING.md` spells out the LOCAL_PATCHES.md re-apply step
+  on lib bumps.
+- ASan CI job is gating, not informational. Switched to
+  `-shared-libasan` so `__cxa_throw` interception works across the
+  PHP / extension dlopen boundary.
+- Compile warnings cleared on PHP 7.4-8.5
+  (`-Wunused-but-set-variable`, `-Wswitch`,
+  `-Wmaybe-uninitialized`).
+- typesToPhp.cpp: integer arms in `insertColumn` and
+  `convertToZval`, the five `Map(K, V)` insert permutations, and
+  the `DateTime` / `Date` / `Date32` read paths collapsed into
+  templated helpers.
+- Dead-code sweep: `FAST_ZPP` dead arms (never defined), unused
+  macros in `php7_wrapper.h`, TSRM scaffolding in
+  `php_clickhouse.h`, commented-out `clickhouse_version`, unused
+  `<iostream>` includes, 18 unreachable `break;` after `return;`.
+  Roughly 750 lines net removed.
+- Migrated remaining `SC_HASHTABLE_FOREACH_START2` call sites to
+  `ZEND_HASH_FOREACH_*` directly. The old macro silently dropped
+  integer keys.
+- Renamed `clientInsertBlack` to `clientInsertBlock` (Block typo).
+
 ## [0.5.0] - 2026-04-25
 
 This release renames the extension from `SeasClick` to `php_clickhouse`,
@@ -117,5 +235,6 @@ own way.
   emits a clear "unsupported" warning. Full Windows build of the
   vendored zstd + absl + lz4 + cityhash is a separate project.
 
-[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.5.0...HEAD
+[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.6.0...HEAD
+[0.6.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.6.0
 [0.5.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.5.0
