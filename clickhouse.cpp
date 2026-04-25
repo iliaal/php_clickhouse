@@ -45,6 +45,8 @@ zend_class_entry *clickhouse_ce, *clickhouse_exception_ce;
 map<int, Client*> clientMap;
 map<int, Block> clientInsertBlack;
 
+static std::string sanitizeError(const char *what);
+
 #ifdef COMPILE_DL_CLICKHOUSE
 extern "C" {
     ZEND_GET_MODULE(clickhouse)
@@ -245,8 +247,14 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, __construct)
         long cv = 0;
         if (Z_TYPE_P(value) == IS_STRING) {
             const char *s = Z_STRVAL_P(value);
-            if (strcasecmp(s, "lz4") == 0) cv = 1;
-            else if (strcasecmp(s, "zstd") == 0) cv = 2;
+            if (strcasecmp(s, "lz4") == 0)        cv = 1;
+            else if (strcasecmp(s, "zstd") == 0)  cv = 2;
+            else if (strcasecmp(s, "none") == 0)  cv = 0;
+            else {
+                sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                    "Unknown compression name; expected 'lz4', 'zstd', 'none', true, or false", 0);
+                return;
+            }
         } else {
             convert_to_boolean(value);
             cv = Z_LVAL_P(value);
@@ -320,11 +328,23 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, __construct)
     }
     if (php_array_get_value(_ht, "tcp_keepalive_cnt", value)) {
         convert_to_long(value);
-        Options = Options.SetTcpKeepAliveCount((unsigned int)Z_LVAL_P(value));
+        zend_long n = Z_LVAL_P(value);
+        if (n < 0 || n > UINT_MAX) {
+            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                "tcp_keepalive_cnt out of range", 0);
+            return;
+        }
+        Options = Options.SetTcpKeepAliveCount((unsigned int)n);
     }
     if (php_array_get_value(_ht, "max_compression_chunk_size", value)) {
         convert_to_long(value);
-        Options = Options.SetMaxCompressionChunkSize((unsigned int)Z_LVAL_P(value));
+        zend_long n = Z_LVAL_P(value);
+        if (n < 0 || n > UINT_MAX) {
+            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                "max_compression_chunk_size out of range", 0);
+            return;
+        }
+        Options = Options.SetMaxCompressionChunkSize((unsigned int)n);
     }
 #ifdef WITH_OPENSSL
     bool want_ssl = false;
@@ -387,7 +407,16 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, __construct)
             convert_to_string(hz);
             Endpoint e;
             e.host = std::string(Z_STRVAL_P(hz), Z_STRLEN_P(hz));
-            if (pz) { convert_to_long(pz); e.port = (uint16_t)Z_LVAL_P(pz); }
+            if (pz) {
+                convert_to_long(pz);
+                zend_long p = Z_LVAL_P(pz);
+                if (p < 1 || p > 65535) {
+                    sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                        "Endpoint port out of 1..65535 range", 0);
+                    return;
+                }
+                e.port = (uint16_t)p;
+            }
             eps.push_back(std::move(e));
         } ZEND_HASH_FOREACH_END();
         if (!eps.empty()) Options = Options.SetEndpoints(eps);
@@ -416,33 +445,136 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, __construct)
 
     try
     {
+        int key = (int)Z_OBJ_HANDLE(*this_obj);
+        if (clientMap.count(key)) {
+            throw std::runtime_error("ClickHouse object is already constructed");
+        }
         Client *client = new Client(Options);
-        int key = Z_OBJ_HANDLE(*this_obj);
-
-        clientMap.insert(std::pair<int, Client*>(key, client));
-
+        try {
+            clientMap.insert(std::pair<int, Client*>(key, client));
+        } catch (...) {
+            delete client;
+            throw;
+        }
     }
     catch (const std::exception& e)
     {
-        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, e.what(), 0);
+        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, sanitizeError(e.what()).c_str(), 0);
+        return;
     }
 
     RETURN_TRUE;
 }
 /* }}} */
 
+/*
+ * Permit identifier chars only: ASCII letter/digit/underscore, plus a
+ * single dot for the optional database prefix on a table name. Length
+ * must be > 0 and the first character of each segment must be a letter
+ * or underscore. Rejects anything else, including the empty string and
+ * any quoting characters that could break out of the INSERT statement.
+ */
+static void validateIdentifier(const char *s, size_t len, const char *what, bool allow_dot)
+{
+    if (len == 0) {
+        throw std::runtime_error(std::string(what) + " must not be empty");
+    }
+    bool seg_start = true;
+    bool dot_seen = false;
+    for (size_t i = 0; i < len; ++i) {
+        unsigned char c = (unsigned char)s[i];
+        if (seg_start) {
+            if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_')) {
+                throw std::runtime_error(
+                    std::string(what) + " must start with a letter or underscore");
+            }
+            seg_start = false;
+            continue;
+        }
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '_') {
+            continue;
+        }
+        if (allow_dot && c == '.' && !dot_seen) {
+            dot_seen = true;
+            seg_start = true;
+            continue;
+        }
+        throw std::runtime_error(
+            std::string(what) + " contains an invalid character");
+    }
+    if (seg_start) {
+        throw std::runtime_error(std::string(what) + " has an empty segment");
+    }
+}
+
+/*
+ * Strip the embedded SQL fragment from a clickhouse-cpp error message
+ * before it crosses into userland. Upstream typically appends the full
+ * failing query after a "While executing" / "in query" prefix, which
+ * leaks any literal a caller placed in a placeholder (passwords with
+ * digits-only values still pass our placeholder validator). Cap length
+ * at 1024 chars as a final defense.
+ */
+static std::string sanitizeError(const char *what)
+{
+    std::string msg(what ? what : "");
+    static const char *sql_markers[] = {
+        "While executing",
+        "in query: ",
+        "While processing",
+    };
+    for (const char *marker : sql_markers) {
+        std::string::size_type pos = msg.find(marker);
+        if (pos != std::string::npos) {
+            msg.erase(pos);
+            // Drop trailing whitespace/punct left from the cut.
+            while (!msg.empty() && (msg.back() == ' ' || msg.back() == ',' ||
+                                     msg.back() == ':' || msg.back() == '.')) {
+                msg.pop_back();
+            }
+            break;
+        }
+    }
+    if (msg.size() > 1024) {
+        msg.resize(1024);
+        msg += "... (truncated)";
+    }
+    return msg;
+}
+
+/*
+ * Resolve the Client* for the given object handle, or throw if no entry
+ * exists. The miss case happens when __construct threw before inserting,
+ * or when a method runs after __destruct removed the entry.
+ */
+static Client* getClient(int key)
+{
+    auto it = clientMap.find(key);
+    if (it == clientMap.end()) {
+        throw std::runtime_error("ClickHouse client is not initialized");
+    }
+    return it->second;
+}
+
 void getInsertSql(string *sql, char *table_name, zval *columns)
 {
     zval *pzval;
     std::stringstream fields_section;
 
+    validateIdentifier(table_name, strlen(table_name), "table name", true);
+
     HashTable *columns_ht = Z_ARRVAL_P(columns);
     size_t count = zend_hash_num_elements(columns_ht);
+    if (count == 0) {
+        throw std::runtime_error("Column list must not be empty");
+    }
     size_t index = 0;
 
     ZEND_HASH_FOREACH_VAL(columns_ht, pzval)
     {
         convert_to_string(pzval);
+        validateIdentifier(Z_STRVAL_P(pzval), Z_STRLEN_P(pzval), "column name", false);
         if (index >= (count - 1))
         {
             fields_section << (string)Z_STRVAL_P(pzval);
@@ -457,20 +589,77 @@ void getInsertSql(string *sql, char *table_name, zval *columns)
     *sql = "INSERT INTO " + (string)table_name + " ( " + fields_section.str() + " ) VALUES";
 }
 
+/*
+ * Substitute {name} placeholders in `sql` with values from `params_ht`.
+ *
+ * Placeholder values must consist only of identifier characters, digits,
+ * decimal points, commas, parentheses, asterisks, plus/minus signs, or
+ * whitespace. That set covers identifiers, comma-separated column lists,
+ * numeric literals, and `count(*)`-style expressions but rejects every
+ * character a SQL injection would need: quotes, semicolons, backslashes,
+ * angle brackets, etc. A non-conforming value throws ClickHouseException.
+ *
+ * If a placeholder name isn't present in the SQL the call also throws
+ * rather than silently passing through. Multiple occurrences of the same
+ * placeholder are all replaced.
+ */
+static void applyPlaceholders(string &sql, HashTable *params_ht)
+{
+    zval *pzval;
+    zend_string *zk;
+    zend_ulong nk;
+
+    ZEND_HASH_FOREACH_KEY_VAL(params_ht, nk, zk, pzval) {
+        (void)nk;
+        if (!zk) {
+            throw std::runtime_error("Placeholder array keys must be strings");
+        }
+        convert_to_string(pzval);
+        const char *val = Z_STRVAL_P(pzval);
+        size_t vlen = Z_STRLEN_P(pzval);
+        for (size_t i = 0; i < vlen; ++i) {
+            unsigned char c = (unsigned char)val[i];
+            bool ok =
+                (c >= 'A' && c <= 'Z') ||
+                (c >= 'a' && c <= 'z') ||
+                (c >= '0' && c <= '9') ||
+                c == '_' || c == '.' || c == ',' || c == ' ' ||
+                c == '\t' || c == '*' || c == '(' || c == ')' ||
+                c == '+' || c == '-';
+            if (!ok) {
+                throw std::runtime_error(
+                    "Placeholder value for {" + std::string(ZSTR_VAL(zk), ZSTR_LEN(zk)) +
+                    "} contains an unsafe character");
+            }
+        }
+        std::string needle = "{" + std::string(ZSTR_VAL(zk), ZSTR_LEN(zk)) + "}";
+        size_t pos = sql.find(needle);
+        if (pos == std::string::npos) {
+            throw std::runtime_error(
+                "Placeholder {" + std::string(ZSTR_VAL(zk), ZSTR_LEN(zk)) +
+                "} does not appear in the SQL");
+        }
+        std::string repl(val, vlen);
+        while (pos != std::string::npos) {
+            sql.replace(pos, needle.size(), repl);
+            pos = sql.find(needle, pos + repl.size());
+        }
+    } ZEND_HASH_FOREACH_END();
+}
+
 /* {{{ proto bool ping()
  */
 PHP_METHOD(CLICKHOUSE_RES_NAME, ping)
 {
-        int key = Z_OBJ_HANDLE(*getThis());
-        Client *client = clientMap.at(key);
-
-        try {
-            client->Ping();
-        } catch (const std::exception& e) {
-            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, e.what(), 0);
-        }
-
-        RETURN_TRUE;
+    int key = Z_OBJ_HANDLE(*getThis());
+    try {
+        Client *client = getClient(key);
+        client->Ping();
+    } catch (const std::exception& e) {
+        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, sanitizeError(e.what()).c_str(), 0);
+        return;
+    }
+    RETURN_TRUE;
 }
 
 /* {{{ proto array select(string sql, array params, int mode)
@@ -505,7 +694,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, select)
     try
     {
         int key = Z_OBJ_HANDLE(*getThis());
-        Client *client = clientMap.at(key);
+        Client *client = getClient(key);
 
         if (clientInsertBlack.count(key))
         {
@@ -520,19 +709,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, select)
                 throw std::runtime_error("The second argument to the select function must be an array");
             }
 
-            HashTable *params_ht = Z_ARRVAL_P(params);
-            zval *pzval;
-            char *str_key;
-            uint32_t str_keylen;
-            int keytype;
-            (void)keytype;
-
-            SC_HASHTABLE_FOREACH_START2(params_ht, str_key, str_keylen, keytype, pzval)
-            {
-                convert_to_string(pzval);
-                sql_s.replace(sql_s.find("{" + (string)str_key + "}"), str_keylen + 2, (string)Z_STRVAL_P(pzval));
-            }
-            SC_HASHTABLE_FOREACH_END();
+            applyPlaceholders(sql_s, Z_ARRVAL_P(params));
         }
 
         if (!(fetch_mode & SC_FETCH_ONE)) {
@@ -598,7 +775,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, select)
     }
     catch (const std::exception& e)
     {
-        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, e.what(), 0);
+        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, sanitizeError(e.what()).c_str(), 0);
     }
 }
 /* }}} */
@@ -646,7 +823,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, insert)
     try
     {
         int key = Z_OBJ_HANDLE(*getThis());
-        Client *client = clientMap.at(key);
+        Client *client = getClient(key);
 
         if (clientInsertBlack.count(key))
         {
@@ -724,7 +901,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, insert)
         if (return_should) {
             sc_zval_ptr_dtor(&return_should);
         }
-        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, e.what(), 0);
+        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, sanitizeError(e.what()).c_str(), 0);
     }
     RETURN_TRUE;
 }
@@ -763,7 +940,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, writeStart)
     try
     {
         int key = Z_OBJ_HANDLE(*getThis());
-        Client *client = clientMap.at(key);
+        Client *client = getClient(key);
 
         if (clientInsertBlack.count(key))
         {
@@ -780,7 +957,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, writeStart)
     }
     catch (const std::exception& e)
     {
-        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, e.what(), 0);
+        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, sanitizeError(e.what()).c_str(), 0);
     }
     RETURN_TRUE;
 }
@@ -857,9 +1034,13 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, write)
 
 
         int key = Z_OBJ_HANDLE(*getThis());
-        Client *client = clientMap.at(key);
+        Client *client = getClient(key);
 
-        Block blockQuery = clientInsertBlack.at(key);
+        auto blockIt = clientInsertBlack.find(key);
+        if (blockIt == clientInsertBlack.end()) {
+            throw std::runtime_error("write() called without a matching writeStart()");
+        }
+        Block &blockQuery = blockIt->second;
 
         Block blockInsert;
         size_t index = 0;
@@ -883,7 +1064,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, write)
         if (return_should) {
             sc_zval_ptr_dtor(&return_should);
         }
-        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, e.what(), 0);
+        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, sanitizeError(e.what()).c_str(), 0);
     }
     RETURN_TRUE;
 }
@@ -896,14 +1077,18 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, writeEnd)
     try
     {
         int key = Z_OBJ_HANDLE(*getThis());
-        Client *client = clientMap.at(key);
-        clientInsertBlack.erase(key);
+        Client *client = getClient(key);
+        if (!clientInsertBlack.count(key)) {
+            throw std::runtime_error("writeEnd() called without a matching writeStart()");
+        }
 
         client->EndInsert();
+        clientInsertBlack.erase(key);
     }
     catch (const std::exception& e)
     {
-        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, e.what(), 0);
+        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, sanitizeError(e.what()).c_str(), 0);
+        return;
     }
     RETURN_TRUE;
 }
@@ -940,7 +1125,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, execute)
     try
     {
         int key = Z_OBJ_HANDLE(*getThis());
-        Client *client = clientMap.at(key);
+        Client *client = getClient(key);
 
         if (clientInsertBlack.count(key))
         {
@@ -955,19 +1140,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, execute)
                 throw std::runtime_error("The second argument to the select function must be an array");
             }
 
-            HashTable *params_ht = Z_ARRVAL_P(params);
-            zval *pzval;
-            char *str_key;
-            uint32_t str_keylen;
-            int keytype;
-            (void)keytype;
-
-            SC_HASHTABLE_FOREACH_START2(params_ht, str_key, str_keylen, keytype, pzval)
-            {
-                convert_to_string(pzval);
-                sql_s.replace(sql_s.find("{" + (string)str_key + "}"), str_keylen + 2, (string)Z_STRVAL_P(pzval));
-            }
-            SC_HASHTABLE_FOREACH_END();
+            applyPlaceholders(sql_s, Z_ARRVAL_P(params));
         }
 
         if (query_id && l_query_id > 0) {
@@ -979,7 +1152,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, execute)
     }
     catch (const std::exception& e)
     {
-        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, e.what(), 0);
+        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, sanitizeError(e.what()).c_str(), 0);
     }
     RETURN_TRUE;
 }
@@ -989,19 +1162,24 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, execute)
  */
 PHP_METHOD(CLICKHOUSE_RES_NAME, __destruct)
 {
-    try
-    {
-        int key = Z_OBJ_HANDLE(*getThis());
-        Client *client = clientMap.at(key);
-        delete client;
-        clientMap.erase(key);
-        clientInsertBlack.erase(key);
+    int key = Z_OBJ_HANDLE(*getThis());
+    auto it = clientMap.find(key);
+    if (it == clientMap.end()) {
+        // __construct never inserted (failed connect, etc). Nothing to clean.
+        RETURN_TRUE;
+    }
+    Client *client = it->second;
 
+    // If a script left writeStart()/write() pending without writeEnd(),
+    // close the insert stream first so the server doesn't see a half-open
+    // transaction. Swallow errors — destructors must not throw.
+    if (clientInsertBlack.count(key)) {
+        try { client->EndInsert(); } catch (...) {}
+        clientInsertBlack.erase(key);
     }
-    catch (const std::exception& e)
-    {
-        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, e.what(), 0);
-    }
+
+    delete client;
+    clientMap.erase(key);
     RETURN_TRUE;
 }
 /* }}} */
