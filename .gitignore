@@ -59,3 +59,7 @@ mkinstalldirs
 run-tests.php
 modules/
 # Windows build script (kept tracked)
+
+# Project-local tooling — not for distribution
+CLAUDE.md
+.claude/

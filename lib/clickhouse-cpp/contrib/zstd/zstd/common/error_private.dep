@@ -1,8 +1,0 @@
-lib/clickhouse-cpp/contrib/zstd/zstd/common/error_private.lo: \
- /home/ilia/ai/SeasClick/lib/clickhouse-cpp/contrib/zstd/zstd/common/error_private.c \
- /home/ilia/ai/SeasClick/lib/clickhouse-cpp/contrib/zstd/zstd/common/error_private.h \
- /home/ilia/ai/SeasClick/lib/clickhouse-cpp/contrib/zstd/zstd/common/../zstd_errors.h \
- /home/ilia/ai/SeasClick/lib/clickhouse-cpp/contrib/zstd/zstd/common/compiler.h \
- /home/ilia/ai/SeasClick/lib/clickhouse-cpp/contrib/zstd/zstd/common/portability_macros.h \
- /home/ilia/ai/SeasClick/lib/clickhouse-cpp/contrib/zstd/zstd/common/debug.h \
- /home/ilia/ai/SeasClick/lib/clickhouse-cpp/contrib/zstd/zstd/common/zstd_deps.h

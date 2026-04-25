@@ -8,28 +8,22 @@
     "packages": [
         {
             "name": "lizhichao/one-ck",
-            "version": "0.1.9",
+            "version": "0.1.13",
             "source": {
                 "type": "git",
                 "url": "https://github.com/lizhichao/one-ck.git",
-                "reference": "0b1de9b6f5527e81023a677e39aa0f62e2fc0193"
+                "reference": "095b354b1d2d7a66e2dce5f7385309911d579a47"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/lizhichao/one-ck/zipball/0b1de9b6f5527e81023a677e39aa0f62e2fc0193",
-                "reference": "0b1de9b6f5527e81023a677e39aa0f62e2fc0193",
-                "shasum": "",
-                "mirrors": [
-                    {
-                        "url": "https://mirrors.aliyun.com/composer/dists/%package%/%reference%.%type%",
-                        "preferred": true
-                    }
-                ]
+                "url": "https://api.github.com/repos/lizhichao/one-ck/zipball/095b354b1d2d7a66e2dce5f7385309911d579a47",
+                "reference": "095b354b1d2d7a66e2dce5f7385309911d579a47",
+                "shasum": ""
             },
             "require": {
                 "ext-bcmath": "*",
                 "ext-json": "*",
-                "php": ">=7.1"
+                "php": ">=7.2"
             },
             "type": "library",
             "autoload": {
@@ -54,37 +48,36 @@
                 "php",
                 "tcp"
             ],
-            "time": "2020-09-09T07:30:08+00:00"
+            "support": {
+                "issues": "https://github.com/lizhichao/one-ck/issues",
+                "source": "https://github.com/lizhichao/one-ck/tree/0.1.13"
+            },
+            "time": "2020-12-16T09:51:08+00:00"
         },
         {
             "name": "smi2/phpclickhouse",
-            "version": "1.1.2",
+            "version": "1.26.423",
             "source": {
                 "type": "git",
                 "url": "https://github.com/smi2/phpClickHouse.git",
-                "reference": "ecf411b3b493e12bfe64873dac94456245d6c45c"
+                "reference": "ab164a69d5755ae91c77fdd196c5de4ffb1893a2"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/smi2/phpClickHouse/zipball/ecf411b3b493e12bfe64873dac94456245d6c45c",
-                "reference": "ecf411b3b493e12bfe64873dac94456245d6c45c",
-                "shasum": "",
-                "mirrors": [
-                    {
-                        "url": "https://mirrors.aliyun.com/composer/dists/%package%/%reference%.%type%",
-                        "preferred": true
-                    }
-                ]
+                "url": "https://api.github.com/repos/smi2/phpClickHouse/zipball/ab164a69d5755ae91c77fdd196c5de4ffb1893a2",
+                "reference": "ab164a69d5755ae91c77fdd196c5de4ffb1893a2",
+                "shasum": ""
             },
             "require": {
                 "ext-curl": "*",
-                "php": ">=5.6"
+                "ext-json": "*",
+                "php": "^8.0"
             },
             "require-dev": {
-                "doctrine/coding-standard": "^4.0",
-                "php": "^7.1",
-                "phpstan/phpstan": "^0.9.2",
-                "phpunit/phpunit": "^7.0"
+                "doctrine/coding-standard": "^8.2",
+                "phpstan/phpstan": "^2.0",
+                "phpunit/phpunit": "^9.5",
+                "sebastian/comparator": "^4.0"
             },
             "type": "library",
             "autoload": {
@@ -114,15 +107,20 @@
                 "http client",
                 "php"
             ],
-            "time": "2018-07-03T18:04:38+00:00"
+            "support": {
+                "issues": "https://github.com/smi2/phpClickHouse/issues",
+                "source": "https://github.com/smi2/phpClickHouse/tree/1.26.423"
+            },
+            "time": "2026-04-23T18:02:52+00:00"
         }
     ],
     "packages-dev": [],
     "aliases": [],
     "minimum-stability": "stable",
-    "stability-flags": [],
+    "stability-flags": {},
     "prefer-stable": false,
     "prefer-lowest": false,
-    "platform": [],
-    "platform-dev": []
+    "platform": {},
+    "platform-dev": {},
+    "plugin-api-version": "2.9.0"
 }

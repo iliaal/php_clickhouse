@@ -1,3 +1,7 @@
-SeasClick
+php_clickhouse
+Ilia Alshanetsky <ilia@ilia.ws>
 
-SeasX Group
+Original SeasClick author: SeasX Group <ahhhh.wang@gmail.com>
+
+Vendored ClickHouse C++ client (lib/clickhouse-cpp/): ClickHouse, Inc.
+and contributors, Apache License 2.0.
