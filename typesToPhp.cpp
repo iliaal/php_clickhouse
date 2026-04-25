@@ -194,13 +194,29 @@ ColumnRef createColumn(TypeRef type)
 
     case Type::Code::Map:
     {
-        TypeRef key_type = type->As<MapType>()->GetKeyType();
-        TypeRef value_type = type->As<MapType>()->GetValueType();
-        if (key_type->GetCode() == Type::Code::String &&
-            value_type->GetCode() == Type::Code::String) {
+        TypeRef k = type->As<MapType>()->GetKeyType();
+        TypeRef v = type->As<MapType>()->GetValueType();
+        Type::Code kc = k->GetCode();
+        Type::Code vc = v->GetCode();
+        if (kc == Type::Code::String && vc == Type::Code::String) {
             return std::make_shared<ColumnMapT<ColumnString, ColumnString>>(
-                std::make_shared<ColumnString>(),
-                std::make_shared<ColumnString>());
+                std::make_shared<ColumnString>(), std::make_shared<ColumnString>());
+        }
+        if (kc == Type::Code::String && vc == Type::Code::Int64) {
+            return std::make_shared<ColumnMapT<ColumnString, ColumnInt64>>(
+                std::make_shared<ColumnString>(), std::make_shared<ColumnInt64>());
+        }
+        if (kc == Type::Code::String && vc == Type::Code::UInt64) {
+            return std::make_shared<ColumnMapT<ColumnString, ColumnUInt64>>(
+                std::make_shared<ColumnString>(), std::make_shared<ColumnUInt64>());
+        }
+        if (kc == Type::Code::String && vc == Type::Code::Float64) {
+            return std::make_shared<ColumnMapT<ColumnString, ColumnFloat64>>(
+                std::make_shared<ColumnString>(), std::make_shared<ColumnFloat64>());
+        }
+        if (kc == Type::Code::Int64 && vc == Type::Code::String) {
+            return std::make_shared<ColumnMapT<ColumnInt64, ColumnString>>(
+                std::make_shared<ColumnInt64>(), std::make_shared<ColumnString>());
         }
         return CreateColumnByType(type->GetName());
     }
@@ -816,42 +832,100 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
 
     case Type::Code::Map:
     {
-        TypeRef key_type = type->As<MapType>()->GetKeyType();
-        TypeRef value_type = type->As<MapType>()->GetValueType();
-        if (key_type->GetCode() != Type::Code::String ||
-            value_type->GetCode() != Type::Code::String) {
-            throw std::runtime_error("Map row write currently only supports Map(String, String)");
-        }
-        auto col = std::make_shared<ColumnMapT<ColumnString, ColumnString>>(
-            std::make_shared<ColumnString>(),
-            std::make_shared<ColumnString>());
+        TypeRef k = type->As<MapType>()->GetKeyType();
+        TypeRef v = type->As<MapType>()->GetValueType();
+        Type::Code kc = k->GetCode();
+        Type::Code vc = v->GetCode();
 
-        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
-        {
-            if (Z_TYPE_P(array_value) != IS_ARRAY) {
-                throw std::runtime_error("Map row must be a PHP array");
-            }
-            std::vector<std::pair<std::string, std::string>> entries;
-            HashTable *map_ht = Z_ARRVAL_P(array_value);
-            zval *map_val;
-            char *map_key;
-            uint32_t map_keylen;
-            int map_keytype;
-            SC_HASHTABLE_FOREACH_START2(map_ht, map_key, map_keylen, map_keytype, map_val)
-            {
-                if (map_key == NULL) {
-                    continue;
-                }
-                std::string k_str(map_key, map_keylen);
-                convert_to_string(map_val);
-                entries.emplace_back(std::move(k_str),
-                                     std::string(Z_STRVAL_P(map_val), Z_STRLEN_P(map_val)));
-            }
-            SC_HASHTABLE_FOREACH_END();
-            col->Append(entries);
+        if (kc == Type::Code::String && vc == Type::Code::String) {
+            auto col = std::make_shared<ColumnMapT<ColumnString, ColumnString>>(
+                std::make_shared<ColumnString>(), std::make_shared<ColumnString>());
+            SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value) {
+                if (Z_TYPE_P(array_value) != IS_ARRAY) throw std::runtime_error("Map row must be a PHP array");
+                std::vector<std::pair<std::string, std::string>> entries;
+                HashTable *mh = Z_ARRVAL_P(array_value);
+                zval *mv; char *mk; uint32_t ml; int mt;
+                SC_HASHTABLE_FOREACH_START2(mh, mk, ml, mt, mv) {
+                    if (!mk) continue;
+                    convert_to_string(mv);
+                    entries.emplace_back(std::string(mk, ml),
+                                         std::string(Z_STRVAL_P(mv), Z_STRLEN_P(mv)));
+                } SC_HASHTABLE_FOREACH_END();
+                col->Append(entries);
+            } SC_HASHTABLE_FOREACH_END();
+            return col;
         }
-        SC_HASHTABLE_FOREACH_END();
-        return col;
+        if (kc == Type::Code::String && vc == Type::Code::Int64) {
+            auto col = std::make_shared<ColumnMapT<ColumnString, ColumnInt64>>(
+                std::make_shared<ColumnString>(), std::make_shared<ColumnInt64>());
+            SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value) {
+                if (Z_TYPE_P(array_value) != IS_ARRAY) throw std::runtime_error("Map row must be a PHP array");
+                std::vector<std::pair<std::string, int64_t>> entries;
+                HashTable *mh = Z_ARRVAL_P(array_value);
+                zval *mv; char *mk; uint32_t ml; int mt;
+                SC_HASHTABLE_FOREACH_START2(mh, mk, ml, mt, mv) {
+                    if (!mk) continue;
+                    convert_to_long(mv);
+                    entries.emplace_back(std::string(mk, ml), (int64_t)Z_LVAL_P(mv));
+                } SC_HASHTABLE_FOREACH_END();
+                col->Append(entries);
+            } SC_HASHTABLE_FOREACH_END();
+            return col;
+        }
+        if (kc == Type::Code::String && vc == Type::Code::UInt64) {
+            auto col = std::make_shared<ColumnMapT<ColumnString, ColumnUInt64>>(
+                std::make_shared<ColumnString>(), std::make_shared<ColumnUInt64>());
+            SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value) {
+                if (Z_TYPE_P(array_value) != IS_ARRAY) throw std::runtime_error("Map row must be a PHP array");
+                std::vector<std::pair<std::string, uint64_t>> entries;
+                HashTable *mh = Z_ARRVAL_P(array_value);
+                zval *mv; char *mk; uint32_t ml; int mt;
+                SC_HASHTABLE_FOREACH_START2(mh, mk, ml, mt, mv) {
+                    if (!mk) continue;
+                    convert_to_long(mv);
+                    entries.emplace_back(std::string(mk, ml), (uint64_t)Z_LVAL_P(mv));
+                } SC_HASHTABLE_FOREACH_END();
+                col->Append(entries);
+            } SC_HASHTABLE_FOREACH_END();
+            return col;
+        }
+        if (kc == Type::Code::String && vc == Type::Code::Float64) {
+            auto col = std::make_shared<ColumnMapT<ColumnString, ColumnFloat64>>(
+                std::make_shared<ColumnString>(), std::make_shared<ColumnFloat64>());
+            SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value) {
+                if (Z_TYPE_P(array_value) != IS_ARRAY) throw std::runtime_error("Map row must be a PHP array");
+                std::vector<std::pair<std::string, double>> entries;
+                HashTable *mh = Z_ARRVAL_P(array_value);
+                zval *mv; char *mk; uint32_t ml; int mt;
+                SC_HASHTABLE_FOREACH_START2(mh, mk, ml, mt, mv) {
+                    if (!mk) continue;
+                    convert_to_double(mv);
+                    entries.emplace_back(std::string(mk, ml), (double)Z_DVAL_P(mv));
+                } SC_HASHTABLE_FOREACH_END();
+                col->Append(entries);
+            } SC_HASHTABLE_FOREACH_END();
+            return col;
+        }
+        if (kc == Type::Code::Int64 && vc == Type::Code::String) {
+            auto col = std::make_shared<ColumnMapT<ColumnInt64, ColumnString>>(
+                std::make_shared<ColumnInt64>(), std::make_shared<ColumnString>());
+            SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value) {
+                if (Z_TYPE_P(array_value) != IS_ARRAY) throw std::runtime_error("Map row must be a PHP array");
+                std::vector<std::pair<int64_t, std::string>> entries;
+                HashTable *mh = Z_ARRVAL_P(array_value);
+                zend_string *zk;
+                zend_ulong nk;
+                zval *mv;
+                ZEND_HASH_FOREACH_KEY_VAL(mh, nk, zk, mv) {
+                    convert_to_string(mv);
+                    int64_t kk = zk ? (int64_t)strtoll(ZSTR_VAL(zk), NULL, 10) : (int64_t)nk;
+                    entries.emplace_back(kk, std::string(Z_STRVAL_P(mv), Z_STRLEN_P(mv)));
+                } ZEND_HASH_FOREACH_END();
+                col->Append(entries);
+            } SC_HASHTABLE_FOREACH_END();
+            return col;
+        }
+        throw std::runtime_error("Unsupported Map(K, V) for row write: " + type->GetName());
     }
 
     case Type::Code::Void:
@@ -1461,28 +1535,83 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
     case Type::Code::Map:
     {
         TypeRef map_type = columnRef->Type();
-        TypeRef key_type = map_type->As<MapType>()->GetKeyType();
-        TypeRef value_type = map_type->As<MapType>()->GetValueType();
-        if (key_type->GetCode() != Type::Code::String ||
-            value_type->GetCode() != Type::Code::String) {
-            throw std::runtime_error("Map row read currently only supports Map(String, String)");
-        }
+        Type::Code key_code = map_type->As<MapType>()->GetKeyType()->GetCode();
+        Type::Code value_code = map_type->As<MapType>()->GetValueType()->GetCode();
         auto map_col = columnRef->As<ColumnMap>();
         ColumnRef tuple_col = map_col->GetAsColumn(row);
         auto tup = tuple_col->As<ColumnTuple>();
-        auto keys_col = (*tup)[0]->As<ColumnString>();
-        auto values_col = (*tup)[1]->As<ColumnString>();
-        size_t entry_count = keys_col->Size();
+        ColumnRef keys_any = (*tup)[0];
+        ColumnRef values_any = (*tup)[1];
+        size_t entry_count = keys_any->Size();
+
         zval *map_zv;
         SC_MAKE_STD_ZVAL(map_zv);
         array_init(map_zv);
+
         for (size_t i = 0; i < entry_count; ++i) {
-            std::string_view k = (*keys_col)[i];
-            std::string_view v = (*values_col)[i];
-            std::string key_buf(k.data(), k.length());
-            sc_add_assoc_stringl_ex(map_zv, key_buf.c_str(), key_buf.length(),
-                                    (char*)v.data(), v.length(), 1);
+            // Build PHP key.
+            std::string str_key_buf;
+            zend_long long_key = 0;
+            bool key_is_string = (key_code == Type::Code::String);
+            if (key_is_string) {
+                std::string_view kv = (*keys_any->As<ColumnString>())[i];
+                str_key_buf.assign(kv.data(), kv.length());
+            } else if (key_code == Type::Code::Int64) {
+                long_key = (zend_long)keys_any->As<ColumnInt64>()->At(i);
+            } else if (key_code == Type::Code::UInt64) {
+                long_key = (zend_long)keys_any->As<ColumnUInt64>()->At(i);
+            } else if (key_code == Type::Code::Int32) {
+                long_key = (zend_long)keys_any->As<ColumnInt32>()->At(i);
+            } else if (key_code == Type::Code::UInt32) {
+                long_key = (zend_long)keys_any->As<ColumnUInt32>()->At(i);
+            } else {
+                throw std::runtime_error("Map read: unsupported key type " + map_type->As<MapType>()->GetKeyType()->GetName());
+            }
+
+            // Build PHP value and add under the right key.
+            if (value_code == Type::Code::String) {
+                std::string_view vv = (*values_any->As<ColumnString>())[i];
+                if (key_is_string) {
+                    sc_add_assoc_stringl_ex(map_zv, str_key_buf.c_str(), str_key_buf.length(),
+                                            (char*)vv.data(), vv.length(), 1);
+                } else {
+                    add_index_stringl(map_zv, long_key, (char*)vv.data(), vv.length());
+                }
+            } else if (value_code == Type::Code::Int64 || value_code == Type::Code::UInt64
+                    || value_code == Type::Code::Int32 || value_code == Type::Code::UInt32
+                    || value_code == Type::Code::Int16 || value_code == Type::Code::UInt16
+                    || value_code == Type::Code::Int8  || value_code == Type::Code::UInt8) {
+                zend_long lv = 0;
+                switch (value_code) {
+                    case Type::Code::Int64:  lv = (zend_long)values_any->As<ColumnInt64>()->At(i); break;
+                    case Type::Code::UInt64: lv = (zend_long)values_any->As<ColumnUInt64>()->At(i); break;
+                    case Type::Code::Int32:  lv = (zend_long)values_any->As<ColumnInt32>()->At(i); break;
+                    case Type::Code::UInt32: lv = (zend_long)values_any->As<ColumnUInt32>()->At(i); break;
+                    case Type::Code::Int16:  lv = (zend_long)values_any->As<ColumnInt16>()->At(i); break;
+                    case Type::Code::UInt16: lv = (zend_long)values_any->As<ColumnUInt16>()->At(i); break;
+                    case Type::Code::Int8:   lv = (zend_long)values_any->As<ColumnInt8>()->At(i); break;
+                    case Type::Code::UInt8:  lv = (zend_long)values_any->As<ColumnUInt8>()->At(i); break;
+                    default: break;
+                }
+                if (key_is_string) {
+                    add_assoc_long_ex(map_zv, str_key_buf.c_str(), str_key_buf.length(), lv);
+                } else {
+                    add_index_long(map_zv, long_key, lv);
+                }
+            } else if (value_code == Type::Code::Float64 || value_code == Type::Code::Float32) {
+                double dv = (value_code == Type::Code::Float64)
+                    ? (double)values_any->As<ColumnFloat64>()->At(i)
+                    : (double)values_any->As<ColumnFloat32>()->At(i);
+                if (key_is_string) {
+                    add_assoc_double_ex(map_zv, str_key_buf.c_str(), str_key_buf.length(), dv);
+                } else {
+                    add_index_double(map_zv, long_key, dv);
+                }
+            } else {
+                throw std::runtime_error("Map read: unsupported value type " + map_type->As<MapType>()->GetValueType()->GetName());
+            }
         }
+
         if (is_array) {
             add_next_index_zval(arr, map_zv);
         } else if (fetch_mode & SC_FETCH_ONE) {
