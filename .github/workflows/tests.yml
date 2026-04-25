@@ -118,14 +118,25 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y llvm clang re2c bison autoconf libssl-dev
 
+      - name: Resolve clang runtime dir
+        id: clang_rt
+        run: echo "dir=$(clang -print-runtime-dir)" >> "$GITHUB_OUTPUT"
+
       - name: Build PHP with ASAN
+        env:
+          LD_LIBRARY_PATH: ${{ steps.clang_rt.outputs.dir }}
         run: |
           git clone --depth=1 --branch=PHP-${{ matrix.php }} https://github.com/php/php-src.git /tmp/php-src
           cd /tmp/php-src
           ./buildconf --force
+          # -shared-libasan: link ASan as a shared library so the dynamic
+          # linker can resolve interceptors (notably __cxa_throw) across the
+          # dlopen'd extension boundary. With static asan, the extension's
+          # interceptor for __cxa_throw never finds the real libstdc++
+          # symbol and ASan aborts the moment the wrapper throws.
           CC=clang CXX=clang++ \
-          CFLAGS="-fsanitize=address,undefined -fno-sanitize=function,vptr -DZEND_TRACK_ARENA_ALLOC" \
-          LDFLAGS="-fsanitize=address,undefined" \
+          CFLAGS="-fsanitize=address,undefined -fno-sanitize=function,vptr -shared-libasan -DZEND_TRACK_ARENA_ALLOC" \
+          LDFLAGS="-fsanitize=address,undefined -shared-libasan" \
           ./configure \
             --enable-debug \
             --disable-zts \
@@ -136,34 +147,35 @@ jobs:
           make install
 
       - name: Build extension with ASAN
+        env:
+          LD_LIBRARY_PATH: ${{ steps.clang_rt.outputs.dir }}
         run: |
           export PATH="/tmp/php-asan/bin:$PATH"
           phpize
-          # Match PHP's exact -fsanitize / -fno-sanitize set so the runtime
-          # ABI lines up. Disable `function` (PHP's own build does) and
-          # `vptr` (the vptr check needs __ubsan_vptr_type_cache, which the
-          # dlopen'd extension can't resolve against the host PHP's static
-          # ASan/UBSan).
+          # Match PHP's exact -fsanitize / -fno-sanitize / -shared-libasan
+          # set so the runtime ABI lines up. Disable `function` (PHP's own
+          # build does) and `vptr` (the vptr check needs
+          # __ubsan_vptr_type_cache, which the dlopen'd extension can't
+          # resolve against the host PHP's runtime).
           CC=clang CXX=clang++ \
-          CFLAGS="-fsanitize=address,undefined -fno-sanitize=function,vptr -DZEND_TRACK_ARENA_ALLOC" \
-          CXXFLAGS="-fsanitize=address,undefined -fno-sanitize=function,vptr -DZEND_TRACK_ARENA_ALLOC" \
-          LDFLAGS="-fsanitize=address,undefined" \
+          CFLAGS="-fsanitize=address,undefined -fno-sanitize=function,vptr -shared-libasan -DZEND_TRACK_ARENA_ALLOC" \
+          CXXFLAGS="-fsanitize=address,undefined -fno-sanitize=function,vptr -shared-libasan -DZEND_TRACK_ARENA_ALLOC" \
+          LDFLAGS="-fsanitize=address,undefined -shared-libasan" \
           ./configure --enable-clickhouse --with-php-config=/tmp/php-asan/bin/php-config
           make -j$(nproc)
 
       - name: Run tests under ASAN
         env:
+          LD_LIBRARY_PATH: ${{ steps.clang_rt.outputs.dir }}
           CLICKHOUSE_HOST: 127.0.0.1
           CLICKHOUSE_PORT: 9000
           CLICKHOUSE_USER: test
           CLICKHOUSE_PASSWD: test
           NO_INTERACTION: 1
         run: |
-          # PHP itself was built with -fsanitize=address, so the ASan runtime
-          # is already embedded in /tmp/php-asan/bin/php. Do not LD_PRELOAD
-          # libclang_rt.asan-x86_64.so on top of that — ASan aborts with
-          # "incompatible ASan runtimes" when two runtimes land in the same
-          # address space.
+          # PHP and the extension are linked against the shared libasan/ubsan
+          # runtimes, so the dynamic linker needs to find them. LD_LIBRARY_PATH
+          # points at clang's runtime dir; no LD_PRELOAD is needed.
           export TEST_PHP_EXECUTABLE=/tmp/php-asan/bin/php
           export TEST_PHP_ARGS="-d extension=$(pwd)/modules/clickhouse.so"
           /tmp/php-asan/bin/php run-tests.php --show-diff --asan -g FAIL,BORK,LEAK,XLEAK tests/
