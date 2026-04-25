@@ -45,12 +45,20 @@ extern "C" {
 using namespace clickhouse;
 using namespace std;
 
+/*
+ * Parse "YYYY-MM-DD" or "YYYY-MM-DD HH:MM:SS" into a Unix epoch.
+ *
+ * Use timegm, not mktime: the read paths in convertToZval all format
+ * via gmtime, so the round-trip needs to be UTC symmetric. Using
+ * mktime would reinterpret the parsed components as local time and
+ * shift the stored value by the runner's TZ offset.
+ */
 static std::time_t to_time_t(const std::string& str, bool is_date = true)
 {
     std::tm t = {0};
     std::istringstream ss(str);
     ss >> std::get_time(&t, is_date ? "%Y-%m-%d" : "%Y-%m-%d %H:%M:%S");
-    return mktime(&t);
+    return timegm(&t);
 }
 
 ColumnRef createColumn(TypeRef type)
@@ -584,18 +592,30 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     case Type::Code::Int128:
     {
         auto value = std::make_shared<ColumnInt128>();
+        // Int128 range: -2^127 .. 2^127-1. The signed magnitude fits in 39
+        // decimal digits (2^127 = 170141183460469231731687303715884105728).
         SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
         {
             if (Z_TYPE_P(array_value) == IS_STRING) {
-                Int128 v = 0;
-                bool neg = false;
                 const char *s = Z_STRVAL_P(array_value);
                 size_t len = Z_STRLEN_P(array_value);
                 size_t i = 0;
+                bool neg = false;
                 if (len > 0 && (s[0] == '-' || s[0] == '+')) { neg = (s[0] == '-'); i = 1; }
+                size_t digits = len - i;
+                if (digits == 0 || digits > 39) {
+                    throw std::runtime_error("Int128 string is empty or too long");
+                }
+                Int128 v = 0;
                 for (; i < len; ++i) {
-                    if (s[i] < '0' || s[i] > '9') break;
-                    v = v * 10 + (s[i] - '0');
+                    if (s[i] < '0' || s[i] > '9') {
+                        throw std::runtime_error("Int128 string contains non-digit characters");
+                    }
+                    Int128 next = v * 10 + (s[i] - '0');
+                    if (next < v) {
+                        throw std::runtime_error("Int128 string overflows the 128-bit range");
+                    }
+                    v = next;
                 }
                 value->Append(neg ? -v : v);
             } else {
@@ -609,19 +629,35 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     case Type::Code::UInt128:
     {
         auto value = std::make_shared<ColumnUInt128>();
+        // UInt128 range: 0 .. 2^128-1, i.e. up to 39 decimal digits.
         SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
         {
             if (Z_TYPE_P(array_value) == IS_STRING) {
-                UInt128 v = 0;
                 const char *s = Z_STRVAL_P(array_value);
                 size_t len = Z_STRLEN_P(array_value);
-                for (size_t i = 0; i < len; ++i) {
-                    if (s[i] < '0' || s[i] > '9') break;
-                    v = v * 10 + (s[i] - '0');
+                size_t i = 0;
+                if (len > 0 && s[0] == '+') { i = 1; }
+                size_t digits = len - i;
+                if (digits == 0 || digits > 39) {
+                    throw std::runtime_error("UInt128 string is empty or too long");
+                }
+                UInt128 v = 0;
+                for (; i < len; ++i) {
+                    if (s[i] < '0' || s[i] > '9') {
+                        throw std::runtime_error("UInt128 string contains non-digit characters");
+                    }
+                    UInt128 next = v * 10 + (s[i] - '0');
+                    if (next < v) {
+                        throw std::runtime_error("UInt128 string overflows the 128-bit range");
+                    }
+                    v = next;
                 }
                 value->Append(v);
             } else {
                 convert_to_long(array_value);
+                if (Z_LVAL_P(array_value) < 0) {
+                    throw std::runtime_error("UInt128 cannot accept a negative integer");
+                }
                 value->Append(UInt128((uint64_t)Z_LVAL_P(array_value)));
             }
         }
@@ -1137,10 +1173,23 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
         if (!col) {
             throw std::runtime_error("Decimal read: column downcast failed");
         }
+        // Format with the scale point so a value inserted as "12.34" reads
+        // back as "12.34", not the unscaled storage integer 1234.
+        auto dec_type = columnRef->Type()->As<DecimalType>();
+        size_t scale = dec_type ? dec_type->GetScale() : 0;
         Int128 raw = col->At(row);
         std::stringstream ss;
         ss << raw;
         std::string s = ss.str();
+        if (scale > 0) {
+            bool neg = !s.empty() && s[0] == '-';
+            std::string abs = neg ? s.substr(1) : s;
+            if (abs.size() <= scale) {
+                abs.insert(0, scale + 1 - abs.size(), '0');
+            }
+            abs.insert(abs.size() - scale, ".");
+            s = neg ? ("-" + abs) : abs;
+        }
         if (is_array) {
             sc_add_next_index_stringl(arr, (char*)s.c_str(), s.length(), 1);
         } else {
