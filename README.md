@@ -1,141 +1,264 @@
-SeasClick
-=====
-[![Build Status](https://travis-ci.org/SeasX/SeasClick.svg?branch=master)](https://travis-ci.org/SeasX/SeasClick)
+# php_clickhouse
 
-PHP client for [ClickHouse](https://clickhouse.com/), built on the official [ClickHouse/clickhouse-cpp](https://github.com/ClickHouse/clickhouse-cpp) library (vendored at v2.6.1).
+Native PHP extension for [ClickHouse](https://clickhouse.com/), built on
+the official [ClickHouse/clickhouse-cpp](https://github.com/ClickHouse/clickhouse-cpp)
+client. Connects over the binary TCP protocol with LZ4 / ZSTD compression
+and optional TLS.
 
-## ClickHouse
-* [What is ClickHouse](https://clickhouse.com/docs)
-* [ClickHouse Performance](https://clickhouse.com/docs/en/introduction/performance/)
+## Status
 
-## Supported data types
+Soft fork of [SeasX/SeasClick](https://github.com/SeasX/SeasClick), which
+appears unmaintained — the last accepted external PR there is from 2020
+and several follow-up PRs have been pending for years. This fork:
 
-* Array(T) (single-level only)
-* Date, DateTime, DateTime64(N)
-* Decimal, Decimal32, Decimal64, Decimal128
-* Enum8, Enum16
-* FixedString(N)
-* Float32, Float64
-* IPv4, IPv6
-* LowCardinality(String) and LowCardinality(FixedString(N))
-* Map (column creation only; row read/write through the new column API is a TODO)
-* Nullable(T)
-* String
-* Tuple (read-only)
-* UInt8, UInt16, UInt32, UInt64, Int8, Int16, Int32, Int64
-* UUID
+- Renames the extension to `php_clickhouse` (module `clickhouse`,
+  classes `ClickHouse` / `ClickHouseException`)
+- Upgrades the vendored client from artpaul-fork v1.x to the official
+  ClickHouse/clickhouse-cpp v2.6.1
+- Adds Date32 / Time / Time64 / DateTime64 / Int128 / UInt128 /
+  Decimal128 / LowCardinality / Map column types, multi-endpoint
+  failover, ZSTD compression, query_id propagation, and TLS
+- Ships an updated test suite, CI, PIE-based packaging, and benchmarks
 
-## Supported PHP version
-PHP 7.1+ (PHP 8.x supported and tested)
-
-## Performance
-![image](https://github.com/SeasX/SeasClick/raw/master/tests/bench_mark/bench_mark.png)
-
-This performance test [demo](https://github.com/SeasX/SeasClick/blob/master/tests/bench_mark/bench_mark.php) is compared to [phpclickhouse](https://github.com/smi2/phpClickHouse)
+The original `SeasClick` and `SeasClickException` class names continue
+to work as deprecated aliases for the 0.5.x cycle.
 
 ## Install
+
+via [PIE](https://github.com/php/pie) (the PHP Foundation's PECL
+successor):
+
 ```sh
-git clone https://github.com/SeasX/SeasClick.git
-cd SeasClick
+pie install iliaal/php_clickhouse
+```
+
+with TLS support:
+
+```sh
+pie install iliaal/php_clickhouse --enable-clickhouse-openssl
+```
+
+Building from source:
+
+```sh
+git clone https://github.com/iliaal/php_clickhouse.git
+cd php_clickhouse
 phpize
-./configure
+./configure                              # default build
+./configure --enable-clickhouse-openssl  # with TLS, requires libssl-dev
 make && sudo make install
 ```
 
-The vendored `lib/clickhouse-cpp/` requires a C++17 compiler (set automatically by `config.m4`). All optional dependencies (LZ4, ZSTD, abseil-int128) are vendored under `lib/clickhouse-cpp/contrib/`.
+Add `extension=clickhouse.so` to your `php.ini`. The build needs a
+C++17-capable compiler (GCC 8+, Clang 7+); LZ4, ZSTD, abseil-int128,
+and CityHash are vendored under `lib/clickhouse-cpp/contrib/`.
 
-### TLS / SSL
+### Test server
 
-To build with TLS support, install OpenSSL development headers (`libssl-dev` on Debian/Ubuntu) and configure with the opt-in flag:
-
-```sh
-phpize
-./configure --enable-SeasClick-openssl
-make && sudo make install
-```
-
-Connect over TLS by passing `"ssl" => true` in the constructor config:
-
-```php
-$c = new SeasClick([
-    "host"             => "ch.example.com",
-    "port"             => 9440,                   // tcp_port_secure on the server
-    "user"             => "default",
-    "passwd"           => "secret",
-    "ssl"              => true,
-    "ssl_ca_files"     => "/etc/ssl/certs/ca.crt", // string or array of paths
-    "ssl_ca_directory" => "/etc/ssl/certs",        // optional
-    "ssl_use_default_ca" => true,                  // default true; set false to lock to the explicit CA only
-    "ssl_skip_verify"  => false,                   // true only for dev / self-signed
-]);
-```
-
-Building without `--enable-SeasClick-openssl` leaves the extension SSL-free; passing `"ssl" => true` in that case throws `SeasClickException("SeasClick was built without TLS support...")` so misconfiguration is loud, not silent.
-
-## Testing against a local ClickHouse server
-
-The fastest way to spin up a server for integration tests is the official server image:
+For development and integration tests, the simplest path is the
+official ClickHouse server image:
 
 ```sh
-docker run -d --name seasclick-ch \
+docker run -d --name clickhouse-test \
     --ulimit nofile=262144:262144 \
-    -p 9000:9000 -p 8123:8123 \
+    -p 9000:9000 -p 8123:8123 -p 9440:9440 \
     -e CLICKHOUSE_USER=test \
     -e CLICKHOUSE_PASSWORD=test \
-    -e CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1 \
-    clickhouse/clickhouse-server:24.8
+    clickhouse/clickhouse-server:latest
 ```
 
-Then connect with `host=127.0.0.1 port=9000 user=test passwd=test`. To stop and clean up: `docker rm -f seasclick-ch`.
+Stop and clean up: `docker rm -f clickhouse-test`.
 
-For a minimal showcase image, see [`ClickHouse/ClickHouse/docker/bare`](https://github.com/ClickHouse/ClickHouse/tree/master/docker/bare). That recipe builds a `FROM scratch` image around a pre-built `clickhouse` binary; it is a reference for understanding ClickHouse's runtime dependency surface, not a daily-driver test image.
-
-## Example
+## Quick example
 
 ```php
 <?php
-$config = [
-    "host" => "clickhouse",
-    "port" => 9000,
-    "compression" => true
-];
+$ch = new ClickHouse([
+    "host"        => "127.0.0.1",
+    "port"        => 9000,
+    "database"    => "test",
+    "user"        => "default",
+    "passwd"      => "",
+    "compression" => "lz4",   // or "zstd" / true / false
+]);
 
-clientTest($config);
+$ch->execute("CREATE TABLE IF NOT EXISTS events (
+    id UInt32, ts DateTime64(3), tag LowCardinality(String)
+) ENGINE = Memory");
 
-function clientTest($config)
-{
-    $deleteTable = true;
-    $client = new SeasClick($config);
+$ch->insert("events", ["id", "ts", "tag"], [
+    [1, time(), "alpha"],
+    [2, time(), "beta"],
+]);
 
-    $client->execute("CREATE DATABASE IF NOT EXISTS test");
-
-    testArray($client, $deleteTable);
-}
-
-function testArray($client, $deleteTable = false) {
-    $client->execute("CREATE TABLE IF NOT EXISTS test.array_test (string_c String, array_c Array(Int8), arraynull_c Array(Nullable(String))) ENGINE = Memory");
-
-    $client->insert("test.array_test", [
-        'string_c', 'array_c', 'arraynull_c'
-    ], [
-        ['string_c1', [1, 2, 3], ['string']],
-        ['string_c2', [4, 5, 6], [null]]
-    ]);
-
-    $result = $client->select("SELECT {select} FROM {table}", [
-        'select' => 'string_c, array_c, arraynull_c',
-        'table' => 'test.array_test'
-    ]);
-    var_dump($result);
-
-    if ($deleteTable) {
-        $client->execute("DROP TABLE {table}", [
-            'table' => 'test.array_test'
-        ]);
-    }
+foreach ($ch->select("SELECT id, ts, tag FROM events ORDER BY id",
+                     [], ClickHouse::DATE_AS_STRINGS) as $row) {
+    print_r($row);
 }
 ```
-#### [More examples](https://github.com/SeasX/SeasClick/blob/master/tests/test.php)
 
-## Support
-SeasX Group
+## Supported data types
+
+* `Array(T)` (single-level)
+* `Date`, `Date32`, `DateTime`, `DateTime64(N[, timezone])`
+* `Time`, `Time64(N)` — server side requires ClickHouse 25.x or later
+* `Decimal`, `Decimal32`, `Decimal64`, `Decimal128(P, S)` (read/write
+  as scaled-integer strings)
+* `Enum8`, `Enum16`
+* `FixedString(N)`
+* `Float32`, `Float64`
+* `Int8` … `Int64`, `UInt8` … `UInt64`
+* `Int128`, `UInt128` (round-trip as decimal strings — PHP integers
+  are 64-bit)
+* `IPv4`, `IPv6`
+* `LowCardinality(String)`, `LowCardinality(FixedString(N))`
+* `Map(K, V)` for `(String, String)`, `(String, Int64)`,
+  `(String, UInt64)`, `(String, Float64)`, `(Int64, String)`. Other K/V
+  pairs are read-only via the lib's generic factory.
+* `Nullable(T)`
+* `String`
+* `Tuple` (read-only)
+* `UUID`
+
+## Configuration reference
+
+All keys go in the array passed to `new ClickHouse([...])`.
+
+### Connection
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `host` | string | `127.0.0.1` | Server host |
+| `port` | int | `9000` | Native TCP port (or `9440` for TLS) |
+| `database` | string | `default` | Default database |
+| `user` | string | `default` | Username |
+| `passwd` | string | (empty) | Password |
+| `endpoints` | array | — | List of `[{host, port}, ...]` for round-robin failover. Tried in order on connect failure. |
+
+### Compression
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `compression` | bool / string | `false` | `false`/`"none"` = uncompressed; `true`/`"lz4"` = LZ4 (fast); `"zstd"` = ZSTD (denser) |
+| `max_compression_chunk_size` | int | `65535` | Block size used by the compressor |
+
+### Timeouts and retry
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `connect_timeout` | int (sec) | `5` | TCP connect deadline |
+| `receive_timeout` | int (sec) | `0` | Read deadline (0 = no timeout) |
+| `send_timeout` | int (sec) | `0` | Write deadline |
+| `retry_count` | int | `1` | Send retries on transient failure |
+| `retry_timeout` | int (sec) | `5` | Sleep between retries |
+| `tcp_nodelay` | bool | `true` | TCP_NODELAY |
+| `tcp_keepalive` | bool | `false` | TCP keepalive |
+| `tcp_keepalive_idle` | int (sec) | `60` | Idle time before first keepalive probe |
+| `tcp_keepalive_intvl` | int (sec) | `5` | Interval between probes |
+| `tcp_keepalive_cnt` | int | `3` | Failed probes before declaring dead |
+
+### TLS (build with `--enable-clickhouse-openssl`)
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `ssl` | bool | `false` | Enable TLS |
+| `ssl_skip_verify` | bool | `false` | Skip cert validation. **Dev only.** |
+| `ssl_use_default_ca` | bool | `true` | Trust the system CA bundle |
+| `ssl_ca_files` | string \| array | — | PEM CA file path(s) |
+| `ssl_ca_directory` | string | — | OpenSSL hashed-cert directory |
+
+Building without `--enable-clickhouse-openssl` and passing
+`ssl => true` raises `ClickHouseException`; misconfiguration is loud,
+not silent.
+
+## Methods
+
+```php
+$ch = new ClickHouse(array $config);
+
+// Schema / DDL
+$ch->execute(string $sql, array $params = [], string $query_id = "");
+
+// Read
+$rows = $ch->select(string $sql,
+                    array $params = [],
+                    int $fetch_mode = 0,
+                    string $query_id = "");
+
+// Bulk insert (entire dataset in one call)
+$ch->insert(string $table, array $columns, array $values,
+            string $query_id = "");
+
+// Streaming insert (open block, append, close)
+$ch->writeStart(string $table, array $columns, string $query_id = "");
+$ch->write(array $values);
+$ch->write(array $more_values);
+$ch->writeEnd();
+
+$ch->ping();          // returns true on success, throws on failure
+```
+
+`fetch_mode` is a bitmask of `ClickHouse::FETCH_ONE`,
+`ClickHouse::FETCH_KEY_PAIR`, `ClickHouse::FETCH_COLUMN`, and
+`ClickHouse::DATE_AS_STRINGS`.
+
+## Benchmarks
+
+PHP 8.4.22 / ClickHouse 26.3.9.8 / localhost loopback / `Memory` table
+(no disk).
+
+Compared against:
+
+- [smi2/phpClickHouse](https://github.com/smi2/phpClickHouse) — pure-PHP
+  HTTP client, the most popular pure-PHP option
+- [lizhichao/one-ck](https://github.com/lizhichao/one-ck) — pure-PHP
+  TCP client
+
+Each cell is total wall-clock seconds for `selectCount` queries plus
+a single bulk insert of `dataCount` rows.
+
+| dataCount × selectCount × limit | phpClickHouse (HTTP) | php_clickhouse (uncompressed) | php_clickhouse (LZ4) | php_clickhouse (ZSTD) | one-ck |
+|---|---:|---:|---:|---:|---:|
+| 10000 × 1 × 5000   | 0.112 | 0.085 | 0.074 | 0.023 | 0.030 |
+| 10000 × 1 × 5000   | 0.104 | 0.030 | 0.024 | 0.081 | 0.083 |
+| 10000 × 100 × 5000  | 0.298 | 0.263 | 0.209 | 0.218 | 0.217 |
+| 10000 × 100 × 10000 | 0.303 | 0.210 | 0.265 | 0.215 | 0.218 |
+| 1000 × 200 × 500   | 0.558 | 0.416 | 0.415 | 0.413 | 0.388 |
+| 1000 × 200 × 1000  | 0.611 | 0.408 | 0.410 | 0.395 | 0.394 |
+| 1000 × 500 × 500   | 1.428 | 1.063 | 0.976 | 0.982 | 0.943 |
+| 1000 × 500 × 1000  | 1.383 | 0.959 | 1.025 | 1.030 | 0.973 |
+| 1000 × 800 × 500   | 2.477 | 1.533 | 1.569 | 1.543 | 1.518 |
+| 1000 × 800 × 1000  | 2.498 | 1.588 | 1.563 | 1.519 | 1.497 |
+
+Across the board, the native binary protocol (`php_clickhouse`,
+`one-ck`) is ~30-40% faster than the HTTP client at high select
+counts, and roughly equivalent to one-ck. For small bursts
+(`dataCount=10000, selectCount=1`), php_clickhouse with ZSTD or LZ4 is
+the fastest of the four. To reproduce, see [`bench/`](bench/).
+
+## License
+
+The PHP-side wrapper is licensed under [PHP-3.01](LICENSE).
+
+The vendored client library at `lib/clickhouse-cpp/` is
+[ClickHouse/clickhouse-cpp](https://github.com/ClickHouse/clickhouse-cpp),
+licensed under the [Apache License 2.0](lib/clickhouse-cpp/LICENSE).
+
+The vendored compression libraries (`lib/clickhouse-cpp/contrib/lz4/`,
+`contrib/zstd/`, `contrib/cityhash/`) carry BSD-style licenses; abseil
+int128 (`contrib/absl/`) is Apache 2.0. See each subdirectory for the
+exact text.
+
+## Credits
+
+`php_clickhouse` started as a fork of
+[SeasX/SeasClick](https://github.com/SeasX/SeasClick) by SeasX Group
+(`ahhhh.wang@gmail.com`). The original PR-4 work to add fetch modes
+landed in 2019 and the upstream maintainer hasn't accepted external
+PRs since. Independent re-vendoring, port to clickhouse-cpp v2.6.1,
+new types, TLS, and packaging are by Ilia Alshanetsky <ilia@ilia.ws>.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Security issues:
+[SECURITY.md](SECURITY.md).

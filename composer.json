@@ -1,0 +1,39 @@
+{
+    "name": "iliaal/php_clickhouse",
+    "type": "php-ext",
+    "description": "Native PHP extension for ClickHouse using the official ClickHouse/clickhouse-cpp client. Connects over the native TCP protocol with LZ4 / ZSTD compression and optional TLS.",
+    "keywords": ["clickhouse", "php-extension", "pie", "olap", "database"],
+    "license": "PHP-3.01",
+    "homepage": "https://github.com/iliaal/php_clickhouse",
+    "authors": [
+        {
+            "name": "Ilia Alshanetsky",
+            "email": "ilia@ilia.ws"
+        },
+        {
+            "name": "SeasX Group (original SeasClick)",
+            "email": "ahhhh.wang@gmail.com",
+            "role": "Original author of SeasClick which php_clickhouse forks from"
+        }
+    ],
+    "require": {
+        "php": ">=7.1"
+    },
+    "php-ext": {
+        "extension-name": "clickhouse",
+        "configure-options": [
+            {
+                "name": "enable-clickhouse",
+                "description": "Enable ClickHouse client support",
+                "needs-value": false
+            },
+            {
+                "name": "enable-clickhouse-openssl",
+                "description": "Enable TLS/SSL support (requires OpenSSL development headers)",
+                "needs-value": false
+            }
+        ],
+        "support-zts": false,
+        "support-nts": true
+    }
+}
