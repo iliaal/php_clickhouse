@@ -1,12 +1,12 @@
 --TEST--
-SeasClick Map row I/O across supported K/V combinations
+ClickHouse Map row I/O across supported K/V combinations
 --SKIPIF--
-<?php require __DIR__ . "/_clickhouse.inc"; seasclick_skip_if_no_server(); ?>
+<?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-$c = new SeasClick(seasclick_test_config());
+$c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
 $c->execute("DROP TABLE IF EXISTS test.maps_t");
 $c->execute("CREATE TABLE test.maps_t (

@@ -1,12 +1,12 @@
 --TEST--
-SeasClick multi-endpoint failover
+ClickHouse multi-endpoint failover
 --SKIPIF--
-<?php require __DIR__ . "/_clickhouse.inc"; seasclick_skip_if_no_server(); ?>
+<?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-$base = seasclick_test_config();
+$base = clickhouse_test_config();
 
 // First endpoint is intentionally dead; second is the live test server.
 $config = $base + [
@@ -16,8 +16,8 @@ $config = $base + [
     ],
 ];
 
-$c = new SeasClick($config);
-echo "select via failover: ", $c->select("SELECT 1", [], SeasClick::FETCH_ONE), "\n";
+$c = new ClickHouse($config);
+echo "select via failover: ", $c->select("SELECT 1", [], ClickHouse::FETCH_ONE), "\n";
 ?>
 --EXPECT--
 select via failover: 1

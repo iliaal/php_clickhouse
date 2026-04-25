@@ -1,17 +1,17 @@
 --TEST--
-SeasClick testUUID
+ClickHouse testUUID
 --SKIPIF--
-<?php require __DIR__ . "/_clickhouse.inc"; seasclick_skip_if_no_server(); ?>
+<?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-clientTest(seasclick_test_config());
+clientTest(clickhouse_test_config());
 
 function clientTest($config)
 {
     $deleteTable = true;
-    $client = new SeasClick($config);
+    $client = new ClickHouse($config);
     $client->execute("CREATE DATABASE IF NOT EXISTS test");
 
     testUUID($client, $deleteTable);

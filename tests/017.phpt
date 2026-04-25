@@ -1,12 +1,12 @@
 --TEST--
-SeasClick Int128 / UInt128 / Decimal128 string round-trip
+ClickHouse Int128 / UInt128 / Decimal128 string round-trip
 --SKIPIF--
-<?php require __DIR__ . "/_clickhouse.inc"; seasclick_skip_if_no_server(); ?>
+<?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-$c = new SeasClick(seasclick_test_config());
+$c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
 $c->execute("DROP TABLE IF EXISTS test.bignum_t");
 $c->execute("CREATE TABLE test.bignum_t (

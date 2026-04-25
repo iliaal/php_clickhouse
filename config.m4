@@ -1,33 +1,33 @@
 dnl $Id$
-dnl config.m4 for extension SeasClick
+dnl config.m4 for extension clickhouse
 
-PHP_ARG_ENABLE(SeasClick, whether to enable SeasClick support,
-[  --enable-SeasClick           Enable SeasClick support])
+PHP_ARG_ENABLE(clickhouse, whether to enable ClickHouse support,
+[  --enable-clickhouse           Enable ClickHouse client support])
 
-PHP_ARG_ENABLE(SeasClick-openssl, whether to enable OpenSSL/TLS support in SeasClick,
-[  --enable-SeasClick-openssl   Enable TLS/SSL support (requires OpenSSL)], no, no)
+PHP_ARG_ENABLE(clickhouse-openssl, whether to enable OpenSSL/TLS support in php_clickhouse,
+[  --enable-clickhouse-openssl Enable TLS/SSL support (requires OpenSSL)], no, no)
 
-if test "$PHP_SEASCLICK" != "no"; then
+if test "$PHP_CLICKHOUSE" != "no"; then
   PHP_REQUIRE_CXX()
-  PHP_SUBST(SEASCLICK_SHARED_LIBADD)
-  PHP_ADD_LIBRARY(stdc++, 1, SEASCLICK_SHARED_LIBADD)
+  PHP_SUBST(CLICKHOUSE_SHARED_LIBADD)
+  PHP_ADD_LIBRARY(stdc++, 1, CLICKHOUSE_SHARED_LIBADD)
   CXXFLAGS="$CXXFLAGS -Wall -Wno-unused-function -Wno-deprecated -Wno-deprecated-declarations -std=c++17 -DZSTD_DISABLE_ASM"
   CFLAGS="$CFLAGS -DZSTD_DISABLE_ASM"
 
-  SEASCLICK_SSL_SRC=""
-  if test "$PHP_SEASCLICK_OPENSSL" != "no"; then
+  CLICKHOUSE_SSL_SRC=""
+  if test "$PHP_CLICKHOUSE_OPENSSL" != "no"; then
     AC_MSG_CHECKING([for OpenSSL libraries])
-    PHP_ADD_LIBRARY(ssl, 1, SEASCLICK_SHARED_LIBADD)
-    PHP_ADD_LIBRARY(crypto, 1, SEASCLICK_SHARED_LIBADD)
-    AC_DEFINE([WITH_OPENSSL], [1], [Build SeasClick with TLS/SSL support])
+    PHP_ADD_LIBRARY(ssl, 1, CLICKHOUSE_SHARED_LIBADD)
+    PHP_ADD_LIBRARY(crypto, 1, CLICKHOUSE_SHARED_LIBADD)
+    AC_DEFINE([WITH_OPENSSL], [1], [Build php_clickhouse with TLS/SSL support])
     CXXFLAGS="$CXXFLAGS -DWITH_OPENSSL"
-    SEASCLICK_SSL_SRC="lib/clickhouse-cpp/clickhouse/base/sslsocket.cpp"
+    CLICKHOUSE_SSL_SRC="lib/clickhouse-cpp/clickhouse/base/sslsocket.cpp"
     AC_MSG_RESULT([enabled])
   fi
 
-  SeasClick_source_file="SeasClick.cpp \
+  clickhouse_source_file="clickhouse.cpp \
         typesToPhp.cpp \
-        $SEASCLICK_SSL_SRC \
+        $CLICKHOUSE_SSL_SRC \
         lib/clickhouse-cpp/clickhouse/base/compressed.cpp \
         lib/clickhouse-cpp/clickhouse/base/endpoints_iterator.cpp \
         lib/clickhouse-cpp/clickhouse/base/input.cpp \
@@ -99,7 +99,7 @@ if test "$PHP_SEASCLICK" != "no"; then
   PHP_ADD_INCLUDE($THIS_DIR/lib/clickhouse-cpp/contrib/zstd/zstd)
   PHP_ADD_INCLUDE($THIS_DIR/lib/clickhouse-cpp/contrib/zstd/zstd/common)
 
-  PHP_NEW_EXTENSION(SeasClick, $SeasClick_source_file, $ext_shared,,-DZEND_ENABLE_STATIC_TSRMLS_CACHE=1)
+  PHP_NEW_EXTENSION(clickhouse, $clickhouse_source_file, $ext_shared,,-DZEND_ENABLE_STATIC_TSRMLS_CACHE=1)
   PHP_ADD_BUILD_DIR($ext_builddir/lib/clickhouse-cpp)
   PHP_ADD_BUILD_DIR($ext_builddir/lib/clickhouse-cpp/clickhouse)
   PHP_ADD_BUILD_DIR($ext_builddir/lib/clickhouse-cpp/clickhouse/base)

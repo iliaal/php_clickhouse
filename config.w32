@@ -1,0 +1,8 @@
+ARG_ENABLE("clickhouse", "Enable ClickHouse client support", "no");
+
+if (PHP_CLICKHOUSE != "no") {
+    // Full Windows build of the vendored clickhouse-cpp + zstd + absl + lz4 + cityhash
+    // is non-trivial and currently out of scope. The Linux/macOS builds via PIE
+    // (see composer.json + config.m4) are the supported path. Patches welcome.
+    WARNING("clickhouse extension does not yet ship a Windows config.w32; build is unsupported on this platform.");
+}

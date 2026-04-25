@@ -1,12 +1,12 @@
 --TEST--
-SeasClick query_id propagates to system.query_log
+ClickHouse query_id propagates to system.query_log
 --SKIPIF--
-<?php require __DIR__ . "/_clickhouse.inc"; seasclick_skip_if_no_server(); ?>
+<?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-$c = new SeasClick(seasclick_test_config());
+$c = new ClickHouse(clickhouse_test_config());
 
 $qid_select = "seasclick-test-016-sel-" . bin2hex(random_bytes(4));
 $qid_insert = "seasclick-test-016-ins-" . bin2hex(random_bytes(4));
@@ -24,7 +24,7 @@ $c->execute("SYSTEM FLUSH LOGS");
 $found = $c->select(
     "SELECT count(*) FROM system.query_log WHERE query_id IN ('" .
     $qid_select . "', '" . $qid_insert . "', '" . $qid_drop . "')",
-    [], SeasClick::FETCH_ONE
+    [], ClickHouse::FETCH_ONE
 );
 
 echo "found: ", ((int)$found >= 3) ? "yes" : "no ($found)", "\n";

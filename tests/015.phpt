@@ -1,5 +1,5 @@
 --TEST--
-SeasClick Exception test
+ClickHouse Exception test
 --SKIPIF--
 <?php if (!extension_loaded("SeasClick")) print "skip"; ?>
 --FILE--
@@ -11,12 +11,12 @@ $config = [
 ];
 
 $deleteTable = true;
-$client = new SeasClick($config);
+$client = new ClickHouse($config);
 try {
     $client->execute('FOO');
-} catch (SeasClickException $e) {
+} catch (ClickHouseException $e) {
     var_dump(get_class($e));
 }
 ?>
 --EXPECT--
-string(18) "SeasClickException"
+string(18) "ClickHouseException"

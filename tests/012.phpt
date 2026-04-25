@@ -1,5 +1,5 @@
 --TEST--
-SeasClick Date Formatting
+ClickHouse Date Formatting
 --SKIPIF--
 <?php if (!extension_loaded("SeasClick")) print "skip"; ?>
 --FILE--
@@ -11,7 +11,7 @@ $config = [
 ];
 
 $deleteTable = true;
-$client = new SeasClick($config);
+$client = new ClickHouse($config);
 $client->execute('CREATE DATABASE IF NOT EXISTS test');
 
 $client->execute("CREATE TABLE IF NOT EXISTS test.dates (
@@ -43,7 +43,7 @@ $expected = [
 $fields = array_keys(current($data));
 $client->insert('test.dates', $fields, [array_values($data[0]), array_values($data[1])]);
 
-$res = $client->select("SELECT * FROM test.dates", [], SeasClick::DATE_AS_STRINGS);
+$res = $client->select("SELECT * FROM test.dates", [], ClickHouse::DATE_AS_STRINGS);
 var_dump($res);
 if (array_diff_assoc($expected[0], $res[0]) || array_diff_assoc($expected[1], $res[1])) {
     echo "FAIL\n";
@@ -51,10 +51,10 @@ if (array_diff_assoc($expected[0], $res[0]) || array_diff_assoc($expected[1], $r
     echo "OK\n";
 }
 
-$res = $client->select("SELECT date_c FROM test.dates WHERE datetime_c = 1548687925", [], SeasClick::FETCH_ONE|SeasClick::DATE_AS_STRINGS);
+$res = $client->select("SELECT date_c FROM test.dates WHERE datetime_c = 1548687925", [], ClickHouse::FETCH_ONE|ClickHouse::DATE_AS_STRINGS);
 echo $res, ' = ', $expected[0]['date_c'], ' ', ($res === $expected[0]['date_c'] ? 'OK' : 'FAIL'), "\n";
 
-$res = $client->select("SELECT datetime_c FROM test.dates WHERE datetime_c = 1548687925", [], SeasClick::FETCH_ONE|SeasClick::DATE_AS_STRINGS);
+$res = $client->select("SELECT datetime_c FROM test.dates WHERE datetime_c = 1548687925", [], ClickHouse::FETCH_ONE|ClickHouse::DATE_AS_STRINGS);
 echo $res, ' = ', $expected[0]['datetime_c'], ' ' , ($res === $expected[0]['datetime_c'] ? 'OK' : 'FAIL'), "\n";
 
 $client->execute('DROP TABLE test.dates');

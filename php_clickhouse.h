@@ -1,8 +1,8 @@
 /*
   +----------------------------------------------------------------------+
-  | SeasClick                                                            |
+  | php_clickhouse                                                       |
   +----------------------------------------------------------------------+
-  | Copyright (c) 1997-2018 The PHP Group                                |
+  | Copyright (c) 1997-2026 The PHP Group                                |
   +----------------------------------------------------------------------+
   | This source file is subject to version 3.01 of the PHP license,      |
   | that is bundled with this package in the file LICENSE, and is        |
@@ -12,27 +12,28 @@
   | obtain it through the world-wide-web, please send a note to          |
   | license@php.net so we can mail you a copy immediately.               |
   +----------------------------------------------------------------------+
-  | Author:  SeasX Group <ahhhh.wang@gmail.com>                          |
+  | Author: Ilia Alshanetsky <ilia@ilia.ws>                              |
+  | Original SeasClick author: SeasX Group <ahhhh.wang@gmail.com>        |
   +----------------------------------------------------------------------+
 */
 #ifdef __cplusplus
 #define __STDC_FORMAT_MACROS
 #endif
 
-#ifndef PHP_SEASCLICK_H
-#define PHP_SEASCLICK_H
+#ifndef PHP_CLICKHOUSE_H
+#define PHP_CLICKHOUSE_H
 
-extern zend_module_entry SeasClick_module_entry;
-#define phpext_SeasClick_ptr &SeasClick_module_entry
+extern zend_module_entry clickhouse_module_entry;
+#define phpext_clickhouse_ptr &clickhouse_module_entry
 
-#define PHP_SEASCLICK_VERSION "0.1.1"
+#define PHP_CLICKHOUSE_VERSION "0.5.0"
 
 #ifdef PHP_WIN32
-#	define PHP_SEASCLICK_API __declspec(dllexport)
+#	define PHP_CLICKHOUSE_API __declspec(dllexport)
 #elif defined(__GNUC__) && __GNUC__ >= 4
-#	define PHP_SEASCLICK_API __attribute__ ((visibility("default")))
+#	define PHP_CLICKHOUSE_API __attribute__ ((visibility("default")))
 #else
-#	define PHP_SEASCLICK_API
+#	define PHP_CLICKHOUSE_API
 #endif
 
 extern "C" {
@@ -44,9 +45,9 @@ extern "C" {
 typedef unsigned long ulong_t;
 
 #ifdef ZTS
-#define SEASCLICK_G(v) TSRMG(SeasClick_globals_id, zend_SeasClick_globals *, v)
+#define CLICKHOUSE_G(v) TSRMG(clickhouse_globals_id, zend_clickhouse_globals *, v)
 #else
-#define SEASCLICK_G(v) (SeasClick_globals.v)
+#define CLICKHOUSE_G(v) (clickhouse_globals.v)
 #endif
 
 #define SC_FETCH_ONE 1
@@ -54,9 +55,15 @@ typedef unsigned long ulong_t;
 #define SC_FETCH_DATE_AS_STRINGS 4
 #define SC_FETCH_COLUMN 8
 
-#define SEASCLICK_RES_NAME "SeasClick"
+#define CLICKHOUSE_RES_NAME "ClickHouse"
+#define CLICKHOUSE_EXCEPTION_NAME "ClickHouseException"
 
-#endif	/* PHP_SEASCLICK_H */
+/* Back-compat aliases for the original SeasClick name. Kept for the 0.5.x
+ * release cycle and removed in the next major. */
+#define CLICKHOUSE_RES_NAME_LEGACY "SeasClick"
+#define CLICKHOUSE_EXCEPTION_NAME_LEGACY "SeasClickException"
+
+#endif	/* PHP_CLICKHOUSE_H */
 
 /*
  * Local variables:
