@@ -34,7 +34,6 @@ extern "C" {
 #include "lib/clickhouse-cpp/clickhouse/columns/factory.h"
 #include "lib/clickhouse-cpp/clickhouse/columns/lowcardinality.h"
 #include "lib/clickhouse-cpp/clickhouse/columns/map.h"
-#include <iostream>
 #include <map>
 #include <sstream>
 #include <iomanip>
@@ -242,8 +241,6 @@ ColumnRef createColumn(TypeRef type)
     default:
         return CreateColumnByType(type->GetName());
     }
-
-    throw std::runtime_error("createColumn runtime error.");
 }
 
 ColumnRef insertColumn(TypeRef type, zval *value_zval)
@@ -283,7 +280,6 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         SC_HASHTABLE_FOREACH_END();
 
         return value;
-        break;
     }
     case Type::Code::UInt8:
     {
@@ -297,7 +293,6 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         SC_HASHTABLE_FOREACH_END();
 
         return value;
-        break;
     }
     case Type::Code::UInt16:
     {
@@ -311,7 +306,6 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         SC_HASHTABLE_FOREACH_END();
 
         return value;
-        break;
     }
     case Type::Code::UInt32:
     {
@@ -334,7 +328,6 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         SC_HASHTABLE_FOREACH_END();
 
         return value;
-        break;
     }
 
     case Type::Code::Int8:
@@ -349,7 +342,6 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         SC_HASHTABLE_FOREACH_END();
 
         return value;
-        break;
     }
     case Type::Code::Int16:
     {
@@ -363,7 +355,6 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         SC_HASHTABLE_FOREACH_END();
 
         return value;
-        break;
     }
     case Type::Code::Int32:
     {
@@ -377,7 +368,6 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         SC_HASHTABLE_FOREACH_END();
 
         return value;
-        break;
     }
     case Type::Code::Int64:
     {
@@ -391,7 +381,6 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         SC_HASHTABLE_FOREACH_END();
 
         return value;
-        break;
     }
 
     case Type::Code::UUID:
@@ -424,7 +413,6 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         }
         SC_HASHTABLE_FOREACH_END();
         return value;
-        break;
     }
 
     case Type::Code::Float32:
@@ -439,7 +427,6 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         SC_HASHTABLE_FOREACH_END();
 
         return value;
-        break;
     }
     case Type::Code::Float64:
     {
@@ -453,7 +440,6 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         SC_HASHTABLE_FOREACH_END();
 
         return value;
-        break;
     }
 
     case Type::Code::String:
@@ -502,7 +488,6 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         SC_HASHTABLE_FOREACH_END();
 
         return value;
-        break;
     }
     case Type::Code::DateTime64:
     {
@@ -525,7 +510,6 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         SC_HASHTABLE_FOREACH_END();
 
         return value;
-        break;
     }
     case Type::Code::Date:
     {
@@ -543,7 +527,6 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         SC_HASHTABLE_FOREACH_END();
 
         return value;
-        break;
     }
     case Type::Code::Date32:
     {
@@ -706,7 +689,6 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         SC_HASHTABLE_FOREACH_END();
 
         return value;
-        break;
     }
 
     case Type::Code::Enum8:
@@ -737,7 +719,6 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         SC_HASHTABLE_FOREACH_END();
 
         return value;
-        break;
     }
     case Type::Code::Enum16:
     {
@@ -763,7 +744,6 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         SC_HASHTABLE_FOREACH_END();
 
         return value;
-        break;
     }
 
     case Type::Code::Nullable:
@@ -786,7 +766,6 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         ColumnRef child = insertColumn(type->As<NullableType>()->GetNestedType(), value_zval);
 
         return std::make_shared<ColumnNullable>(child, nulls);
-        break;
     }
 
     case Type::Code::Tuple:
@@ -989,8 +968,6 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     default:
         throw std::runtime_error("insertColumn: unsupported type code: " + type->GetName());
     }
-
-    throw std::runtime_error("insertColumn runtime error.");
 }
 
 // Cast through (zend_long) so signed types (Int8..Int64) keep their

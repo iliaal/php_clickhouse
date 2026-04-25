@@ -36,20 +36,6 @@ extern zend_module_entry clickhouse_module_entry;
 #	define PHP_CLICKHOUSE_API
 #endif
 
-extern "C" {
-#ifdef ZTS
-#include "TSRM.h"
-#endif
-}
-
-typedef unsigned long ulong_t;
-
-#ifdef ZTS
-#define CLICKHOUSE_G(v) TSRMG(clickhouse_globals_id, zend_clickhouse_globals *, v)
-#else
-#define CLICKHOUSE_G(v) (clickhouse_globals.v)
-#endif
-
 #define SC_FETCH_ONE 1
 #define SC_FETCH_KEY_PAIR 2
 #define SC_FETCH_DATE_AS_STRINGS 4
