@@ -292,17 +292,37 @@ static ColumnRef appendFloatColumn(HashTable *values_ht)
     return value;
 }
 
+// Build a ColumnMapT<KCol, VCol> from PHP rows. Each row is an assoc
+// array; the caller supplies extractors that turn (zend_string*, ulong)
+// into K and (zval*) into V. Five near-identical Map(K, V) arms route
+// through here.
+template <typename K, typename V, typename KCol, typename VCol,
+          typename KFn, typename VFn>
+static ColumnRef appendMapColumn(HashTable *values_ht, KFn extract_key, VFn extract_val)
+{
+    auto col = std::make_shared<ColumnMapT<KCol, VCol>>(
+        std::make_shared<KCol>(), std::make_shared<VCol>());
+    zval *array_value;
+    ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
+        if (Z_TYPE_P(array_value) != IS_ARRAY) {
+            throw std::runtime_error("Map row must be a PHP array");
+        }
+        std::vector<std::pair<K, V>> entries;
+        HashTable *mh = Z_ARRVAL_P(array_value);
+        zend_string *zk;
+        zend_ulong nk;
+        zval *mv;
+        ZEND_HASH_FOREACH_KEY_VAL(mh, nk, zk, mv) {
+            entries.emplace_back(extract_key(zk, nk), extract_val(mv));
+        } ZEND_HASH_FOREACH_END();
+        col->Append(entries);
+    } ZEND_HASH_FOREACH_END();
+    return col;
+}
+
 ColumnRef insertColumn(TypeRef type, zval *value_zval)
 {
     zval *array_value;
-    char *str_key;
-    uint32_t str_keylen;
-    int keytype;
-    // SC_HASHTABLE_FOREACH_START2 writes into these locals on every iteration;
-    // most case arms below only consume array_value, so silence the unused-set
-    // warning at function scope rather than per call site.
-    (void)str_key; (void)str_keylen; (void)keytype;
-
     HashTable *values_ht = Z_ARRVAL_P(value_zval);
 
     switch (type->GetCode())
@@ -328,7 +348,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     {
         auto value = std::make_shared<ColumnUUID>();
 
-        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
             if (Z_TYPE_P(array_value) == IS_NULL)
             {
@@ -352,7 +372,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 value->Append(UUID{i_first, i_second});
             }
         }
-        SC_HASHTABLE_FOREACH_END();
+        ZEND_HASH_FOREACH_END();
         return value;
     }
 
@@ -365,12 +385,12 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     {
         auto value = std::make_shared<ColumnString>();
 
-        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
             convert_to_string(array_value);
             value->Append((string)Z_STRVAL_P(array_value));
         }
-        SC_HASHTABLE_FOREACH_END();
+        ZEND_HASH_FOREACH_END();
 
         return value;
     }
@@ -381,12 +401,12 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         typeName.erase(typeName.find(")"), 1);
         auto value = std::make_shared<ColumnFixedString>(std::stoi(typeName));
 
-        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
             convert_to_string(array_value);
             value->Append((string)Z_STRVAL_P(array_value));
         }
-        SC_HASHTABLE_FOREACH_END();
+        ZEND_HASH_FOREACH_END();
 
         return value;
     }
@@ -395,7 +415,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     {
         auto value = std::make_shared<ColumnDateTime>();
 
-        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
             if (Z_TYPE_P(array_value) == IS_STRING && memchr(Z_STRVAL_P(array_value), '-', Z_STRLEN_P(array_value)) != NULL) {
                 value->Append((long)to_time_t(Z_STRVAL_P(array_value), false));
@@ -404,7 +424,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 value->Append(Z_LVAL_P(array_value));
             }
         }
-        SC_HASHTABLE_FOREACH_END();
+        ZEND_HASH_FOREACH_END();
 
         return value;
     }
@@ -415,7 +435,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         int64_t scale = 1;
         for (size_t i = 0; i < precision; ++i) scale *= 10;
 
-        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
             if (Z_TYPE_P(array_value) == IS_STRING && memchr(Z_STRVAL_P(array_value), '-', Z_STRLEN_P(array_value)) != NULL) {
                 value->Append((int64_t)to_time_t(Z_STRVAL_P(array_value), false) * scale);
@@ -426,7 +446,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 value->Append((int64_t)Z_LVAL_P(array_value) * scale);
             }
         }
-        SC_HASHTABLE_FOREACH_END();
+        ZEND_HASH_FOREACH_END();
 
         return value;
     }
@@ -434,7 +454,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     {
         auto value = std::make_shared<ColumnDate>();
 
-        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
             if (Z_TYPE_P(array_value) == IS_STRING && memchr(Z_STRVAL_P(array_value), '-', Z_STRLEN_P(array_value)) != NULL) {
                 value->Append((long)to_time_t(Z_STRVAL_P(array_value)));
@@ -443,14 +463,14 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 value->Append((std::time_t)Z_LVAL_P(array_value));
             }
         }
-        SC_HASHTABLE_FOREACH_END();
+        ZEND_HASH_FOREACH_END();
 
         return value;
     }
     case Type::Code::Date32:
     {
         auto value = std::make_shared<ColumnDate32>();
-        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
             if (Z_TYPE_P(array_value) == IS_STRING && memchr(Z_STRVAL_P(array_value), '-', Z_STRLEN_P(array_value)) != NULL) {
                 value->Append((std::time_t)to_time_t(Z_STRVAL_P(array_value)));
@@ -459,18 +479,18 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 value->Append((std::time_t)Z_LVAL_P(array_value));
             }
         }
-        SC_HASHTABLE_FOREACH_END();
+        ZEND_HASH_FOREACH_END();
         return value;
     }
     case Type::Code::Time:
     {
         auto value = std::make_shared<ColumnTime>();
-        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
             convert_to_long(array_value);
             value->Append((int32_t)Z_LVAL_P(array_value));
         }
-        SC_HASHTABLE_FOREACH_END();
+        ZEND_HASH_FOREACH_END();
         return value;
     }
     case Type::Code::Time64:
@@ -479,7 +499,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         auto value = std::make_shared<ColumnTime64>(precision);
         int64_t scale = 1;
         for (size_t i = 0; i < precision; ++i) scale *= 10;
-        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
             if (Z_TYPE_P(array_value) == IS_DOUBLE) {
                 value->Append((int64_t)(Z_DVAL_P(array_value) * scale));
@@ -488,7 +508,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 value->Append((int64_t)Z_LVAL_P(array_value) * scale);
             }
         }
-        SC_HASHTABLE_FOREACH_END();
+        ZEND_HASH_FOREACH_END();
         return value;
     }
     case Type::Code::Int128:
@@ -496,7 +516,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         auto value = std::make_shared<ColumnInt128>();
         // Int128 range: -2^127 .. 2^127-1. The signed magnitude fits in 39
         // decimal digits (2^127 = 170141183460469231731687303715884105728).
-        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
             if (Z_TYPE_P(array_value) == IS_STRING) {
                 const char *s = Z_STRVAL_P(array_value);
@@ -525,14 +545,14 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 value->Append(Int128(Z_LVAL_P(array_value)));
             }
         }
-        SC_HASHTABLE_FOREACH_END();
+        ZEND_HASH_FOREACH_END();
         return value;
     }
     case Type::Code::UInt128:
     {
         auto value = std::make_shared<ColumnUInt128>();
         // UInt128 range: 0 .. 2^128-1, i.e. up to 39 decimal digits.
-        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
             if (Z_TYPE_P(array_value) == IS_STRING) {
                 const char *s = Z_STRVAL_P(array_value);
@@ -563,7 +583,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 value->Append(UInt128((uint64_t)Z_LVAL_P(array_value)));
             }
         }
-        SC_HASHTABLE_FOREACH_END();
+        ZEND_HASH_FOREACH_END();
         return value;
     }
     case Type::Code::Decimal:
@@ -573,12 +593,12 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     {
         auto dt = type->As<DecimalType>();
         auto value = std::make_shared<ColumnDecimal>(dt->GetPrecision(), dt->GetScale());
-        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
             convert_to_string(array_value);
             value->Append(std::string(Z_STRVAL_P(array_value), Z_STRLEN_P(array_value)));
         }
-        SC_HASHTABLE_FOREACH_END();
+        ZEND_HASH_FOREACH_END();
         return value;
     }
 
@@ -593,7 +613,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         auto value = std::make_shared<ColumnArray>(createColumn(item_type));
         auto child = createColumn(item_type);
 
-        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
             if (Z_TYPE_P(array_value) != IS_ARRAY)
             {
@@ -605,7 +625,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
             value->AppendAsColumn(child);
             child->Clear();
         }
-        SC_HASHTABLE_FOREACH_END();
+        ZEND_HASH_FOREACH_END();
 
         return value;
     }
@@ -614,7 +634,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     {
         auto value = std::make_shared<ColumnEnum8>(type);
 
-        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
             // PHP NULLs reach here when the column is Nullable(Enum8); the row's
             // null mask makes the data slot meaningless, but ColumnEnum8::Append
@@ -635,7 +655,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 value->Append((string)Z_STRVAL_P(array_value));
             }
         }
-        SC_HASHTABLE_FOREACH_END();
+        ZEND_HASH_FOREACH_END();
 
         return value;
     }
@@ -643,7 +663,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     {
         auto value = std::make_shared<ColumnEnum16>(type);
 
-        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
             if (Z_TYPE_P(array_value) == IS_NULL)
             {
@@ -660,7 +680,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 value->Append((string)Z_STRVAL_P(array_value));
             }
         }
-        SC_HASHTABLE_FOREACH_END();
+        ZEND_HASH_FOREACH_END();
 
         return value;
     }
@@ -669,7 +689,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     {
         auto nulls = std::make_shared<ColumnUInt8>();
 
-        SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
             if (Z_TYPE_P(array_value) == IS_NULL)
             {
@@ -680,7 +700,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 nulls->Append(0);
             }
         }
-        SC_HASHTABLE_FOREACH_END();
+        ZEND_HASH_FOREACH_END();
 
         ColumnRef child = insertColumn(type->As<NullableType>()->GetNestedType(), value_zval);
 
@@ -709,7 +729,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
             SC_MAKE_STD_ZVAL(return_tmp);
             array_init(return_tmp);
 
-            SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, pzval)
+            ZEND_HASH_FOREACH_VAL(values_ht, pzval)
             {
                 if (Z_TYPE_P(pzval) != IS_ARRAY)
                 {
@@ -728,7 +748,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 sc_zval_add_ref(fzval);
                 add_next_index_zval(return_tmp, fzval);
             }
-            SC_HASHTABLE_FOREACH_END();
+            ZEND_HASH_FOREACH_END();
 
             add_next_index_zval(return_should, return_tmp);
         }
@@ -736,7 +756,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         std::vector<ColumnRef> columns;
         size_t tupleTypeIndex = 0;
 
-        SC_HASHTABLE_FOREACH_START2(Z_ARRVAL_P(return_should), str_key, str_keylen, keytype, array_value)
+        ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(return_should), array_value)
         {
             if (Z_TYPE_P(array_value) != IS_ARRAY)
             {
@@ -746,7 +766,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
             columns.push_back(insertColumn(tupleType[tupleTypeIndex], array_value));
             tupleTypeIndex++;
         }
-        SC_HASHTABLE_FOREACH_END();
+        ZEND_HASH_FOREACH_END();
 
         sc_zval_ptr_dtor(&return_should);
 
@@ -758,12 +778,12 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         TypeRef nested = type->As<LowCardinalityType>()->GetNestedType();
         if (nested->GetCode() == Type::Code::String) {
             auto value = std::make_shared<ColumnLowCardinalityT<ColumnString>>();
-            SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
+            ZEND_HASH_FOREACH_VAL(values_ht, array_value)
             {
                 convert_to_string(array_value);
                 value->Append(std::string_view(Z_STRVAL_P(array_value), Z_STRLEN_P(array_value)));
             }
-            SC_HASHTABLE_FOREACH_END();
+            ZEND_HASH_FOREACH_END();
             return value;
         }
         if (nested->GetCode() == Type::Code::FixedString) {
@@ -771,12 +791,12 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
             typeName.erase(typeName.find("FixedString("), 12);
             typeName.erase(typeName.find(")"), 1);
             auto value = std::make_shared<ColumnLowCardinalityT<ColumnFixedString>>(std::stoi(typeName));
-            SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value)
+            ZEND_HASH_FOREACH_VAL(values_ht, array_value)
             {
                 convert_to_string(array_value);
                 value->Append(std::string_view(Z_STRVAL_P(array_value), Z_STRLEN_P(array_value)));
             }
-            SC_HASHTABLE_FOREACH_END();
+            ZEND_HASH_FOREACH_END();
             return value;
         }
         throw std::runtime_error("LowCardinality only supported over String / FixedString");
@@ -789,93 +809,55 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         Type::Code kc = k->GetCode();
         Type::Code vc = v->GetCode();
 
+        // Key extractors: string keys reject integer-keyed PHP entries
+        // outright; Int64 keys parse the string form or fall back to the
+        // numeric key.
+        auto strKey = [](zend_string *zk, zend_ulong) -> std::string {
+            if (!zk) {
+                throw std::runtime_error("Map(String, *) row entry must have a string key");
+            }
+            return std::string(ZSTR_VAL(zk), ZSTR_LEN(zk));
+        };
+        auto i64Key = [](zend_string *zk, zend_ulong nk) -> int64_t {
+            return zk ? (int64_t)strtoll(ZSTR_VAL(zk), NULL, 10) : (int64_t)nk;
+        };
+        // Value extractors mutate the zval to coerce its type, then read.
+        auto strVal = [](zval *mv) -> std::string {
+            convert_to_string(mv);
+            return std::string(Z_STRVAL_P(mv), Z_STRLEN_P(mv));
+        };
+        auto i64Val = [](zval *mv) -> int64_t {
+            convert_to_long(mv);
+            return (int64_t)Z_LVAL_P(mv);
+        };
+        auto u64Val = [](zval *mv) -> uint64_t {
+            convert_to_long(mv);
+            return (uint64_t)Z_LVAL_P(mv);
+        };
+        auto f64Val = [](zval *mv) -> double {
+            convert_to_double(mv);
+            return Z_DVAL_P(mv);
+        };
+
         if (kc == Type::Code::String && vc == Type::Code::String) {
-            auto col = std::make_shared<ColumnMapT<ColumnString, ColumnString>>(
-                std::make_shared<ColumnString>(), std::make_shared<ColumnString>());
-            SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value) {
-                if (Z_TYPE_P(array_value) != IS_ARRAY) throw std::runtime_error("Map row must be a PHP array");
-                std::vector<std::pair<std::string, std::string>> entries;
-                HashTable *mh = Z_ARRVAL_P(array_value);
-                zval *mv; char *mk; uint32_t ml; int mt; (void)mt;
-                SC_HASHTABLE_FOREACH_START2(mh, mk, ml, mt, mv) {
-                    if (!mk) continue;
-                    convert_to_string(mv);
-                    entries.emplace_back(std::string(mk, ml),
-                                         std::string(Z_STRVAL_P(mv), Z_STRLEN_P(mv)));
-                } SC_HASHTABLE_FOREACH_END();
-                col->Append(entries);
-            } SC_HASHTABLE_FOREACH_END();
-            return col;
+            return appendMapColumn<std::string, std::string,
+                                   ColumnString, ColumnString>(values_ht, strKey, strVal);
         }
         if (kc == Type::Code::String && vc == Type::Code::Int64) {
-            auto col = std::make_shared<ColumnMapT<ColumnString, ColumnInt64>>(
-                std::make_shared<ColumnString>(), std::make_shared<ColumnInt64>());
-            SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value) {
-                if (Z_TYPE_P(array_value) != IS_ARRAY) throw std::runtime_error("Map row must be a PHP array");
-                std::vector<std::pair<std::string, int64_t>> entries;
-                HashTable *mh = Z_ARRVAL_P(array_value);
-                zval *mv; char *mk; uint32_t ml; int mt; (void)mt;
-                SC_HASHTABLE_FOREACH_START2(mh, mk, ml, mt, mv) {
-                    if (!mk) continue;
-                    convert_to_long(mv);
-                    entries.emplace_back(std::string(mk, ml), (int64_t)Z_LVAL_P(mv));
-                } SC_HASHTABLE_FOREACH_END();
-                col->Append(entries);
-            } SC_HASHTABLE_FOREACH_END();
-            return col;
+            return appendMapColumn<std::string, int64_t,
+                                   ColumnString, ColumnInt64>(values_ht, strKey, i64Val);
         }
         if (kc == Type::Code::String && vc == Type::Code::UInt64) {
-            auto col = std::make_shared<ColumnMapT<ColumnString, ColumnUInt64>>(
-                std::make_shared<ColumnString>(), std::make_shared<ColumnUInt64>());
-            SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value) {
-                if (Z_TYPE_P(array_value) != IS_ARRAY) throw std::runtime_error("Map row must be a PHP array");
-                std::vector<std::pair<std::string, uint64_t>> entries;
-                HashTable *mh = Z_ARRVAL_P(array_value);
-                zval *mv; char *mk; uint32_t ml; int mt; (void)mt;
-                SC_HASHTABLE_FOREACH_START2(mh, mk, ml, mt, mv) {
-                    if (!mk) continue;
-                    convert_to_long(mv);
-                    entries.emplace_back(std::string(mk, ml), (uint64_t)Z_LVAL_P(mv));
-                } SC_HASHTABLE_FOREACH_END();
-                col->Append(entries);
-            } SC_HASHTABLE_FOREACH_END();
-            return col;
+            return appendMapColumn<std::string, uint64_t,
+                                   ColumnString, ColumnUInt64>(values_ht, strKey, u64Val);
         }
         if (kc == Type::Code::String && vc == Type::Code::Float64) {
-            auto col = std::make_shared<ColumnMapT<ColumnString, ColumnFloat64>>(
-                std::make_shared<ColumnString>(), std::make_shared<ColumnFloat64>());
-            SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value) {
-                if (Z_TYPE_P(array_value) != IS_ARRAY) throw std::runtime_error("Map row must be a PHP array");
-                std::vector<std::pair<std::string, double>> entries;
-                HashTable *mh = Z_ARRVAL_P(array_value);
-                zval *mv; char *mk; uint32_t ml; int mt; (void)mt;
-                SC_HASHTABLE_FOREACH_START2(mh, mk, ml, mt, mv) {
-                    if (!mk) continue;
-                    convert_to_double(mv);
-                    entries.emplace_back(std::string(mk, ml), (double)Z_DVAL_P(mv));
-                } SC_HASHTABLE_FOREACH_END();
-                col->Append(entries);
-            } SC_HASHTABLE_FOREACH_END();
-            return col;
+            return appendMapColumn<std::string, double,
+                                   ColumnString, ColumnFloat64>(values_ht, strKey, f64Val);
         }
         if (kc == Type::Code::Int64 && vc == Type::Code::String) {
-            auto col = std::make_shared<ColumnMapT<ColumnInt64, ColumnString>>(
-                std::make_shared<ColumnInt64>(), std::make_shared<ColumnString>());
-            SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, array_value) {
-                if (Z_TYPE_P(array_value) != IS_ARRAY) throw std::runtime_error("Map row must be a PHP array");
-                std::vector<std::pair<int64_t, std::string>> entries;
-                HashTable *mh = Z_ARRVAL_P(array_value);
-                zend_string *zk;
-                zend_ulong nk;
-                zval *mv;
-                ZEND_HASH_FOREACH_KEY_VAL(mh, nk, zk, mv) {
-                    convert_to_string(mv);
-                    int64_t kk = zk ? (int64_t)strtoll(ZSTR_VAL(zk), NULL, 10) : (int64_t)nk;
-                    entries.emplace_back(kk, std::string(Z_STRVAL_P(mv), Z_STRLEN_P(mv)));
-                } ZEND_HASH_FOREACH_END();
-                col->Append(entries);
-            } SC_HASHTABLE_FOREACH_END();
-            return col;
+            return appendMapColumn<int64_t, std::string,
+                                   ColumnInt64, ColumnString>(values_ht, i64Key, strVal);
         }
         throw std::runtime_error("Unsupported Map(K, V) for row write: " + type->GetName());
     }
