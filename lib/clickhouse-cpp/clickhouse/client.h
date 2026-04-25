@@ -108,6 +108,8 @@ public:
     /// Intends for insert block of data into a table \p table_name.
     void Insert(const std::string& table_name, const Block& block);
 
+    void InsertDataEnd();
+
     /// Ping server for aliveness.
     void Ping();
 
