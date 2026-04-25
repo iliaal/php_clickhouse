@@ -39,7 +39,7 @@ jobs:
         with:
           php-version: ${{ matrix.php }}
           tools: phpize, php-config
-          extensions: none, dom, xml, simplexml, tokenizer
+          extensions: none, dom, json, xml, simplexml, tokenizer
           coverage: none
 
       - name: Install OpenSSL dev (TLS build path)
