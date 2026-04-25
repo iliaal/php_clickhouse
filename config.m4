@@ -4,6 +4,9 @@ dnl config.m4 for extension SeasClick
 PHP_ARG_ENABLE(SeasClick, whether to enable SeasClick support,
 [  --enable-SeasClick           Enable SeasClick support])
 
+PHP_ARG_ENABLE(SeasClick-openssl, whether to enable OpenSSL/TLS support in SeasClick,
+[  --enable-SeasClick-openssl   Enable TLS/SSL support (requires OpenSSL)], no, no)
+
 if test "$PHP_SEASCLICK" != "no"; then
   PHP_REQUIRE_CXX()
   PHP_SUBST(SEASCLICK_SHARED_LIBADD)
@@ -11,8 +14,20 @@ if test "$PHP_SEASCLICK" != "no"; then
   CXXFLAGS="$CXXFLAGS -Wall -Wno-unused-function -Wno-deprecated -Wno-deprecated-declarations -std=c++17 -DZSTD_DISABLE_ASM"
   CFLAGS="$CFLAGS -DZSTD_DISABLE_ASM"
 
+  SEASCLICK_SSL_SRC=""
+  if test "$PHP_SEASCLICK_OPENSSL" != "no"; then
+    AC_MSG_CHECKING([for OpenSSL libraries])
+    PHP_ADD_LIBRARY(ssl, 1, SEASCLICK_SHARED_LIBADD)
+    PHP_ADD_LIBRARY(crypto, 1, SEASCLICK_SHARED_LIBADD)
+    AC_DEFINE([WITH_OPENSSL], [1], [Build SeasClick with TLS/SSL support])
+    CXXFLAGS="$CXXFLAGS -DWITH_OPENSSL"
+    SEASCLICK_SSL_SRC="lib/clickhouse-cpp/clickhouse/base/sslsocket.cpp"
+    AC_MSG_RESULT([enabled])
+  fi
+
   SeasClick_source_file="SeasClick.cpp \
         typesToPhp.cpp \
+        $SEASCLICK_SSL_SRC \
         lib/clickhouse-cpp/clickhouse/base/compressed.cpp \
         lib/clickhouse-cpp/clickhouse/base/endpoints_iterator.cpp \
         lib/clickhouse-cpp/clickhouse/base/input.cpp \

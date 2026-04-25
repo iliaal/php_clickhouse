@@ -42,7 +42,35 @@ phpize
 make && sudo make install
 ```
 
-The vendored `lib/clickhouse-cpp/` requires a C++17 compiler (set automatically by `config.m4`). All optional dependencies (LZ4, ZSTD, abseil-int128) are vendored under `lib/clickhouse-cpp/contrib/`. SSL support is not compiled in.
+The vendored `lib/clickhouse-cpp/` requires a C++17 compiler (set automatically by `config.m4`). All optional dependencies (LZ4, ZSTD, abseil-int128) are vendored under `lib/clickhouse-cpp/contrib/`.
+
+### TLS / SSL
+
+To build with TLS support, install OpenSSL development headers (`libssl-dev` on Debian/Ubuntu) and configure with the opt-in flag:
+
+```sh
+phpize
+./configure --enable-SeasClick-openssl
+make && sudo make install
+```
+
+Connect over TLS by passing `"ssl" => true` in the constructor config:
+
+```php
+$c = new SeasClick([
+    "host"             => "ch.example.com",
+    "port"             => 9440,                   // tcp_port_secure on the server
+    "user"             => "default",
+    "passwd"           => "secret",
+    "ssl"              => true,
+    "ssl_ca_files"     => "/etc/ssl/certs/ca.crt", // string or array of paths
+    "ssl_ca_directory" => "/etc/ssl/certs",        // optional
+    "ssl_use_default_ca" => true,                  // default true; set false to lock to the explicit CA only
+    "ssl_skip_verify"  => false,                   // true only for dev / self-signed
+]);
+```
+
+Building without `--enable-SeasClick-openssl` leaves the extension SSL-free; passing `"ssl" => true` in that case throws `SeasClickException("SeasClick was built without TLS support...")` so misconfiguration is loud, not silent.
 
 ## Testing against a local ClickHouse server
 
