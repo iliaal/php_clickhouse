@@ -378,10 +378,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, __construct)
         std::vector<Endpoint> eps;
         HashTable *eps_ht = Z_ARRVAL_P(value);
         zval *ep_zv;
-        char *ep_k;
-        uint32_t ep_klen;
-        int ep_kt;
-        SC_HASHTABLE_FOREACH_START2(eps_ht, ep_k, ep_klen, ep_kt, ep_zv) {
+        ZEND_HASH_FOREACH_VAL(eps_ht, ep_zv) {
             if (Z_TYPE_P(ep_zv) != IS_ARRAY) continue;
             HashTable *eh = Z_ARRVAL_P(ep_zv);
             zval *hz = sc_zend_hash_find(eh, (char*)"host", 4);
@@ -392,8 +389,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, __construct)
             e.host = std::string(Z_STRVAL_P(hz), Z_STRLEN_P(hz));
             if (pz) { convert_to_long(pz); e.port = (uint16_t)Z_LVAL_P(pz); }
             eps.push_back(std::move(e));
-        }
-        SC_HASHTABLE_FOREACH_END();
+        } ZEND_HASH_FOREACH_END();
         if (!eps.empty()) Options = Options.SetEndpoints(eps);
     }
 
@@ -438,17 +434,13 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, __construct)
 void getInsertSql(string *sql, char *table_name, zval *columns)
 {
     zval *pzval;
-    char *key;
-    uint32_t keylen;
-    int keytype;
-
     std::stringstream fields_section;
 
     HashTable *columns_ht = Z_ARRVAL_P(columns);
     size_t count = zend_hash_num_elements(columns_ht);
     size_t index = 0;
 
-    SC_HASHTABLE_FOREACH_START2(columns_ht, key, keylen, keytype, pzval)
+    ZEND_HASH_FOREACH_VAL(columns_ht, pzval)
     {
         convert_to_string(pzval);
         if (index >= (count - 1))
@@ -461,7 +453,7 @@ void getInsertSql(string *sql, char *table_name, zval *columns)
         }
         index++;
     }
-    SC_HASHTABLE_FOREACH_END();
+    ZEND_HASH_FOREACH_END();
     *sql = "INSERT INTO " + (string)table_name + " ( " + fields_section.str() + " ) VALUES";
 }
 
@@ -533,6 +525,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, select)
             char *str_key;
             uint32_t str_keylen;
             int keytype;
+            (void)keytype;
 
             SC_HASHTABLE_FOREACH_START2(params_ht, str_key, str_keylen, keytype, pzval)
             {
@@ -670,9 +663,6 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, insert)
 
         zval *fzval;
         zval *pzval;
-        char *str_key;
-        uint32_t str_keylen;
-        int keytype;
 
         for(size_t i = 0; i < columns_count; i++)
         {
@@ -681,7 +671,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, insert)
             ZVAL_UNDEF(return_tmp_pending);
             array_init(return_tmp_pending);
 
-            SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, pzval)
+            ZEND_HASH_FOREACH_VAL(values_ht, pzval)
             {
                 if (Z_TYPE_P(pzval) != IS_ARRAY)
                 {
@@ -699,7 +689,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, insert)
                 sc_zval_add_ref(fzval);
                 add_next_index_zval(return_tmp_pending, fzval);
             }
-            SC_HASHTABLE_FOREACH_END();
+            ZEND_HASH_FOREACH_END();
 
             add_next_index_zval(return_should, return_tmp_pending);
             return_tmp_pending = NULL;
@@ -714,12 +704,12 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, insert)
         Block blockInsert;
         size_t index = 0;
 
-        SC_HASHTABLE_FOREACH_START2(Z_ARRVAL_P(return_should), str_key, str_keylen, keytype, pzval)
+        ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(return_should), pzval)
         {
             zvalToBlock(blockInsert, blockQuery, index, pzval);
             index++;
         }
-        SC_HASHTABLE_FOREACH_END();
+        ZEND_HASH_FOREACH_END();
 
         client->SendInsertBlock(blockInsert);
         client->EndInsert();
@@ -824,12 +814,12 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, write)
 
     try
     {
-        zval *first_data;
+        zval *first_data = NULL;
         HashTable *values_ht = Z_ARRVAL_P(values);
         sc_zend_hash_get_current_data(values_ht, (void**) &first_data);
-        if (NULL == first_data)
+        if (NULL == first_data || Z_TYPE_P(first_data) != IS_ARRAY)
         {
-            throw std::runtime_error("The conut of data inserted is empty");
+            throw std::runtime_error("Empty or non-array first row passed to write()");
         }
         size_t columns_count = zend_hash_num_elements(Z_ARRVAL_P(first_data));
         return_should = &_return_should_storage;
@@ -838,9 +828,6 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, write)
 
         zval *fzval;
         zval *pzval;
-        char *str_key;
-        uint32_t str_keylen;
-        int keytype;
 
         for(size_t i = 0; i < columns_count; i++)
         {
@@ -848,7 +835,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, write)
             ZVAL_UNDEF(return_tmp_pending);
             array_init(return_tmp_pending);
 
-            SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, pzval)
+            ZEND_HASH_FOREACH_VAL(values_ht, pzval)
             {
                 if (Z_TYPE_P(pzval) != IS_ARRAY)
                 {
@@ -862,7 +849,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, write)
                 sc_zval_add_ref(fzval);
                 add_next_index_zval(return_tmp_pending, fzval);
             }
-            SC_HASHTABLE_FOREACH_END();
+            ZEND_HASH_FOREACH_END();
 
             add_next_index_zval(return_should, return_tmp_pending);
             return_tmp_pending = NULL;
@@ -877,12 +864,12 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, write)
         Block blockInsert;
         size_t index = 0;
 
-        SC_HASHTABLE_FOREACH_START2(Z_ARRVAL_P(return_should), str_key, str_keylen, keytype, pzval)
+        ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(return_should), pzval)
         {
             zvalToBlock(blockInsert, blockQuery, index, pzval);
             index++;
         }
-        SC_HASHTABLE_FOREACH_END();
+        ZEND_HASH_FOREACH_END();
 
         client->SendInsertBlock(blockInsert);
         sc_zval_ptr_dtor(&return_should);
@@ -973,6 +960,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, execute)
             char *str_key;
             uint32_t str_keylen;
             int keytype;
+            (void)keytype;
 
             SC_HASHTABLE_FOREACH_START2(params_ht, str_key, str_keylen, keytype, pzval)
             {

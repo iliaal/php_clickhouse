@@ -244,6 +244,10 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     char *str_key;
     uint32_t str_keylen;
     int keytype;
+    // SC_HASHTABLE_FOREACH_START2 writes into these locals on every iteration;
+    // most case arms below only consume array_value, so silence the unused-set
+    // warning at function scope rather than per call site.
+    (void)str_key; (void)str_keylen; (void)keytype;
 
     HashTable *values_ht = Z_ARRVAL_P(value_zval);
 
@@ -852,7 +856,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 if (Z_TYPE_P(array_value) != IS_ARRAY) throw std::runtime_error("Map row must be a PHP array");
                 std::vector<std::pair<std::string, std::string>> entries;
                 HashTable *mh = Z_ARRVAL_P(array_value);
-                zval *mv; char *mk; uint32_t ml; int mt;
+                zval *mv; char *mk; uint32_t ml; int mt; (void)mt;
                 SC_HASHTABLE_FOREACH_START2(mh, mk, ml, mt, mv) {
                     if (!mk) continue;
                     convert_to_string(mv);
@@ -870,7 +874,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 if (Z_TYPE_P(array_value) != IS_ARRAY) throw std::runtime_error("Map row must be a PHP array");
                 std::vector<std::pair<std::string, int64_t>> entries;
                 HashTable *mh = Z_ARRVAL_P(array_value);
-                zval *mv; char *mk; uint32_t ml; int mt;
+                zval *mv; char *mk; uint32_t ml; int mt; (void)mt;
                 SC_HASHTABLE_FOREACH_START2(mh, mk, ml, mt, mv) {
                     if (!mk) continue;
                     convert_to_long(mv);
@@ -887,7 +891,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 if (Z_TYPE_P(array_value) != IS_ARRAY) throw std::runtime_error("Map row must be a PHP array");
                 std::vector<std::pair<std::string, uint64_t>> entries;
                 HashTable *mh = Z_ARRVAL_P(array_value);
-                zval *mv; char *mk; uint32_t ml; int mt;
+                zval *mv; char *mk; uint32_t ml; int mt; (void)mt;
                 SC_HASHTABLE_FOREACH_START2(mh, mk, ml, mt, mv) {
                     if (!mk) continue;
                     convert_to_long(mv);
@@ -904,7 +908,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 if (Z_TYPE_P(array_value) != IS_ARRAY) throw std::runtime_error("Map row must be a PHP array");
                 std::vector<std::pair<std::string, double>> entries;
                 HashTable *mh = Z_ARRVAL_P(array_value);
-                zval *mv; char *mk; uint32_t ml; int mt;
+                zval *mv; char *mk; uint32_t ml; int mt; (void)mt;
                 SC_HASHTABLE_FOREACH_START2(mh, mk, ml, mt, mv) {
                     if (!mk) continue;
                     convert_to_double(mv);
@@ -940,6 +944,8 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     {
         throw std::runtime_error("can't support Void");
     }
+    default:
+        throw std::runtime_error("insertColumn: unsupported type code: " + type->GetName());
     }
 
     throw std::runtime_error("insertColumn runtime error.");
@@ -1655,6 +1661,8 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
     {
         throw std::runtime_error("can't support Void");
     }
+    default:
+        throw std::runtime_error("convertToZval: unsupported type code: " + columnRef->Type()->GetName());
     }
 }
 
