@@ -79,10 +79,6 @@ jobs:
   asan:
     name: PHP ${{ matrix.php }} - ASAN
     runs-on: ubuntu-latest
-    # ASAN job is informational while we sort out runtime-version mismatch
-    # between the host clang's ASan and the ASan the extension links against.
-    # Failure here does not gate the release.
-    continue-on-error: true
     services:
       clickhouse:
         image: clickhouse/clickhouse-server:latest
@@ -105,10 +101,14 @@ jobs:
         php: ['8.4']
 
     env:
-      # Vendored clickhouse-cpp creates a NonSecureSocketFactory per Client
-      # that's only freed at process exit. Disable leak detection rather
-      # than chase upstream-internal bookkeeping.
-      ASAN_OPTIONS: exitcode=139:verify_asan_link_order=0:detect_odr_violation=0:detect_leaks=0
+      # detect_leaks=0: vendored clickhouse-cpp creates a NonSecureSocketFactory
+      #   per Client that's only freed at process exit; suppress until upstream
+      #   releases a fix.
+      # detect_odr_violation=0: clickhouse-cpp templates produce duplicate
+      #   symbols across translation units, harmless but noisy.
+      # exitcode=139: keep ASan abort on the conventional SIGSEGV exit code so
+      #   run-tests.php classifies failures as crashes, not silent skips.
+      ASAN_OPTIONS: exitcode=139:detect_odr_violation=0:detect_leaks=0
       UBSAN_OPTIONS: print_stacktrace=1
       USE_ZEND_ALLOC: 0
 
@@ -124,7 +124,7 @@ jobs:
           cd /tmp/php-src
           ./buildconf --force
           CC=clang CXX=clang++ \
-          CFLAGS="-fsanitize=address,undefined -fno-sanitize=function -DZEND_TRACK_ARENA_ALLOC" \
+          CFLAGS="-fsanitize=address,undefined -fno-sanitize=function,vptr -DZEND_TRACK_ARENA_ALLOC" \
           LDFLAGS="-fsanitize=address,undefined" \
           ./configure \
             --enable-debug \
@@ -140,10 +140,13 @@ jobs:
           export PATH="/tmp/php-asan/bin:$PATH"
           phpize
           # Match PHP's exact -fsanitize / -fno-sanitize set so the runtime
-          # ABI lines up. Drop `function` UB-sanitizer (PHP build does too).
+          # ABI lines up. Disable `function` (PHP's own build does) and
+          # `vptr` (the vptr check needs __ubsan_vptr_type_cache, which the
+          # dlopen'd extension can't resolve against the host PHP's static
+          # ASan/UBSan).
           CC=clang CXX=clang++ \
-          CFLAGS="-fsanitize=address,undefined -fno-sanitize=function -DZEND_TRACK_ARENA_ALLOC" \
-          CXXFLAGS="-fsanitize=address,undefined -fno-sanitize=function -DZEND_TRACK_ARENA_ALLOC" \
+          CFLAGS="-fsanitize=address,undefined -fno-sanitize=function,vptr -DZEND_TRACK_ARENA_ALLOC" \
+          CXXFLAGS="-fsanitize=address,undefined -fno-sanitize=function,vptr -DZEND_TRACK_ARENA_ALLOC" \
           LDFLAGS="-fsanitize=address,undefined" \
           ./configure --enable-clickhouse --with-php-config=/tmp/php-asan/bin/php-config
           make -j$(nproc)
