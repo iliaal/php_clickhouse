@@ -642,6 +642,14 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, insert)
 #define IS_UNDEF 0
 #endif
 
+    // Storage for return_should lives in the function frame so that an
+    // exception thrown by BeginInsert / SendInsertBlock / EndInsert can
+    // still reach a valid zval header to free its array_init'd HashTable.
+    zval _return_should_storage;
+    zval *return_should = NULL;
+    zval _return_tmp_storage;
+    zval *return_tmp_pending = NULL;
+
     try
     {
         int key = Z_OBJ_HANDLE(*getThis());
@@ -656,8 +664,8 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, insert)
         HashTable *values_ht = Z_ARRVAL_P(values);
         size_t columns_count = zend_hash_num_elements(columns_ht);
 
-        zval *return_should;
-        SC_MAKE_STD_ZVAL(return_should);
+        return_should = &_return_should_storage;
+        ZVAL_UNDEF(return_should);
         array_init(return_should);
 
         zval *fzval;
@@ -666,12 +674,12 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, insert)
         uint32_t str_keylen;
         int keytype;
 
-        zval *return_tmp;
         for(size_t i = 0; i < columns_count; i++)
         {
             zval *key = sc_zend_hash_index_find(columns_ht, i);
-            SC_MAKE_STD_ZVAL(return_tmp);
-            array_init(return_tmp);
+            return_tmp_pending = &_return_tmp_storage;
+            ZVAL_UNDEF(return_tmp_pending);
+            array_init(return_tmp_pending);
 
             SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, pzval)
             {
@@ -689,11 +697,12 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, insert)
                     throw std::runtime_error("The number of parameters inserted per line is inconsistent");
                 }
                 sc_zval_add_ref(fzval);
-                add_next_index_zval(return_tmp, fzval);
+                add_next_index_zval(return_tmp_pending, fzval);
             }
             SC_HASHTABLE_FOREACH_END();
 
-            add_next_index_zval(return_should, return_tmp);
+            add_next_index_zval(return_should, return_tmp_pending);
+            return_tmp_pending = NULL;
         }
 
         getInsertSql(&sql, table, columns);
@@ -715,10 +724,16 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, insert)
         client->SendInsertBlock(blockInsert);
         client->EndInsert();
         sc_zval_ptr_dtor(&return_should);
-
+        return_should = NULL;
     }
     catch (const std::exception& e)
     {
+        if (return_tmp_pending) {
+            sc_zval_ptr_dtor(&return_tmp_pending);
+        }
+        if (return_should) {
+            sc_zval_ptr_dtor(&return_should);
+        }
         sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, e.what(), 0);
     }
     RETURN_TRUE;
@@ -802,6 +817,11 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, write)
 #define IS_UNDEF 0
 #endif
 
+    zval _return_should_storage;
+    zval *return_should = NULL;
+    zval _return_tmp_storage;
+    zval *return_tmp_pending = NULL;
+
     try
     {
         zval *first_data;
@@ -812,8 +832,8 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, write)
             throw std::runtime_error("The conut of data inserted is empty");
         }
         size_t columns_count = zend_hash_num_elements(Z_ARRVAL_P(first_data));
-        zval *return_should;
-        SC_MAKE_STD_ZVAL(return_should);
+        return_should = &_return_should_storage;
+        ZVAL_UNDEF(return_should);
         array_init(return_should);
 
         zval *fzval;
@@ -822,11 +842,11 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, write)
         uint32_t str_keylen;
         int keytype;
 
-        zval *return_tmp;
         for(size_t i = 0; i < columns_count; i++)
         {
-            SC_MAKE_STD_ZVAL(return_tmp);
-            array_init(return_tmp);
+            return_tmp_pending = &_return_tmp_storage;
+            ZVAL_UNDEF(return_tmp_pending);
+            array_init(return_tmp_pending);
 
             SC_HASHTABLE_FOREACH_START2(values_ht, str_key, str_keylen, keytype, pzval)
             {
@@ -840,11 +860,12 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, write)
                     throw std::runtime_error("The number of parameters inserted per line is inconsistent");
                 }
                 sc_zval_add_ref(fzval);
-                add_next_index_zval(return_tmp, fzval);
+                add_next_index_zval(return_tmp_pending, fzval);
             }
             SC_HASHTABLE_FOREACH_END();
 
-            add_next_index_zval(return_should, return_tmp);
+            add_next_index_zval(return_should, return_tmp_pending);
+            return_tmp_pending = NULL;
         }
 
 
@@ -865,9 +886,16 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, write)
 
         client->SendInsertBlock(blockInsert);
         sc_zval_ptr_dtor(&return_should);
+        return_should = NULL;
     }
     catch (const std::exception& e)
     {
+        if (return_tmp_pending) {
+            sc_zval_ptr_dtor(&return_tmp_pending);
+        }
+        if (return_should) {
+            sc_zval_ptr_dtor(&return_should);
+        }
         sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, e.what(), 0);
     }
     RETURN_TRUE;

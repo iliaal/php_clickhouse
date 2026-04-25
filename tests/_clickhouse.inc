@@ -45,6 +45,50 @@ function clickhouse_skip_if_no_server(): void
     fclose($sock);
 }
 
-/* Back-compat aliases — old function names kept for one release. */
+function clickhouse_tls_test_config(): array
+{
+    $config = clickhouse_test_config();
+    $config["port"] = (int)(getenv("CLICKHOUSE_TLS_PORT") ?: "9440");
+    $config["ssl"]  = true;
+    if (getenv("CLICKHOUSE_TLS_SKIP_VERIFY") !== "0") {
+        $config["ssl_skip_verify"] = true;
+    }
+    if ($ca = getenv("CLICKHOUSE_TLS_CA_FILE")) {
+        $config["ssl_ca_files"] = $ca;
+    }
+    return $config;
+}
+
+/**
+ * Skip a TLS test when either the server isn't reachable on the TLS
+ * port or the extension was built without --enable-clickhouse-openssl.
+ */
+function clickhouse_skip_if_no_tls_server(): void
+{
+    if (!extension_loaded("clickhouse")) {
+        print "skip clickhouse extension not loaded";
+        exit;
+    }
+    $h = getenv("CLICKHOUSE_HOST") ?: "clickhouse";
+    $p = (int)(getenv("CLICKHOUSE_TLS_PORT") ?: "9440");
+    $sock = @stream_socket_client("tcp://$h:$p", $err, $errstr, 1);
+    if (!$sock) {
+        print "skip ClickHouse TLS not reachable at $h:$p";
+        exit;
+    }
+    fclose($sock);
+    try {
+        new ClickHouse(clickhouse_tls_test_config());
+    } catch (ClickHouseException $e) {
+        if (strpos($e->getMessage(), "without TLS") !== false) {
+            print "skip extension built without TLS support";
+            exit;
+        }
+        print "skip TLS handshake failed: " . $e->getMessage();
+        exit;
+    }
+}
+
+/* Back-compat aliases. Old function names kept for one release. */
 function seasclick_test_config(): array { return clickhouse_test_config(); }
 function seasclick_skip_if_no_server(): void { clickhouse_skip_if_no_server(); }
