@@ -1,7 +1,7 @@
 --TEST--
 ClickHouse testDate
 --SKIPIF--
-<?php print "skip TODO: re-baseline against ClickHouse v2.6.1 / CH 26 (inherited test, expected output predates the v2.6.1 lib bump)"; ?>
+<?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--
 <?php
 require __DIR__ . "/_clickhouse.inc";
@@ -19,28 +19,21 @@ function clientTest($config)
 }
 
 function testDate($client, $deleteTable = false) {
-    $client->execute("CREATE TABLE IF NOT EXISTS test.date_test (date_c Date, datetime_c DateTime) ENGINE = Memory");
+    $client->execute("DROP TABLE IF EXISTS test.date_test");
+    $client->execute("CREATE TABLE test.date_test (date_c Date, datetime_c DateTime('UTC')) ENGINE = Memory");
 
-    $time1 = strtotime(date('Y-m-d H:i:s', 1548633600));
-    $time2 = strtotime(date('Y-m-d H:i:s', 1548687925));
+    // Raw epoch ints, TZ-independent. 1548633600 = 2019-01-28 00:00:00 UTC,
+    // 1548687925 = 2019-01-28 15:05:25 UTC.
+    $client->insert("test.date_test", ['date_c', 'datetime_c'], [
+        [1548633600, 1548687925],
+        [1548633600, 1548687925],
+    ]);
 
-    $client->insert("test.date_test", [
-        'date_c', 'datetime_c'
-    ], [
-        [$time1, $time2],
-        [$time1, $time2]
-    ]);
-    
-    $result = $client->select("SELECT {select} FROM {table}", [
-        'select' => 'date_c, datetime_c',
-        'table' => 'test.date_test'
-    ]);
+    $result = $client->select("SELECT date_c, datetime_c FROM test.date_test");
     var_dump($result);
-    
+
     if ($deleteTable) {
-        $client->execute("DROP TABLE {table}", [
-            'table' => 'test.date_test'
-        ]);
+        $client->execute("DROP TABLE test.date_test");
     }
 }
 
