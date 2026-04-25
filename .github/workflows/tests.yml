@@ -1,0 +1,76 @@
+name: Tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  linux:
+    name: PHP ${{ matrix.php }} - Linux
+    runs-on: ubuntu-latest
+    services:
+      clickhouse:
+        image: clickhouse/clickhouse-server:latest
+        ports:
+          - 9000:9000
+          - 8123:8123
+        env:
+          CLICKHOUSE_USER: test
+          CLICKHOUSE_PASSWORD: test
+        options: >-
+          --ulimit nofile=262144:262144
+          --health-cmd "wget -qO- http://localhost:8123/ping || exit 1"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['7.4', '8.1', '8.2', '8.3', '8.4', '8.5']
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          tools: phpize, php-config
+
+      - name: Install OpenSSL dev (for TLS build matrix entry)
+        run: sudo apt-get update -qq && sudo apt-get install -y libssl-dev
+
+      - name: Build extension (no TLS)
+        run: |
+          phpize
+          ./configure --enable-clickhouse
+          make -j$(nproc)
+
+      - name: Run test suite
+        env:
+          CLICKHOUSE_HOST: 127.0.0.1
+          CLICKHOUSE_PORT: 9000
+          CLICKHOUSE_USER: test
+          CLICKHOUSE_PASSWD: test
+          NO_INTERACTION: 1
+        run: |
+          export TEST_PHP_EXECUTABLE=$(which php)
+          export TEST_PHP_ARGS="-d extension=$(pwd)/modules/clickhouse.so"
+          RESULT=$(php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK tests/ 2>&1)
+          echo "$RESULT"
+          FAILED=$(echo "$RESULT" | grep 'Tests failed' | grep -oP '\d+' | head -1)
+          if [ "$FAILED" -gt 0 ]; then
+            echo "::error::$FAILED test(s) failed"
+            exit 1
+          fi
+
+      - name: Rebuild with TLS (verifies SSL build path)
+        run: |
+          make clean
+          phpize --clean
+          phpize
+          ./configure --enable-clickhouse --enable-clickhouse-openssl
+          make -j$(nproc)
