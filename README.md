@@ -1,5 +1,10 @@
 # php_clickhouse
 
+[![Tests](https://github.com/iliaal/php_clickhouse/actions/workflows/tests.yml/badge.svg)](https://github.com/iliaal/php_clickhouse/actions/workflows/tests.yml)
+[![Version](https://img.shields.io/github/v/release/iliaal/php_clickhouse)](https://github.com/iliaal/php_clickhouse/releases)
+[![License: PHP-3.01](https://img.shields.io/badge/License-PHP--3.01-green.svg)](http://www.php.net/license/3_01.txt)
+[![Follow @iliaa](https://img.shields.io/badge/Follow-@iliaa-000000?style=flat&logo=x&logoColor=white)](https://x.com/intent/follow?screen_name=iliaa)
+
 Native PHP extension for [ClickHouse](https://clickhouse.com/), built on
 the official [ClickHouse/clickhouse-cpp](https://github.com/ClickHouse/clickhouse-cpp)
 client. Connects over the binary TCP protocol with LZ4 / ZSTD compression
