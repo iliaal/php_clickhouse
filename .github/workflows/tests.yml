@@ -43,7 +43,7 @@ jobs:
       - name: Install OpenSSL dev (TLS build path)
         run: sudo apt-get update -qq && sudo apt-get install -y libssl-dev
 
-      - name: Naming-consistency guard (no stray SeasClick references)
+      - name: Naming-consistency guard (no stray legacy references)
         run: ./scripts/check-no-seasclick.sh
 
       - name: Build extension (no TLS)

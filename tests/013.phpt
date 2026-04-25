@@ -1,7 +1,7 @@
 --TEST--
 ClickHouse Single Column Fetch
 --SKIPIF--
-<?php print "skip TODO: re-baseline against ClickHouse v2.6.1 / CH 26 (test inherited from SeasClick PR/upstream, expected output predates the lib bump)"; ?>
+<?php print "skip TODO: re-baseline against ClickHouse v2.6.1 / CH 26 (inherited test, expected output predates the v2.6.1 lib bump)"; ?>
 --FILE--
 <?php
 require __DIR__ . "/_clickhouse.inc";
