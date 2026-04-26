@@ -40,3 +40,17 @@ extension's ASan job and obscured real findings.
 Patch: guard the `memcpy` with `if (str.size() > 0)`. This is
 exercised by `tests/018.phpt` (LowCardinality(String) with empty
 values).
+
+## clickhouse/client.{h,cpp}: no public `BeginInsert(const Query&)` overload
+
+`Client::Impl::BeginInsert` already takes a `Query`, but the public
+surface only exposes `BeginInsert(string)` and
+`BeginInsert(string, string)`. That means callers cannot attach
+per-query settings, server-side params, or progress callbacks to an
+INSERT, even though the impl supports it.
+
+Patch: declare and forward a third overload, `Block
+BeginInsert(const Query&)`, so the binding can pass a fully
+configured `Query` (settings + params + callbacks + query_id) into
+the streaming insert path. Used by `php_clickhouse` to honor
+`setSettings()` / per-call settings on `insert()` and `writeStart()`.

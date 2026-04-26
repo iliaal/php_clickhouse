@@ -32,10 +32,13 @@ extern "C" {
 
 #include "lib/clickhouse-cpp/clickhouse/client.h"
 #include "lib/clickhouse-cpp/clickhouse/error_codes.h"
+#include "lib/clickhouse-cpp/clickhouse/exceptions.h"
 #include "lib/clickhouse-cpp/clickhouse/types/type_parser.h"
 #include "typesToPhp.hpp"
+#include <chrono>
 #include <map>
 #include <sstream>
+#include <unordered_map>
 
 using namespace clickhouse;
 using namespace std;
@@ -44,7 +47,40 @@ zend_class_entry *clickhouse_ce, *clickhouse_exception_ce;
 map<int, Client*> clientMap;
 map<int, Block> clientInsertBlock;
 
+/*
+ * Per-object state attached to a connected ClickHouse instance, keyed
+ * on Z_OBJ_HANDLE. Parallels clientMap so __destruct can sweep all of
+ * them in one place. None of this lives on the PHP object itself
+ * because zvals + std::function callbacks don't compose cleanly.
+ */
+struct ClientStats {
+    uint64_t rows_read = 0;
+    uint64_t bytes_read = 0;
+    uint64_t total_rows = 0;
+    uint64_t written_rows = 0;
+    uint64_t written_bytes = 0;
+    uint64_t blocks = 0;
+    uint64_t rows_before_limit = 0;
+    bool applied_limit = false;
+    double elapsed_ms = 0.0;
+};
+struct QueryLog {
+    std::string sql;
+    std::string query_id;
+    double elapsed_ms = 0.0;
+    uint64_t rows_read = 0;
+    uint64_t bytes_read = 0;
+    int error_code = 0;            // 0 = success; ServerException code on server failure; -1 on client/network failure
+    std::string error_message;
+};
+map<int, ClientStats> clientStats;
+map<int, std::unordered_map<std::string, std::string>> clientSettings;
+map<int, zval> clientProgressCb;
+map<int, bool> clientLogEnabled;
+map<int, std::vector<QueryLog>> clientLog;
+
 static std::string sanitizeError(const char *what);
+static void throwClickHouseError(const std::exception &e, const std::string &query_id = std::string());
 
 #ifdef COMPILE_DL_CLICKHOUSE
 extern "C" {
@@ -56,11 +92,23 @@ static PHP_METHOD(CLICKHOUSE_RES_NAME, __construct);
 static PHP_METHOD(CLICKHOUSE_RES_NAME, __destruct);
 static PHP_METHOD(CLICKHOUSE_RES_NAME, select);
 static PHP_METHOD(CLICKHOUSE_RES_NAME, insert);
+static PHP_METHOD(CLICKHOUSE_RES_NAME, insertAssoc);
 static PHP_METHOD(CLICKHOUSE_RES_NAME, writeStart);
 static PHP_METHOD(CLICKHOUSE_RES_NAME, write);
 static PHP_METHOD(CLICKHOUSE_RES_NAME, writeEnd);
 static PHP_METHOD(CLICKHOUSE_RES_NAME, execute);
 static PHP_METHOD(CLICKHOUSE_RES_NAME, ping);
+static PHP_METHOD(CLICKHOUSE_RES_NAME, setSettings);
+static PHP_METHOD(CLICKHOUSE_RES_NAME, setProgressCallback);
+static PHP_METHOD(CLICKHOUSE_RES_NAME, getStatistics);
+static PHP_METHOD(CLICKHOUSE_RES_NAME, databaseSize);
+static PHP_METHOD(CLICKHOUSE_RES_NAME, tablesSize);
+static PHP_METHOD(CLICKHOUSE_RES_NAME, partitions);
+static PHP_METHOD(CLICKHOUSE_RES_NAME, showTables);
+static PHP_METHOD(CLICKHOUSE_RES_NAME, showCreateTable);
+static PHP_METHOD(CLICKHOUSE_RES_NAME, getServerUptime);
+static PHP_METHOD(CLICKHOUSE_RES_NAME, enableLogQueries);
+static PHP_METHOD(CLICKHOUSE_RES_NAME, getLogQueries);
 
 ZEND_BEGIN_ARG_INFO_EX(clickhouse_construct, 0, 0, 1)
 ZEND_ARG_INFO(0, connectParams)
@@ -74,6 +122,7 @@ ZEND_ARG_INFO(0, sql)
 ZEND_ARG_INFO(0, params)
 ZEND_ARG_INFO(0, fetch_mode)
 ZEND_ARG_INFO(0, query_id)
+ZEND_ARG_INFO(0, settings)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(clickhouse_insert, 0, 0, 3)
@@ -81,12 +130,21 @@ ZEND_ARG_INFO(0, table)
 ZEND_ARG_INFO(0, columns)
 ZEND_ARG_INFO(0, values)
 ZEND_ARG_INFO(0, query_id)
+ZEND_ARG_INFO(0, settings)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(clickhouse_insertAssoc, 0, 0, 2)
+ZEND_ARG_INFO(0, table)
+ZEND_ARG_INFO(0, rows)
+ZEND_ARG_INFO(0, query_id)
+ZEND_ARG_INFO(0, settings)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(clickhouse_writeStart, 0, 0, 2)
 ZEND_ARG_INFO(0, table)
 ZEND_ARG_INFO(0, columns)
 ZEND_ARG_INFO(0, query_id)
+ZEND_ARG_INFO(0, settings)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(clickhouse_write, 0, 0, 1)
@@ -100,9 +158,52 @@ ZEND_BEGIN_ARG_INFO_EX(clickhouse_execute, 0, 0, 1)
 ZEND_ARG_INFO(0, sql)
 ZEND_ARG_INFO(0, params)
 ZEND_ARG_INFO(0, query_id)
+ZEND_ARG_INFO(0, settings)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(clickhouse_ping, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(clickhouse_setSettings, 0, 0, 1)
+ZEND_ARG_INFO(0, settings)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(clickhouse_setProgressCallback, 0, 0, 1)
+ZEND_ARG_INFO(0, callback)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(clickhouse_getStatistics, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(clickhouse_databaseSize, 0, 0, 0)
+ZEND_ARG_INFO(0, database)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(clickhouse_tablesSize, 0, 0, 0)
+ZEND_ARG_INFO(0, database)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(clickhouse_partitions, 0, 0, 1)
+ZEND_ARG_INFO(0, table)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(clickhouse_showTables, 0, 0, 0)
+ZEND_ARG_INFO(0, database)
+ZEND_ARG_INFO(0, like)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(clickhouse_showCreateTable, 0, 0, 1)
+ZEND_ARG_INFO(0, table)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(clickhouse_getServerUptime, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(clickhouse_enableLogQueries, 0, 0, 0)
+ZEND_ARG_INFO(0, enabled)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(clickhouse_getLogQueries, 0, 0, 0)
 ZEND_END_ARG_INFO()
 
 /* {{{ clickhouse_functions[] */
@@ -114,15 +215,27 @@ const zend_function_entry clickhouse_functions[] =
 
 const zend_function_entry clickhouse_methods[] =
 {
-    PHP_ME(CLICKHOUSE_RES_NAME, __construct,   clickhouse_construct, ZEND_ACC_PUBLIC | ZEND_ACC_CTOR)
-    PHP_ME(CLICKHOUSE_RES_NAME, __destruct,    clickhouse_destruct, ZEND_ACC_PUBLIC)
-    PHP_ME(CLICKHOUSE_RES_NAME, select,        clickhouse_select, ZEND_ACC_PUBLIC)
-    PHP_ME(CLICKHOUSE_RES_NAME, insert,        clickhouse_insert, ZEND_ACC_PUBLIC)
-    PHP_ME(CLICKHOUSE_RES_NAME, writeStart,    clickhouse_writeStart, ZEND_ACC_PUBLIC)
-    PHP_ME(CLICKHOUSE_RES_NAME, write,         clickhouse_write, ZEND_ACC_PUBLIC)
-    PHP_ME(CLICKHOUSE_RES_NAME, writeEnd,      clickhouse_writeEnd, ZEND_ACC_PUBLIC)
-    PHP_ME(CLICKHOUSE_RES_NAME, execute,       clickhouse_execute, ZEND_ACC_PUBLIC)
-    PHP_ME(CLICKHOUSE_RES_NAME, ping,          clickhouse_ping, ZEND_ACC_PUBLIC)
+    PHP_ME(CLICKHOUSE_RES_NAME, __construct,         clickhouse_construct, ZEND_ACC_PUBLIC | ZEND_ACC_CTOR)
+    PHP_ME(CLICKHOUSE_RES_NAME, __destruct,          clickhouse_destruct, ZEND_ACC_PUBLIC)
+    PHP_ME(CLICKHOUSE_RES_NAME, select,              clickhouse_select, ZEND_ACC_PUBLIC)
+    PHP_ME(CLICKHOUSE_RES_NAME, insert,              clickhouse_insert, ZEND_ACC_PUBLIC)
+    PHP_ME(CLICKHOUSE_RES_NAME, insertAssoc,         clickhouse_insertAssoc, ZEND_ACC_PUBLIC)
+    PHP_ME(CLICKHOUSE_RES_NAME, writeStart,          clickhouse_writeStart, ZEND_ACC_PUBLIC)
+    PHP_ME(CLICKHOUSE_RES_NAME, write,               clickhouse_write, ZEND_ACC_PUBLIC)
+    PHP_ME(CLICKHOUSE_RES_NAME, writeEnd,            clickhouse_writeEnd, ZEND_ACC_PUBLIC)
+    PHP_ME(CLICKHOUSE_RES_NAME, execute,             clickhouse_execute, ZEND_ACC_PUBLIC)
+    PHP_ME(CLICKHOUSE_RES_NAME, ping,                clickhouse_ping, ZEND_ACC_PUBLIC)
+    PHP_ME(CLICKHOUSE_RES_NAME, setSettings,         clickhouse_setSettings, ZEND_ACC_PUBLIC)
+    PHP_ME(CLICKHOUSE_RES_NAME, setProgressCallback, clickhouse_setProgressCallback, ZEND_ACC_PUBLIC)
+    PHP_ME(CLICKHOUSE_RES_NAME, getStatistics,       clickhouse_getStatistics, ZEND_ACC_PUBLIC)
+    PHP_ME(CLICKHOUSE_RES_NAME, databaseSize,        clickhouse_databaseSize, ZEND_ACC_PUBLIC)
+    PHP_ME(CLICKHOUSE_RES_NAME, tablesSize,          clickhouse_tablesSize, ZEND_ACC_PUBLIC)
+    PHP_ME(CLICKHOUSE_RES_NAME, partitions,          clickhouse_partitions, ZEND_ACC_PUBLIC)
+    PHP_ME(CLICKHOUSE_RES_NAME, showTables,          clickhouse_showTables, ZEND_ACC_PUBLIC)
+    PHP_ME(CLICKHOUSE_RES_NAME, showCreateTable,     clickhouse_showCreateTable, ZEND_ACC_PUBLIC)
+    PHP_ME(CLICKHOUSE_RES_NAME, getServerUptime,     clickhouse_getServerUptime, ZEND_ACC_PUBLIC)
+    PHP_ME(CLICKHOUSE_RES_NAME, enableLogQueries,    clickhouse_enableLogQueries, ZEND_ACC_PUBLIC)
+    PHP_ME(CLICKHOUSE_RES_NAME, getLogQueries,       clickhouse_getLogQueries, ZEND_ACC_PUBLIC)
     PHP_FE_END
 };
 
@@ -152,6 +265,13 @@ PHP_MINIT_FUNCTION(clickhouse)
 
     clickhouse_ce = zend_register_internal_class_ex(&ce_main, NULL);
     clickhouse_exception_ce = zend_register_internal_class_ex(&ce_exception, zend_ce_exception);
+
+    /* Structured ServerException fields. Populated only when the cause
+     * is a clickhouse::ServerException; for client/network errors they
+     * stay at the defaults below. */
+    zend_declare_property_long(clickhouse_exception_ce, "server_code", sizeof("server_code") - 1, 0, ZEND_ACC_PUBLIC);
+    zend_declare_property_null(clickhouse_exception_ce, "server_name", sizeof("server_name") - 1, ZEND_ACC_PUBLIC);
+    zend_declare_property_null(clickhouse_exception_ce, "query_id", sizeof("query_id") - 1, ZEND_ACC_PUBLIC);
 
     /* Back-compat aliases for the original SeasClick name. Deprecated;
      * removed in the next major release. */
@@ -306,6 +426,35 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, __construct)
     if (php_array_get_value(_ht, "send_timeout", value)) {
         convert_to_long(value);
         Options = Options.SetConnectionSendTimeout(std::chrono::seconds(Z_LVAL_P(value)));
+    }
+    /* Millisecond variants override the seconds-based keys. Useful when
+     * sub-second precision matters (CI test guards, low-latency hops). */
+    if (php_array_get_value(_ht, "connect_timeout_ms", value)) {
+        convert_to_long(value);
+        if (Z_LVAL_P(value) < 0) {
+            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                "connect_timeout_ms must be >= 0", 0);
+            return;
+        }
+        Options = Options.SetConnectionConnectTimeout(std::chrono::milliseconds(Z_LVAL_P(value)));
+    }
+    if (php_array_get_value(_ht, "receive_timeout_ms", value)) {
+        convert_to_long(value);
+        if (Z_LVAL_P(value) < 0) {
+            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                "receive_timeout_ms must be >= 0", 0);
+            return;
+        }
+        Options = Options.SetConnectionRecvTimeout(std::chrono::milliseconds(Z_LVAL_P(value)));
+    }
+    if (php_array_get_value(_ht, "send_timeout_ms", value)) {
+        convert_to_long(value);
+        if (Z_LVAL_P(value) < 0) {
+            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                "send_timeout_ms must be >= 0", 0);
+            return;
+        }
+        Options = Options.SetConnectionSendTimeout(std::chrono::milliseconds(Z_LVAL_P(value)));
     }
     if (php_array_get_value(_ht, "tcp_nodelay", value)) {
         convert_to_boolean(value);
@@ -474,7 +623,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, __construct)
     }
     catch (const std::exception& e)
     {
-        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, sanitizeError(e.what()).c_str(), 0);
+        throwClickHouseError(e, std::string());
         return;
     }
 
@@ -577,6 +726,251 @@ static Client* getClient(int key)
     return it->second;
 }
 
+/*
+ * Central thrower. Replaces every catch-block sc_zend_throw call so the
+ * server fields land on the exception in one place. ServerException is
+ * the only branch that knows the server's error code and name; every
+ * other exception (network, validation, ours) leaves the structured
+ * fields at their MINIT defaults.
+ */
+static void throwClickHouseError(const std::exception &e, const std::string &query_id)
+{
+    std::string msg = sanitizeError(e.what());
+    zval ex;
+    object_init_ex(&ex, clickhouse_exception_ce);
+
+    if (auto se = dynamic_cast<const clickhouse::ServerException*>(&e)) {
+        const clickhouse::Exception &exc = se->GetException();
+        sc_zend_update_property_long(clickhouse_exception_ce, &ex, "server_code", sizeof("server_code") - 1, (zend_long)exc.code);
+        if (!exc.name.empty()) {
+            sc_zend_update_property_stringl(clickhouse_exception_ce, &ex, "server_name", sizeof("server_name") - 1, exc.name.c_str(), exc.name.size());
+        }
+    }
+    if (!query_id.empty()) {
+        sc_zend_update_property_stringl(clickhouse_exception_ce, &ex, "query_id", sizeof("query_id") - 1, query_id.c_str(), query_id.size());
+    }
+    sc_zend_update_property_stringl(clickhouse_exception_ce, &ex, "message", sizeof("message") - 1, msg.c_str(), msg.size());
+    zend_throw_exception_object(&ex);
+}
+
+/*
+ * Coerce a PHP zval into the string format ClickHouse expects for
+ * server-side parameter values. Matches the textual format the server
+ * parses for {name:Type} placeholders. Strings/dates/scalars pass
+ * through verbatim (the wire layer adds the surrounding quotes); arrays
+ * are formatted as ClickHouse array literals so Array(T) parses cleanly.
+ */
+static std::string formatParamValue(zval *v, const std::string &type, bool inside_array);
+
+static std::string formatScalarParam(zval *v)
+{
+    switch (Z_TYPE_P(v)) {
+        case IS_NULL:
+            return std::string();
+        case IS_TRUE:
+            return std::string("true");
+        case IS_FALSE:
+            return std::string("false");
+        case IS_LONG: {
+            char buf[32];
+            int n = snprintf(buf, sizeof(buf), ZEND_LONG_FMT, Z_LVAL_P(v));
+            return std::string(buf, (n > 0 && (size_t)n < sizeof(buf)) ? (size_t)n : 0);
+        }
+        case IS_DOUBLE: {
+            char buf[64];
+            int n = snprintf(buf, sizeof(buf), "%.17g", Z_DVAL_P(v));
+            return std::string(buf, (n > 0 && (size_t)n < sizeof(buf)) ? (size_t)n : 0);
+        }
+        default:
+            convert_to_string(v);
+            return std::string(Z_STRVAL_P(v), Z_STRLEN_P(v));
+    }
+}
+
+static bool typeNeedsQuoting(const std::string &t)
+{
+    /* Inner type for an Array(T) typed param. Numeric and bool parse
+     * raw; everything else needs single-quotes around each element. */
+    static const char *bare[] = {"Int", "UInt", "Float", "Decimal", "Bool"};
+    for (const char *p : bare) {
+        if (t.compare(0, strlen(p), p) == 0) return false;
+    }
+    return true;
+}
+
+static std::string formatParamValue(zval *v, const std::string &type, bool inside_array)
+{
+    if (Z_TYPE_P(v) == IS_NULL) {
+        return std::string();
+    }
+
+    if (Z_TYPE_P(v) == IS_ARRAY) {
+        std::string inner;
+        if (type.compare(0, 6, "Array(") == 0 && type.back() == ')') {
+            inner = type.substr(6, type.size() - 7);
+        }
+        bool quote = inner.empty() ? true : typeNeedsQuoting(inner);
+        std::string out = "[";
+        bool first = true;
+        zval *iv;
+        ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(v), iv) {
+            if (!first) out += ",";
+            first = false;
+            std::string sv = formatScalarParam(iv);
+            if (quote) {
+                std::string esc;
+                esc.reserve(sv.size() + 2);
+                esc += "'";
+                for (char c : sv) {
+                    if (c == '\'' || c == '\\') esc += '\\';
+                    esc += c;
+                }
+                esc += "'";
+                out += esc;
+            } else {
+                out += sv;
+            }
+        } ZEND_HASH_FOREACH_END();
+        out += "]";
+        return out;
+    }
+
+    /* Scalar inside an Array goes through the same path; the caller is
+     * responsible for the surrounding quotes. The wire layer quotes the
+     * outer value for non-array typed params. */
+    (void)inside_array;
+    return formatScalarParam(v);
+}
+
+/*
+ * Apply the global setSettings map merged with a per-call settings array
+ * onto a Query object via Query::SetSetting. Per-call settings override
+ * global. Empty per-call array means "use global only".
+ */
+static void applyMergedSettings(Query &q, int key, zval *per_call)
+{
+    std::unordered_map<std::string, std::string> merged;
+    auto git = clientSettings.find(key);
+    if (git != clientSettings.end()) {
+        merged = git->second;
+    }
+    if (per_call != NULL && Z_TYPE_P(per_call) == IS_ARRAY) {
+        HashTable *ht = Z_ARRVAL_P(per_call);
+        zval *vz;
+        zend_string *zk;
+        zend_ulong nk;
+        ZEND_HASH_FOREACH_KEY_VAL(ht, nk, zk, vz) {
+            (void)nk;
+            if (!zk) continue;
+            std::string sval = formatScalarParam(vz);
+            merged[std::string(ZSTR_VAL(zk), ZSTR_LEN(zk))] = sval;
+        } ZEND_HASH_FOREACH_END();
+    }
+    for (const auto &kv : merged) {
+        QuerySettingsField f;
+        f.value = kv.second;
+        f.flags = 0;
+        q.SetSetting(kv.first, f);
+    }
+}
+
+/*
+ * Wire OnProgress and OnProfile to (a) populate the per-object stats
+ * struct and (b) forward to the user's PHP progress callback if one is
+ * registered. Stats reset happens at query start in the caller.
+ */
+static void attachProgressAndProfile(Query &q, int key)
+{
+    q.OnProgress([key](const Progress &p) {
+        auto &st = clientStats[key];
+        st.rows_read += p.rows;
+        st.bytes_read += p.bytes;
+        if (p.total_rows > st.total_rows) st.total_rows = p.total_rows;
+        st.written_rows += p.written_rows;
+        st.written_bytes += p.written_bytes;
+
+        auto cbit = clientProgressCb.find(key);
+        if (cbit != clientProgressCb.end()) {
+            zval args[1], retval;
+            ZVAL_NULL(&retval);
+            array_init(&args[0]);
+            add_assoc_long(&args[0], "rows", (zend_long)p.rows);
+            add_assoc_long(&args[0], "bytes", (zend_long)p.bytes);
+            add_assoc_long(&args[0], "total_rows", (zend_long)p.total_rows);
+            add_assoc_long(&args[0], "written_rows", (zend_long)p.written_rows);
+            add_assoc_long(&args[0], "written_bytes", (zend_long)p.written_bytes);
+            call_user_function(NULL, NULL, &cbit->second, &retval, 1, args);
+            zval_ptr_dtor(&args[0]);
+            zval_ptr_dtor(&retval);
+        }
+    });
+    q.OnProfile([key](const Profile &pr) {
+        auto &st = clientStats[key];
+        st.blocks = pr.blocks;
+        if (pr.calculated_rows_before_limit) {
+            st.rows_before_limit = pr.rows_before_limit;
+            st.applied_limit = pr.applied_limit;
+        }
+        /* Profile.bytes is bytes processed server-side; merge as a
+         * floor so we never report less than what Progress saw. */
+        if (pr.bytes > st.bytes_read) st.bytes_read = pr.bytes;
+        if (pr.rows > st.rows_read) st.rows_read = pr.rows;
+    });
+}
+
+static void resetStats(int key)
+{
+    clientStats[key] = ClientStats();
+}
+
+/*
+ * Append a completed-query record to the per-client log if logging is
+ * enabled. Pulls elapsed_ms / rows_read / bytes_read from the just-
+ * populated stats. No-op when logging is off so the hot path stays
+ * cheap on production deployments.
+ */
+static bool isLogEnabled(int key)
+{
+    auto it = clientLogEnabled.find(key);
+    return (it != clientLogEnabled.end() && it->second);
+}
+
+static void recordQuerySuccess(int key, const std::string &sql, const std::string &qid)
+{
+    if (!isLogEnabled(key)) return;
+    QueryLog ql;
+    ql.sql = sql;
+    ql.query_id = qid;
+    auto sit = clientStats.find(key);
+    if (sit != clientStats.end()) {
+        ql.elapsed_ms = sit->second.elapsed_ms;
+        ql.rows_read = sit->second.rows_read;
+        ql.bytes_read = sit->second.bytes_read;
+    }
+    clientLog[key].push_back(std::move(ql));
+}
+
+static void recordQueryError(int key, const std::string &sql, const std::string &qid, const std::exception &e)
+{
+    if (!isLogEnabled(key)) return;
+    QueryLog ql;
+    ql.sql = sql;
+    ql.query_id = qid;
+    auto sit = clientStats.find(key);
+    if (sit != clientStats.end()) {
+        ql.elapsed_ms = sit->second.elapsed_ms;
+        ql.rows_read = sit->second.rows_read;
+        ql.bytes_read = sit->second.bytes_read;
+    }
+    if (auto se = dynamic_cast<const clickhouse::ServerException*>(&e)) {
+        ql.error_code = se->GetException().code;
+    } else {
+        ql.error_code = -1;
+    }
+    ql.error_message = sanitizeError(e.what());
+    clientLog[key].push_back(std::move(ql));
+}
+
 void getInsertSql(string *sql, char *table_name, zval *columns)
 {
     zval *pzval;
@@ -610,20 +1004,39 @@ void getInsertSql(string *sql, char *table_name, zval *columns)
 }
 
 /*
- * Substitute {name} placeholders in `sql` with values from `params_ht`.
+ * Substitute placeholders in `sql` with values from `params_ht`.
  *
- * Placeholder values must consist only of identifier characters, digits,
- * decimal points, commas, parentheses, asterisks, plus/minus signs, or
- * whitespace. That set covers identifiers, comma-separated column lists,
- * numeric literals, and `count(*)`-style expressions but rejects every
- * character a SQL injection would need: quotes, semicolons, backslashes,
- * angle brackets, etc. A non-conforming value throws ClickHouseException.
+ * Two syntaxes are supported and routed differently:
  *
- * If a placeholder name isn't present in the SQL the call also throws
- * rather than silently passing through. Multiple occurrences of the same
+ *   {name}        client-side identifier substitution. Value must
+ *                 consist of identifier characters / digits / dots /
+ *                 commas / parentheses / asterisks / plus-minus /
+ *                 whitespace. Used for table and column names plus
+ *                 simple numeric expressions; rejects every character
+ *                 a SQL injection needs.
+ *
+ *   {name:Type}   server-side parameter (ClickHouse native). The SQL
+ *                 text is left untouched (the server parses {name:Type}
+ *                 itself); the value is collected into `out_params` so
+ *                 the caller can pass it to Query::SetParam. The wire
+ *                 layer single-quotes and the server parses according
+ *                 to Type. PHP arrays format as ClickHouse array
+ *                 literals so Array(T) parses cleanly.
+ *
+ * If a parameter is provided that doesn't appear in the SQL (in either
+ * form), the call throws. Multiple occurrences of the same `{name}`
  * placeholder are all replaced.
+ *
+ * `out_params` contains tuples (name, value, is_null). The caller is
+ * expected to call SetParam(name, optional<string>) on the final Query.
  */
-static void applyPlaceholders(string &sql, HashTable *params_ht)
+struct TypedParam {
+    std::string name;
+    std::string value;
+    bool is_null;
+};
+
+static void applyPlaceholders(string &sql, HashTable *params_ht, std::vector<TypedParam> &out_params)
 {
     zval *pzval;
     zend_string *zk;
@@ -634,6 +1047,32 @@ static void applyPlaceholders(string &sql, HashTable *params_ht)
         if (!zk) {
             throw std::runtime_error("Placeholder array keys must be strings");
         }
+        std::string name(ZSTR_VAL(zk), ZSTR_LEN(zk));
+
+        /* Detect the {name:Type} server-side form. We scan the SQL for
+         * the prefix `{name:` and capture the matching Type up to the
+         * closing `}`. If found, this parameter is server-side. */
+        std::string typed_prefix = "{" + name + ":";
+        size_t tpos = sql.find(typed_prefix);
+        if (tpos != std::string::npos) {
+            size_t close = sql.find('}', tpos + typed_prefix.size());
+            if (close == std::string::npos) {
+                throw std::runtime_error(
+                    "Unterminated typed placeholder for {" + name + "}");
+            }
+            std::string type = sql.substr(tpos + typed_prefix.size(),
+                                          close - (tpos + typed_prefix.size()));
+            TypedParam tp;
+            tp.name = name;
+            tp.is_null = (Z_TYPE_P(pzval) == IS_NULL);
+            if (!tp.is_null) {
+                tp.value = formatParamValue(pzval, type, false);
+            }
+            out_params.push_back(std::move(tp));
+            continue;
+        }
+
+        /* Fall through: client-side {name} identifier substitution. */
         convert_to_string(pzval);
         const char *val = Z_STRVAL_P(pzval);
         size_t vlen = Z_STRLEN_P(pzval);
@@ -648,16 +1087,14 @@ static void applyPlaceholders(string &sql, HashTable *params_ht)
                 c == '+' || c == '-';
             if (!ok) {
                 throw std::runtime_error(
-                    "Placeholder value for {" + std::string(ZSTR_VAL(zk), ZSTR_LEN(zk)) +
-                    "} contains an unsafe character");
+                    "Placeholder value for {" + name + "} contains an unsafe character");
             }
         }
-        std::string needle = "{" + std::string(ZSTR_VAL(zk), ZSTR_LEN(zk)) + "}";
+        std::string needle = "{" + name + "}";
         size_t pos = sql.find(needle);
         if (pos == std::string::npos) {
             throw std::runtime_error(
-                "Placeholder {" + std::string(ZSTR_VAL(zk), ZSTR_LEN(zk)) +
-                "} does not appear in the SQL");
+                "Placeholder {" + name + "} does not appear in the SQL");
         }
         std::string repl(val, vlen);
         while (pos != std::string::npos) {
@@ -665,6 +1102,17 @@ static void applyPlaceholders(string &sql, HashTable *params_ht)
             pos = sql.find(needle, pos + repl.size());
         }
     } ZEND_HASH_FOREACH_END();
+}
+
+static void attachTypedParams(Query &q, const std::vector<TypedParam> &params)
+{
+    for (const auto &p : params) {
+        if (p.is_null) {
+            q.SetParam(p.name, std::nullopt);
+        } else {
+            q.SetParam(p.name, p.value);
+        }
+    }
 }
 
 /* {{{ proto bool ping()
@@ -676,13 +1124,13 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, ping)
         Client *client = getClient(key);
         client->Ping();
     } catch (const std::exception& e) {
-        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, sanitizeError(e.what()).c_str(), 0);
+        throwClickHouseError(e);
         return;
     }
     RETURN_TRUE;
 }
 
-/* {{{ proto array select(string sql, array params, int mode)
+/* {{{ proto array select(string sql, array params, int mode, string query_id, array settings)
  */
 PHP_METHOD(CLICKHOUSE_RES_NAME, select)
 {
@@ -692,11 +1140,13 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, select)
     zend_long fetch_mode = 0;
     char *query_id = NULL;
     size_t l_query_id = 0;
+    zval *settings = NULL;
 
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "s|zls", &sql, &l_sql, &params, &fetch_mode, &query_id, &l_query_id) == FAILURE)
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "s|zlsa", &sql, &l_sql, &params, &fetch_mode, &query_id, &l_query_id, &settings) == FAILURE)
     {
         return;
     }
+    std::string qid = (query_id && l_query_id > 0) ? std::string(query_id, l_query_id) : std::string();
     try
     {
         int key = Z_OBJ_HANDLE(*getThis());
@@ -708,26 +1158,30 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, select)
         }
 
         string sql_s = (string)sql;
-        if (ZEND_NUM_ARGS() > 1 && params != NULL)
-        {
-            if (Z_TYPE_P(params) != IS_ARRAY)
-            {
-                throw std::runtime_error("The second argument to the select function must be an array");
-            }
+        std::vector<TypedParam> typed_params;
 
-            applyPlaceholders(sql_s, Z_ARRVAL_P(params));
+        if (params != NULL && Z_TYPE_P(params) == IS_ARRAY)
+        {
+            applyPlaceholders(sql_s, Z_ARRVAL_P(params), typed_params);
+        } else if (params != NULL && Z_TYPE_P(params) != IS_ARRAY) {
+            throw std::runtime_error("The second argument to the select function must be an array");
         }
+
+        Query query = qid.empty() ? Query(sql_s) : Query(sql_s, qid);
+        attachTypedParams(query, typed_params);
+        applyMergedSettings(query, key, settings);
+        resetStats(key);
+        attachProgressAndProfile(query, key);
 
         if (!(fetch_mode & SC_FETCH_ONE)) {
             array_init(return_value);
         }
 
-        std::string qid = (query_id && l_query_id > 0) ? std::string(query_id, l_query_id) : std::string();
         // Track whether FETCH_ONE has already emitted a row, so a multi-
         // block result returns the very first row and not the first row
         // of the last block.
         bool fetched_one = false;
-        auto select_cb = [return_value, fetch_mode, &fetched_one](const Block &block) {
+        query.OnData([return_value, fetch_mode, &fetched_one](const Block &block) {
             if (fetch_mode & SC_FETCH_ONE) {
                 if (!fetched_one && block.GetRowCount() > 0 && block.GetColumnCount() > 0) {
                     convertToZval(return_value, block[0], 0, "", 0, fetch_mode);
@@ -777,21 +1231,25 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, select)
                 }
                 add_next_index_zval(return_value, return_tmp);
             }
-        };
-        if (!qid.empty()) {
-            client->Select(sql_s, qid, select_cb);
-        } else {
-            client->Select(sql_s, select_cb);
-        }
+        });
+
+        auto t0 = std::chrono::steady_clock::now();
+        client->Select(query);
+        auto t1 = std::chrono::steady_clock::now();
+        clientStats[key].elapsed_ms =
+            std::chrono::duration<double, std::milli>(t1 - t0).count();
+        recordQuerySuccess(key, sql_s, qid);
     }
     catch (const std::exception& e)
     {
-        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, sanitizeError(e.what()).c_str(), 0);
+        int key = Z_OBJ_HANDLE(*getThis());
+        recordQueryError(key, std::string(sql, l_sql), qid, e);
+        throwClickHouseError(e, qid);
     }
 }
 /* }}} */
 
-/* {{{ proto array insert(string table, array columns, array values)
+/* {{{ proto array insert(string table, array columns, array values, string query_id, array settings)
  */
 PHP_METHOD(CLICKHOUSE_RES_NAME, insert)
 {
@@ -801,13 +1259,15 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, insert)
     zval *values;
     char *query_id = NULL;
     size_t l_query_id = 0;
+    zval *settings = NULL;
 
     string sql;
 
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "szz|s", &table, &l_table, &columns, &values, &query_id, &l_query_id) == FAILURE)
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "szz|sa", &table, &l_table, &columns, &values, &query_id, &l_query_id, &settings) == FAILURE)
     {
         return;
     }
+    std::string qid = (query_id && l_query_id > 0) ? std::string(query_id, l_query_id) : std::string();
 
     // Storage for return_should lives in the function frame so that an
     // exception thrown by BeginInsert / SendInsertBlock / EndInsert can
@@ -871,9 +1331,11 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, insert)
 
         getInsertSql(&sql, table, columns);
 
-        Block blockQuery = (query_id && l_query_id > 0)
-            ? client->BeginInsert(sql, std::string(query_id, l_query_id))
-            : client->BeginInsert(sql);
+        Query insertQuery = qid.empty() ? Query(sql) : Query(sql, qid);
+        applyMergedSettings(insertQuery, key, settings);
+        resetStats(key);
+        attachProgressAndProfile(insertQuery, key);
+        Block blockQuery = client->BeginInsert(insertQuery);
 
         Block blockInsert;
         size_t index = 0;
@@ -885,8 +1347,13 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, insert)
         }
         ZEND_HASH_FOREACH_END();
 
+        auto t0 = std::chrono::steady_clock::now();
         client->SendInsertBlock(blockInsert);
         client->EndInsert();
+        auto t1 = std::chrono::steady_clock::now();
+        clientStats[key].elapsed_ms =
+            std::chrono::duration<double, std::milli>(t1 - t0).count();
+        recordQuerySuccess(key, sql, qid);
         sc_zval_ptr_dtor(&return_should);
         return_should = NULL;
     }
@@ -898,13 +1365,15 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, insert)
         if (return_should) {
             sc_zval_ptr_dtor(&return_should);
         }
-        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, sanitizeError(e.what()).c_str(), 0);
+        int key = Z_OBJ_HANDLE(*getThis());
+        recordQueryError(key, sql, qid, e);
+        throwClickHouseError(e, qid);
     }
     RETURN_TRUE;
 }
 /* }}} */
 
-/* {{{ proto array insert(string table, array columns, array values)
+/* {{{ proto bool writeStart(string table, array columns, string query_id, array settings)
  */
 PHP_METHOD(CLICKHOUSE_RES_NAME, writeStart)
 {
@@ -913,13 +1382,15 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, writeStart)
     zval *columns;
     char *query_id = NULL;
     size_t l_query_id = 0;
+    zval *settings = NULL;
 
     string sql;
 
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "sz|s", &table, &l_table, &columns, &query_id, &l_query_id) == FAILURE)
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "sz|sa", &table, &l_table, &columns, &query_id, &l_query_id, &settings) == FAILURE)
     {
         return;
     }
+    std::string qid = (query_id && l_query_id > 0) ? std::string(query_id, l_query_id) : std::string();
 
     try
     {
@@ -933,15 +1404,20 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, writeStart)
 
         getInsertSql(&sql, table, columns);
 
-        Block blockQuery = (query_id && l_query_id > 0)
-            ? client->BeginInsert(sql, std::string(query_id, l_query_id))
-            : client->BeginInsert(sql);
+        Query insertQuery = qid.empty() ? Query(sql) : Query(sql, qid);
+        applyMergedSettings(insertQuery, key, settings);
+        resetStats(key);
+        attachProgressAndProfile(insertQuery, key);
+        Block blockQuery = client->BeginInsert(insertQuery);
 
         clientInsertBlock.insert(std::pair<int, Block>(key, blockQuery));
+        recordQuerySuccess(key, sql, qid);
     }
     catch (const std::exception& e)
     {
-        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, sanitizeError(e.what()).c_str(), 0);
+        int key = Z_OBJ_HANDLE(*getThis());
+        recordQueryError(key, sql, qid, e);
+        throwClickHouseError(e, qid);
     }
     RETURN_TRUE;
 }
@@ -1038,7 +1514,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, write)
         if (return_should) {
             sc_zval_ptr_dtor(&return_should);
         }
-        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, sanitizeError(e.what()).c_str(), 0);
+        throwClickHouseError(e);
     }
     RETURN_TRUE;
 }
@@ -1061,14 +1537,14 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, writeEnd)
     }
     catch (const std::exception& e)
     {
-        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, sanitizeError(e.what()).c_str(), 0);
+        throwClickHouseError(e);
         return;
     }
     RETURN_TRUE;
 }
 /* }}} */
 
-/* {{{ proto bool execute(string sql, array params)
+/* {{{ proto bool execute(string sql, array params, string query_id, array settings)
  */
 PHP_METHOD(CLICKHOUSE_RES_NAME, execute)
 {
@@ -1077,11 +1553,13 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, execute)
     zval* params = NULL;
     char *query_id = NULL;
     size_t l_query_id = 0;
+    zval *settings = NULL;
 
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "s|zs", &sql, &l_sql, &params, &query_id, &l_query_id) == FAILURE)
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "s|zsa", &sql, &l_sql, &params, &query_id, &l_query_id, &settings) == FAILURE)
     {
         return;
     }
+    std::string qid = (query_id && l_query_id > 0) ? std::string(query_id, l_query_id) : std::string();
 
     try
     {
@@ -1094,28 +1572,513 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, execute)
         }
 
         string sql_s = (string)sql;
-        if (ZEND_NUM_ARGS() > 1 && params != NULL)
+        std::vector<TypedParam> typed_params;
+
+        if (params != NULL && Z_TYPE_P(params) == IS_ARRAY)
         {
-            if (Z_TYPE_P(params) != IS_ARRAY)
-            {
-                throw std::runtime_error("The second argument to the select function must be an array");
-            }
-
-            applyPlaceholders(sql_s, Z_ARRVAL_P(params));
+            applyPlaceholders(sql_s, Z_ARRVAL_P(params), typed_params);
+        } else if (params != NULL && Z_TYPE_P(params) != IS_ARRAY) {
+            throw std::runtime_error("The second argument to execute must be an array");
         }
 
-        if (query_id && l_query_id > 0) {
-            client->Execute(Query(sql_s, std::string(query_id, l_query_id)));
-        } else {
-            client->Execute(sql_s);
-        }
+        Query query = qid.empty() ? Query(sql_s) : Query(sql_s, qid);
+        attachTypedParams(query, typed_params);
+        applyMergedSettings(query, key, settings);
+        resetStats(key);
+        attachProgressAndProfile(query, key);
 
+        auto t0 = std::chrono::steady_clock::now();
+        client->Execute(query);
+        auto t1 = std::chrono::steady_clock::now();
+        clientStats[key].elapsed_ms =
+            std::chrono::duration<double, std::milli>(t1 - t0).count();
+        recordQuerySuccess(key, sql_s, qid);
     }
     catch (const std::exception& e)
     {
-        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, sanitizeError(e.what()).c_str(), 0);
+        int key = Z_OBJ_HANDLE(*getThis());
+        recordQueryError(key, std::string(sql, l_sql), qid, e);
+        throwClickHouseError(e, qid);
     }
     RETURN_TRUE;
+}
+/* }}} */
+
+/* {{{ proto bool setSettings(array settings)
+ *
+ * Replace the client-wide settings map. Per-call settings supplied to
+ * select/insert/execute/writeStart override these. Pass an empty array
+ * to clear.
+ */
+PHP_METHOD(CLICKHOUSE_RES_NAME, setSettings)
+{
+    zval *arr;
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "a", &arr) == FAILURE) {
+        return;
+    }
+    int key = Z_OBJ_HANDLE(*getThis());
+    std::unordered_map<std::string, std::string> m;
+    HashTable *ht = Z_ARRVAL_P(arr);
+    zval *vz;
+    zend_string *zk;
+    zend_ulong nk;
+    ZEND_HASH_FOREACH_KEY_VAL(ht, nk, zk, vz) {
+        (void)nk;
+        if (!zk) continue;
+        m[std::string(ZSTR_VAL(zk), ZSTR_LEN(zk))] = formatScalarParam(vz);
+    } ZEND_HASH_FOREACH_END();
+    clientSettings[key] = std::move(m);
+    RETURN_TRUE;
+}
+/* }}} */
+
+/* {{{ proto bool setProgressCallback(?callable callback)
+ *
+ * Register a callable invoked for each Progress packet the server
+ * sends during select/execute. Pass null to remove. Callback receives
+ * a single associative array: rows, bytes, total_rows, written_rows,
+ * written_bytes.
+ */
+PHP_METHOD(CLICKHOUSE_RES_NAME, setProgressCallback)
+{
+    zval *cb;
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "z", &cb) == FAILURE) {
+        return;
+    }
+    int key = Z_OBJ_HANDLE(*getThis());
+
+    auto it = clientProgressCb.find(key);
+    if (it != clientProgressCb.end()) {
+        zval old = it->second;
+        clientProgressCb.erase(it);
+        zval_ptr_dtor(&old);
+    }
+
+    if (Z_TYPE_P(cb) == IS_NULL) {
+        RETURN_TRUE;
+    }
+    if (!zend_is_callable(cb, 0, NULL)) {
+        zend_throw_exception(clickhouse_exception_ce,
+            "setProgressCallback expects a callable or null", 0);
+        return;
+    }
+    Z_TRY_ADDREF_P(cb);
+    clientProgressCb[key] = *cb;
+    RETURN_TRUE;
+}
+/* }}} */
+
+/* {{{ proto array getStatistics()
+ *
+ * Return the rows / bytes / time recorded for the last completed
+ * select / execute / insert. Reset on every query.
+ */
+PHP_METHOD(CLICKHOUSE_RES_NAME, getStatistics)
+{
+    int key = Z_OBJ_HANDLE(*getThis());
+    array_init(return_value);
+    auto it = clientStats.find(key);
+    ClientStats st = (it != clientStats.end()) ? it->second : ClientStats();
+    add_assoc_long(return_value, "rows_read", (zend_long)st.rows_read);
+    add_assoc_long(return_value, "bytes_read", (zend_long)st.bytes_read);
+    add_assoc_long(return_value, "total_rows", (zend_long)st.total_rows);
+    add_assoc_long(return_value, "written_rows", (zend_long)st.written_rows);
+    add_assoc_long(return_value, "written_bytes", (zend_long)st.written_bytes);
+    add_assoc_long(return_value, "blocks", (zend_long)st.blocks);
+    add_assoc_long(return_value, "rows_before_limit", (zend_long)st.rows_before_limit);
+    add_assoc_bool(return_value, "applied_limit", st.applied_limit ? 1 : 0);
+    add_assoc_double(return_value, "elapsed_ms", st.elapsed_ms);
+}
+/* }}} */
+
+/* {{{ proto bool insertAssoc(string table, array rows, string query_id, array settings)
+ *
+ * Convenience wrapper over insert(): derives the column list from the
+ * keys of the first row, then forwards to insert(). All rows must share
+ * the same key set (positional alignment is by first-row key order).
+ */
+PHP_METHOD(CLICKHOUSE_RES_NAME, insertAssoc)
+{
+    char *table = NULL;
+    size_t l_table = 0;
+    zval *rows;
+    char *query_id = NULL;
+    size_t l_query_id = 0;
+    zval *settings = NULL;
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "sz|sa", &table, &l_table, &rows, &query_id, &l_query_id, &settings) == FAILURE) {
+        return;
+    }
+    std::string qid = (query_id && l_query_id > 0) ? std::string(query_id, l_query_id) : std::string();
+
+    try {
+        if (Z_TYPE_P(rows) != IS_ARRAY) {
+            throw std::runtime_error("insertAssoc: rows must be an array");
+        }
+        HashTable *rows_ht = Z_ARRVAL_P(rows);
+        if (zend_hash_num_elements(rows_ht) == 0) {
+            throw std::runtime_error("insertAssoc: rows is empty");
+        }
+        zval *first = NULL;
+        {
+            zval *fz;
+            ZEND_HASH_FOREACH_VAL(rows_ht, fz) {
+                first = fz;
+                break;
+            } ZEND_HASH_FOREACH_END();
+        }
+        if (!first || Z_TYPE_P(first) != IS_ARRAY) {
+            throw std::runtime_error("insertAssoc: each row must be an associative array");
+        }
+
+        zval columns_zv, values_zv;
+        array_init(&columns_zv);
+        array_init(&values_zv);
+
+        std::vector<std::string> col_order;
+        zval *fv;
+        zend_string *fk;
+        zend_ulong fnk;
+        ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL_P(first), fnk, fk, fv) {
+            (void)fv;
+            (void)fnk;
+            if (!fk) {
+                zval_ptr_dtor(&columns_zv);
+                zval_ptr_dtor(&values_zv);
+                throw std::runtime_error("insertAssoc: each row must have string keys (column names)");
+            }
+            col_order.emplace_back(ZSTR_VAL(fk), ZSTR_LEN(fk));
+            add_next_index_stringl(&columns_zv, ZSTR_VAL(fk), ZSTR_LEN(fk));
+        } ZEND_HASH_FOREACH_END();
+
+        zval *row_zv;
+        ZEND_HASH_FOREACH_VAL(rows_ht, row_zv) {
+            if (Z_TYPE_P(row_zv) != IS_ARRAY) {
+                zval_ptr_dtor(&columns_zv);
+                zval_ptr_dtor(&values_zv);
+                throw std::runtime_error("insertAssoc: each row must be an associative array");
+            }
+            zval row_out;
+            array_init(&row_out);
+            for (const std::string &col : col_order) {
+                zval *cell = sc_zend_hash_find(Z_ARRVAL_P(row_zv), (char*)col.c_str(), col.size());
+                if (!cell) {
+                    zval_ptr_dtor(&row_out);
+                    zval_ptr_dtor(&columns_zv);
+                    zval_ptr_dtor(&values_zv);
+                    throw std::runtime_error(
+                        "insertAssoc: row is missing key '" + col + "'");
+                }
+                Z_TRY_ADDREF_P(cell);
+                add_next_index_zval(&row_out, cell);
+            }
+            add_next_index_zval(&values_zv, &row_out);
+        } ZEND_HASH_FOREACH_END();
+
+        /* Forward to insert() by call_user_function so we get exactly
+         * the same code path (validation, settings merge, stats, etc.)
+         * and keep this wrapper a thin layer. */
+        zval method, args[5], retval;
+        ZVAL_STRING(&method, "insert");
+        ZVAL_STRINGL(&args[0], table, l_table);
+        ZVAL_COPY_VALUE(&args[1], &columns_zv);
+        ZVAL_COPY_VALUE(&args[2], &values_zv);
+        if (!qid.empty()) {
+            ZVAL_STRINGL(&args[3], qid.c_str(), qid.size());
+        } else {
+            ZVAL_EMPTY_STRING(&args[3]);
+        }
+        if (settings) {
+            ZVAL_COPY_VALUE(&args[4], settings);
+            Z_TRY_ADDREF_P(settings);
+        } else {
+            array_init(&args[4]);
+        }
+        ZVAL_NULL(&retval);
+        int n = settings ? 5 : 5;
+        call_user_function(NULL, getThis(), &method, &retval, n, args);
+        zval_ptr_dtor(&method);
+        zval_ptr_dtor(&args[0]);
+        zval_ptr_dtor(&args[1]);
+        zval_ptr_dtor(&args[2]);
+        zval_ptr_dtor(&args[3]);
+        zval_ptr_dtor(&args[4]);
+        if (EG(exception)) {
+            zval_ptr_dtor(&retval);
+            return;
+        }
+        zval_ptr_dtor(&retval);
+    } catch (const std::exception &e) {
+        throwClickHouseError(e, qid);
+        return;
+    }
+    RETURN_TRUE;
+}
+/* }}} */
+
+/*
+ * SQL-helper one-liners. Each builds a small SELECT and reuses the
+ * select() machinery via call_user_function so settings, progress,
+ * and stats also apply to these.
+ */
+static void runHelperSelect(zval *return_value, zval *this_obj, const std::string &sql, zend_long fetch_mode)
+{
+    zval method, args[3], retval;
+    ZVAL_STRING(&method, "select");
+    ZVAL_STRINGL(&args[0], sql.c_str(), sql.size());
+    array_init(&args[1]);
+    ZVAL_LONG(&args[2], fetch_mode);
+    ZVAL_NULL(&retval);
+    call_user_function(NULL, this_obj, &method, &retval, 3, args);
+    zval_ptr_dtor(&method);
+    zval_ptr_dtor(&args[0]);
+    zval_ptr_dtor(&args[1]);
+    if (EG(exception)) {
+        zval_ptr_dtor(&retval);
+        return;
+    }
+    ZVAL_COPY_VALUE(return_value, &retval);
+}
+
+static std::string currentDatabase(zval *this_obj)
+{
+    zval *db = sc_zend_read_property(clickhouse_ce, this_obj, "database", sizeof("database") - 1, 0);
+    if (db && Z_TYPE_P(db) == IS_STRING) {
+        return std::string(Z_STRVAL_P(db), Z_STRLEN_P(db));
+    }
+    return std::string("default");
+}
+
+/*
+ * Return the first row of a helper result as an assoc array, or
+ * an empty array if there were no rows.
+ */
+static void runHelperSelectFirstRow(zval *return_value, zval *this_obj, const std::string &sql)
+{
+    zval rows;
+    runHelperSelect(&rows, this_obj, sql, 0);
+    if (EG(exception)) {
+        return;
+    }
+    if (Z_TYPE(rows) == IS_ARRAY && zend_hash_num_elements(Z_ARRVAL(rows)) > 0) {
+        zval *first = NULL;
+        zval *fz;
+        ZEND_HASH_FOREACH_VAL(Z_ARRVAL(rows), fz) {
+            first = fz;
+            break;
+        } ZEND_HASH_FOREACH_END();
+        if (first && Z_TYPE_P(first) == IS_ARRAY) {
+            ZVAL_COPY(return_value, first);
+            zval_ptr_dtor(&rows);
+            return;
+        }
+    }
+    array_init(return_value);
+    zval_ptr_dtor(&rows);
+}
+
+/* {{{ proto array databaseSize(?string database)
+ */
+PHP_METHOD(CLICKHOUSE_RES_NAME, databaseSize)
+{
+    char *db = NULL;
+    size_t l_db = 0;
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "|s!", &db, &l_db) == FAILURE) {
+        return;
+    }
+    std::string dbname = (db && l_db > 0) ? std::string(db, l_db) : currentDatabase(getThis());
+    try {
+        validateIdentifier(dbname.c_str(), dbname.size(), "database name", false);
+    } catch (const std::exception &e) {
+        throwClickHouseError(e);
+        return;
+    }
+    std::string sql =
+        "SELECT sum(bytes_on_disk) AS bytes_on_disk, sum(rows) AS rows "
+        "FROM system.parts WHERE active AND database = '" + dbname + "'";
+    runHelperSelectFirstRow(return_value, getThis(), sql);
+}
+/* }}} */
+
+/* {{{ proto array tablesSize(?string database)
+ */
+PHP_METHOD(CLICKHOUSE_RES_NAME, tablesSize)
+{
+    char *db = NULL;
+    size_t l_db = 0;
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "|s!", &db, &l_db) == FAILURE) {
+        return;
+    }
+    std::string dbname = (db && l_db > 0) ? std::string(db, l_db) : currentDatabase(getThis());
+    try {
+        validateIdentifier(dbname.c_str(), dbname.size(), "database name", false);
+    } catch (const std::exception &e) {
+        throwClickHouseError(e);
+        return;
+    }
+    std::string sql =
+        "SELECT table, sum(bytes_on_disk) AS bytes_on_disk, sum(rows) AS rows, "
+        "max(modification_time) AS modification_time "
+        "FROM system.parts WHERE active AND database = '" + dbname + "' "
+        "GROUP BY table ORDER BY table";
+    runHelperSelect(return_value, getThis(), sql, 0);
+}
+/* }}} */
+
+/* {{{ proto array partitions(string table)
+ */
+PHP_METHOD(CLICKHOUSE_RES_NAME, partitions)
+{
+    char *table = NULL;
+    size_t l_table = 0;
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "s", &table, &l_table) == FAILURE) {
+        return;
+    }
+    std::string tname(table, l_table);
+    std::string dbname = currentDatabase(getThis());
+    /* Allow `db.table` in the argument; split on the dot. */
+    auto dot = tname.find('.');
+    if (dot != std::string::npos) {
+        dbname = tname.substr(0, dot);
+        tname = tname.substr(dot + 1);
+    }
+    try {
+        validateIdentifier(dbname.c_str(), dbname.size(), "database name", false);
+        validateIdentifier(tname.c_str(), tname.size(), "table name", false);
+    } catch (const std::exception &e) {
+        throwClickHouseError(e);
+        return;
+    }
+    std::string sql =
+        "SELECT partition, count() AS parts, sum(rows) AS rows, "
+        "sum(bytes_on_disk) AS bytes_on_disk, "
+        "min(min_time) AS min_time, max(max_time) AS max_time "
+        "FROM system.parts WHERE active AND database = '" + dbname + "' "
+        "AND table = '" + tname + "' "
+        "GROUP BY partition ORDER BY partition";
+    runHelperSelect(return_value, getThis(), sql, 0);
+}
+/* }}} */
+
+/* {{{ proto array showTables(?string database, ?string like)
+ */
+PHP_METHOD(CLICKHOUSE_RES_NAME, showTables)
+{
+    char *db = NULL, *like = NULL;
+    size_t l_db = 0, l_like = 0;
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "|s!s!", &db, &l_db, &like, &l_like) == FAILURE) {
+        return;
+    }
+    std::string dbname = (db && l_db > 0) ? std::string(db, l_db) : currentDatabase(getThis());
+    try {
+        validateIdentifier(dbname.c_str(), dbname.size(), "database name", false);
+    } catch (const std::exception &e) {
+        throwClickHouseError(e);
+        return;
+    }
+    std::string sql = "SELECT name FROM system.tables WHERE database = '" + dbname + "'";
+    if (like && l_like > 0) {
+        /* Validate the LIKE pattern against the same character set as
+         * placeholder values: identifier chars plus % and _ would be the
+         * minimum, but we already reject quotes/backslashes there so
+         * the only addition is %. */
+        for (size_t i = 0; i < l_like; ++i) {
+            unsigned char c = (unsigned char)like[i];
+            bool ok =
+                (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                (c >= '0' && c <= '9') ||
+                c == '_' || c == '.' || c == '%';
+            if (!ok) {
+                zend_throw_exception(clickhouse_exception_ce,
+                    "showTables: LIKE pattern contains an unsafe character", 0);
+                return;
+            }
+        }
+        sql += " AND name LIKE '" + std::string(like, l_like) + "'";
+    }
+    sql += " ORDER BY name";
+    runHelperSelect(return_value, getThis(), sql, SC_FETCH_COLUMN);
+}
+/* }}} */
+
+/* {{{ proto string showCreateTable(string table)
+ */
+PHP_METHOD(CLICKHOUSE_RES_NAME, showCreateTable)
+{
+    char *table = NULL;
+    size_t l_table = 0;
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "s", &table, &l_table) == FAILURE) {
+        return;
+    }
+    std::string tname(table, l_table);
+    try {
+        validateIdentifier(tname.c_str(), tname.size(), "table name", true);
+    } catch (const std::exception &e) {
+        throwClickHouseError(e);
+        return;
+    }
+    std::string sql = "SHOW CREATE TABLE " + tname;
+    runHelperSelect(return_value, getThis(), sql, SC_FETCH_ONE | SC_FETCH_COLUMN);
+}
+/* }}} */
+
+/* {{{ proto int getServerUptime()
+ */
+PHP_METHOD(CLICKHOUSE_RES_NAME, getServerUptime)
+{
+    runHelperSelect(return_value, getThis(),
+        "SELECT uptime() AS uptime",
+        SC_FETCH_ONE | SC_FETCH_COLUMN);
+}
+/* }}} */
+
+/* {{{ proto bool enableLogQueries(bool enabled = true)
+ *
+ * Toggle the query log accumulator. While enabled, each completed
+ * select / insert / execute / writeStart appends an entry. Toggling
+ * off does NOT clear; getLogQueries() returns and clears.
+ */
+PHP_METHOD(CLICKHOUSE_RES_NAME, enableLogQueries)
+{
+    zend_bool enabled = 1;
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "|b", &enabled) == FAILURE) {
+        return;
+    }
+    int key = Z_OBJ_HANDLE(*getThis());
+    clientLogEnabled[key] = (enabled != 0);
+    RETURN_TRUE;
+}
+/* }}} */
+
+/* {{{ proto array getLogQueries()
+ *
+ * Return all accumulated query log entries and clear the buffer. Each
+ * entry is an associative array: sql, query_id, elapsed_ms, rows_read,
+ * bytes_read, error_code (0 = success, server code on server error,
+ * -1 on client/network error), error_message.
+ */
+PHP_METHOD(CLICKHOUSE_RES_NAME, getLogQueries)
+{
+    int key = Z_OBJ_HANDLE(*getThis());
+    array_init(return_value);
+    auto it = clientLog.find(key);
+    if (it == clientLog.end()) {
+        return;
+    }
+    for (const auto &ql : it->second) {
+        zval entry;
+        array_init(&entry);
+        add_assoc_stringl(&entry, "sql", (char*)ql.sql.c_str(), ql.sql.size());
+        add_assoc_stringl(&entry, "query_id", (char*)ql.query_id.c_str(), ql.query_id.size());
+        add_assoc_double(&entry, "elapsed_ms", ql.elapsed_ms);
+        add_assoc_long(&entry, "rows_read", (zend_long)ql.rows_read);
+        add_assoc_long(&entry, "bytes_read", (zend_long)ql.bytes_read);
+        add_assoc_long(&entry, "error_code", (zend_long)ql.error_code);
+        add_assoc_stringl(&entry, "error_message",
+            (char*)ql.error_message.c_str(), ql.error_message.size());
+        add_next_index_zval(return_value, &entry);
+    }
+    it->second.clear();
 }
 /* }}} */
 
@@ -1127,6 +2090,18 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, __destruct)
     auto it = clientMap.find(key);
     if (it == clientMap.end()) {
         // __construct never inserted (failed connect, etc). Nothing to clean.
+        // Other per-object maps may still hold entries from setSettings /
+        // setProgressCallback called pre-destruct on a half-built object.
+        clientStats.erase(key);
+        clientSettings.erase(key);
+        clientLogEnabled.erase(key);
+        clientLog.erase(key);
+        auto cbit = clientProgressCb.find(key);
+        if (cbit != clientProgressCb.end()) {
+            zval old = cbit->second;
+            clientProgressCb.erase(cbit);
+            zval_ptr_dtor(&old);
+        }
         RETURN_TRUE;
     }
     Client *client = it->second;
@@ -1141,6 +2116,16 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, __destruct)
 
     delete client;
     clientMap.erase(key);
+    clientStats.erase(key);
+    clientSettings.erase(key);
+    clientLogEnabled.erase(key);
+    clientLog.erase(key);
+    auto cbit = clientProgressCb.find(key);
+    if (cbit != clientProgressCb.end()) {
+        zval old = cbit->second;
+        clientProgressCb.erase(cbit);
+        zval_ptr_dtor(&old);
+    }
     RETURN_TRUE;
 }
 /* }}} */

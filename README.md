@@ -158,8 +158,11 @@ All keys go in the array passed to `new ClickHouse([...])`.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `connect_timeout` | int (sec) | `5` | TCP connect deadline |
+| `connect_timeout_ms` | int (ms) | (none) | Sub-second connect deadline; overrides the seconds key when set |
 | `receive_timeout` | int (sec) | `0` | Read deadline (0 = no timeout) |
+| `receive_timeout_ms` | int (ms) | (none) | Sub-second read deadline; overrides the seconds key when set |
 | `send_timeout` | int (sec) | `0` | Write deadline |
+| `send_timeout_ms` | int (ms) | (none) | Sub-second write deadline; overrides the seconds key when set |
 | `retry_count` | int | `1` | Send retries on transient failure |
 | `retry_timeout` | int (sec) | `5` | Sleep between retries |
 | `tcp_nodelay` | bool | `true` | TCP_NODELAY |
@@ -188,30 +191,140 @@ Building without `--enable-clickhouse-openssl` and passing
 $ch = new ClickHouse(array $config);
 
 // Schema / DDL
-$ch->execute(string $sql, array $params = [], string $query_id = "");
+$ch->execute(string $sql,
+             array $params = [],
+             string $query_id = "",
+             array $settings = []);
 
 // Read
 $rows = $ch->select(string $sql,
                     array $params = [],
                     int $fetch_mode = 0,
-                    string $query_id = "");
+                    string $query_id = "",
+                    array $settings = []);
 
 // Bulk insert (entire dataset in one call)
 $ch->insert(string $table, array $columns, array $values,
-            string $query_id = "");
+            string $query_id = "",
+            array $settings = []);
+
+// Same as insert(), but rows are associative arrays and the column list
+// is derived from the first row's keys.
+$ch->insertAssoc(string $table, array $rows,
+                 string $query_id = "",
+                 array $settings = []);
 
 // Streaming insert (open block, append, close)
-$ch->writeStart(string $table, array $columns, string $query_id = "");
+$ch->writeStart(string $table, array $columns,
+                string $query_id = "",
+                array $settings = []);
 $ch->write(array $values);
 $ch->write(array $more_values);
 $ch->writeEnd();
 
 $ch->ping();          // returns true on success, throws on failure
+
+// Settings, observability, helpers
+$ch->setSettings(array $settings);     // client-wide; per-call overrides
+$ch->setProgressCallback(?callable $cb);
+$stats = $ch->getStatistics();         // last query: rows, bytes, elapsed_ms
+
+$ch->enableLogQueries(bool $enabled = true);
+$log = $ch->getLogQueries();           // returns and clears the buffer
+
+$ch->databaseSize(?string $database = null);     // {bytes_on_disk, rows}
+$ch->tablesSize(?string $database = null);
+$ch->partitions(string $table);
+$ch->showTables(?string $database = null, ?string $like = null);
+$ch->showCreateTable(string $table);
+$ch->getServerUptime();                // seconds
 ```
 
 `fetch_mode` is a bitmask of `ClickHouse::FETCH_ONE`,
 `ClickHouse::FETCH_KEY_PAIR`, `ClickHouse::FETCH_COLUMN`, and
 `ClickHouse::DATE_AS_STRINGS`.
+
+### Placeholders
+
+Two placeholder syntaxes are supported in `select` / `execute`:
+
+- `{name}` is client-side identifier substitution. The value is
+  validated against an identifier-and-numerics character set; quotes,
+  semicolons, backslashes, and other SQL meta-characters are rejected
+  before the SQL is built. Use this for table and column names.
+- `{name:Type}` is a server-side typed parameter. The SQL text is
+  passed through unchanged; the value is bound via `Query::SetParam`
+  and the server quotes and parses it according to `Type`. Pass PHP
+  arrays for `Array(T)` types; `null` becomes a server `NULL`.
+
+```php
+// Identifier substitution.
+$ch->select("SELECT * FROM {tbl}", ["tbl" => "users"]);
+
+// Server-side typed parameters, no client-side quoting needed.
+$ch->select("SELECT * FROM users WHERE id IN ({ids:Array(UInt32)})",
+            ["ids" => [1, 2, 3]]);
+```
+
+### Settings
+
+`setSettings()` applies client-wide. The 5th argument on `select` /
+`insert` / `execute` / `writeStart` overrides per call. Both accept
+plain `string => string` pairs; PHP scalars are stringified for you.
+
+```php
+$ch->setSettings(["max_execution_time" => "30"]);
+
+// Per-call override.
+$ch->select("SELECT * FROM big_table",
+            [], 0, "",
+            ["max_execution_time" => "5",
+             "max_memory_usage"   => "1000000000"]);
+```
+
+### Statistics and progress
+
+```php
+$ch->setProgressCallback(function (array $p) {
+    fprintf(STDERR, "rows=%d bytes=%d\n", $p["rows"], $p["bytes"]);
+});
+
+$ch->select("SELECT count() FROM big_table");
+
+$stats = $ch->getStatistics();
+// rows_read, bytes_read, total_rows, written_rows, written_bytes,
+// blocks, rows_before_limit, applied_limit, elapsed_ms
+```
+
+### Query log
+
+`enableLogQueries(true)` turns on a per-client buffer that records each
+completed `select` / `insert` / `execute` / `writeStart`. Each entry is
+`{sql, query_id, elapsed_ms, rows_read, bytes_read, error_code,
+error_message}`. `error_code` is `0` on success, the server error code
+on a `ServerException`, or `-1` on client/network failure.
+`getLogQueries()` returns the buffer and clears it.
+
+```php
+$ch->enableLogQueries(true);
+$ch->select("SELECT count() FROM users");
+$ch->insert("logins", ["user_id", "ts"], $batch);
+
+foreach ($ch->getLogQueries() as $q) {
+    fprintf(STDERR, "[%.1fms] %s\n", $q["elapsed_ms"], $q["sql"]);
+}
+```
+
+### Structured exceptions
+
+`ClickHouseException` carries three extra public properties:
+
+- `server_code` — ClickHouse error code (e.g. 159 = `TIMEOUT_EXCEEDED`).
+  `0` for client-side errors.
+- `server_name` — server-reported exception name (e.g.
+  `DB::Exception`). `null` for client-side errors.
+- `query_id` — the query id associated with the failed call, when one
+  was supplied. `null` otherwise.
 
 ## Benchmarks
 

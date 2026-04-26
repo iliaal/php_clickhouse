@@ -1228,6 +1228,10 @@ Block Client::BeginInsert(const std::string& query, const std::string& query_id)
     return impl_->BeginInsert(Query(query, query_id));
 }
 
+Block Client::BeginInsert(const Query& query) {
+    return impl_->BeginInsert(query);
+}
+
 void Client::SendInsertBlock(const Block& block) {
     impl_->SendInsertBlock(block);
 }
