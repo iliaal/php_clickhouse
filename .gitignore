@@ -60,6 +60,10 @@ run-tests.php
 modules/
 # Windows build script (kept tracked)
 
-# Project-local tooling — not for distribution
-CLAUDE.md
+# local AI tooling: per-developer scaffolding, not checked in
 .claude/
+AGENTS.md
+CLAUDE.md
+
+# editor backups
+*~
