@@ -1,0 +1,26 @@
+# Read by /release-ext. Schema documented in ~/.claude/commands/release-ext.md.
+
+extension: clickhouse
+version_macro: PHP_CLICKHOUSE_VERSION
+version_file: php_clickhouse.h
+repo: iliaal/php_clickhouse
+build_matrix:
+  - PHP-8.3
+  - PHP-8.4
+  - PHP-8.5
+configure_base: "--enable-clickhouse"
+
+pre_test:
+  - command: "docker ps | grep clickhouse-test"
+    on_fail: "Start the test container per README before releasing"
+
+test_env:
+  CLICKHOUSE_HOST: "127.0.0.1"
+  CLICKHOUSE_PORT: "9000"
+  CLICKHOUSE_USER: "test"
+  CLICKHOUSE_PASSWD: "test"
+
+extra_build_variants:
+  - name: "TLS variant"
+    configure: "--enable-clickhouse --enable-clickhouse-openssl"
+    php_version: PHP-8.4
