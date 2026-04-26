@@ -5,44 +5,32 @@
 [![License: PHP-3.01](https://img.shields.io/badge/License-PHP--3.01-green.svg)](http://www.php.net/license/3_01.txt)
 [![Follow @iliaa](https://img.shields.io/badge/Follow-@iliaa-000000?style=flat&logo=x&logoColor=white)](https://x.com/intent/follow?screen_name=iliaa)
 
-Native PHP extension for [ClickHouse](https://clickhouse.com/), built on
-the official [ClickHouse/clickhouse-cpp](https://github.com/ClickHouse/clickhouse-cpp)
-client. Connects over the binary TCP protocol with LZ4 / ZSTD compression
-and optional TLS.
+![php_clickhouse: native binary protocol vs HTTP](images/php_clickhouse-hero.jpg)
 
-## Status
+Native PHP extension for [ClickHouse](https://clickhouse.com/), built on the official [ClickHouse/clickhouse-cpp](https://github.com/ClickHouse/clickhouse-cpp) v2.6.1 client. Speaks the native binary TCP protocol with LZ4 / ZSTD compression and optional TLS, picking up where [SeasX/SeasClick](https://github.com/SeasX/SeasClick) left off in 2020. 30-40% faster than HTTP-based clients on heavy workloads, with modern types (Date32, Time64, Decimal128, LowCardinality, Map), multi-endpoint failover, and structured exceptions.
 
-Soft fork of [SeasX/SeasClick](https://github.com/SeasX/SeasClick), which
-appears unmaintained. The last accepted external PR there is from 2020,
-and several follow-up PRs have been pending for years. This fork:
+## Why this fork?
 
-- Renames the extension to `php_clickhouse` (module `clickhouse`,
-  classes `ClickHouse` / `ClickHouseException`)
-- Upgrades the vendored client from artpaul-fork v1.x to the official
-  ClickHouse/clickhouse-cpp v2.6.1
-- Adds Date32 / Time / Time64 / DateTime64 / Int128 / UInt128 /
-  Decimal128 / LowCardinality / Map column types, multi-endpoint
-  failover, ZSTD compression, query_id propagation, and TLS
+[SeasX/SeasClick](https://github.com/SeasX/SeasClick) was the canonical native PHP ClickHouse extension and stopped accepting PRs in 2020. Several follow-up PRs there have been pending for years. This fork:
+
+- Renames the extension to `php_clickhouse` (module `clickhouse`, classes `ClickHouse` / `ClickHouseException`)
+- Upgrades the vendored client from artpaul-fork v1.x to the official ClickHouse/clickhouse-cpp v2.6.1
+- Adds Date32 / Time / Time64 / DateTime64 / Int128 / UInt128 / Decimal128 / LowCardinality / Map column types, multi-endpoint failover, ZSTD compression, query_id propagation, and TLS
 - Ships an updated test suite, CI, PIE-based packaging, and benchmarks
 
-The original `SeasClick` and `SeasClickException` class names continue
-to work as deprecated aliases.
+The original `SeasClick` and `SeasClickException` class names continue to work as deprecated aliases.
 
-Method signatures, return types, and class properties are declared with
-PHP types via a stub-driven arginfo workflow (`clickhouse.stub.php` →
-`clickhouse_arginfo.h`). Reflection, IDE completion, and static analyzers
-(PHPStan, Psalm) see the typed surface without manual stubs.
+Method signatures, return types, and class properties are declared with PHP types via a stub-driven arginfo workflow (`clickhouse.stub.php` → `clickhouse_arginfo.h`). Reflection, IDE completion, and static analyzers (PHPStan, Psalm) see the typed surface without manual stubs.
 
-## Install
+## 🚀 Install
 
-via [PIE](https://github.com/php/pie) (the PHP Foundation's PECL
-successor):
+Via [PIE](https://github.com/php/pie) (the PHP Foundation's PECL successor):
 
 ```sh
 pie install iliaal/php_clickhouse
 ```
 
-with TLS support:
+With TLS support:
 
 ```sh
 pie install iliaal/php_clickhouse --enable-clickhouse-openssl
@@ -61,18 +49,13 @@ phpize
 make && sudo make install
 ```
 
-Add `extension=clickhouse.so` to your `php.ini`. The build needs a
-C++17-capable compiler (GCC 8+, Clang 7+); LZ4, ZSTD, abseil-int128,
-and CityHash are vendored under `lib/clickhouse-cpp/contrib/`.
+Add `extension=clickhouse.so` to your `php.ini`. The build needs a C++17-capable compiler (GCC 8+, Clang 7+); LZ4, ZSTD, abseil-int128, and CityHash are vendored under `lib/clickhouse-cpp/contrib/`.
 
-Only NTS PHP builds are supported. The extension stores Client state
-in process-global maps; under ZTS the same handle space is shared
-across worker threads, so the wrapper refuses to load.
+Only NTS PHP builds are supported. The extension stores Client state in process-global maps; under ZTS the same handle space is shared across worker threads, so the wrapper refuses to load.
 
 ### Test server
 
-For development and integration tests, the simplest path is the
-official ClickHouse server image:
+For development and integration tests, the simplest path is the official ClickHouse server image:
 
 ```sh
 docker run -d --name clickhouse-test \
@@ -85,7 +68,7 @@ docker run -d --name clickhouse-test \
 
 Stop and clean up: `docker rm -f clickhouse-test`.
 
-## Quick example
+## 🛠️ Quick example
 
 ```php
 <?php
@@ -113,24 +96,20 @@ foreach ($ch->select("SELECT id, ts, tag FROM events ORDER BY id",
 }
 ```
 
-## Supported data types
+## 📦 Supported data types
 
 * `Array(T)` (single-level)
 * `Date`, `Date32`, `DateTime`, `DateTime64(N[, timezone])`
 * `Time`, `Time64(N)` (server side requires ClickHouse 25.x or later)
-* `Decimal`, `Decimal32`, `Decimal64`, `Decimal128(P, S)` (read/write
-  as scaled-integer strings)
+* `Decimal`, `Decimal32`, `Decimal64`, `Decimal128(P, S)` (read/write as scaled-integer strings)
 * `Enum8`, `Enum16`
 * `FixedString(N)`
 * `Float32`, `Float64`
 * `Int8` … `Int64`, `UInt8` … `UInt64`
-* `Int128`, `UInt128` (round-trip as decimal strings; PHP integers
-  are 64-bit)
+* `Int128`, `UInt128` (round-trip as decimal strings; PHP integers are 64-bit)
 * `IPv4`, `IPv6`
 * `LowCardinality(String)`, `LowCardinality(FixedString(N))`
-* `Map(K, V)` for `(String, String)`, `(String, Int64)`,
-  `(String, UInt64)`, `(String, Float64)`, `(Int64, String)`. Other K/V
-  pairs are read-only via the lib's generic factory.
+* `Map(K, V)` for `(String, String)`, `(String, Int64)`, `(String, UInt64)`, `(String, Float64)`, `(Int64, String)`. Other K/V pairs are read-only via the lib's generic factory.
 * `Nullable(T)`
 * `String`
 * `Tuple` (read-only)
@@ -187,8 +166,7 @@ All keys go in the array passed to `new ClickHouse([...])`.
 | `ssl_ca_files` | string \| array | (none) | PEM CA file path(s) |
 | `ssl_ca_directory` | string | (none) | OpenSSL hashed-cert directory |
 
-Building without `--enable-clickhouse-openssl` and passing
-`ssl => true` raises `ClickHouseException` at construct time.
+Building without `--enable-clickhouse-openssl` and passing `ssl => true` raises `ClickHouseException` at construct time.
 
 ## Methods
 
@@ -245,22 +223,14 @@ $ch->showCreateTable(string $table);
 $ch->getServerUptime();                // seconds
 ```
 
-`fetch_mode` is a bitmask of `ClickHouse::FETCH_ONE`,
-`ClickHouse::FETCH_KEY_PAIR`, `ClickHouse::FETCH_COLUMN`, and
-`ClickHouse::DATE_AS_STRINGS`.
+`fetch_mode` is a bitmask of `ClickHouse::FETCH_ONE`, `ClickHouse::FETCH_KEY_PAIR`, `ClickHouse::FETCH_COLUMN`, and `ClickHouse::DATE_AS_STRINGS`.
 
 ### Placeholders
 
 Two placeholder syntaxes are supported in `select` / `execute`:
 
-- `{name}` is client-side identifier substitution. The value is
-  validated against an identifier-and-numerics character set; quotes,
-  semicolons, backslashes, and other SQL meta-characters are rejected
-  before the SQL is built. Use this for table and column names.
-- `{name:Type}` is a server-side typed parameter. The SQL text is
-  passed through unchanged; the value is bound via `Query::SetParam`
-  and the server quotes and parses it according to `Type`. Pass PHP
-  arrays for `Array(T)` types; `null` becomes a server `NULL`.
+- `{name}` is client-side identifier substitution. The value is validated against an identifier-and-numerics character set; quotes, semicolons, backslashes, and other SQL meta-characters are rejected before the SQL is built. Use this for table and column names.
+- `{name:Type}` is a server-side typed parameter. The SQL text is passed through unchanged; the value is bound via `Query::SetParam` and the server quotes and parses it according to `Type`. Pass PHP arrays for `Array(T)` types; `null` becomes a server `NULL`.
 
 ```php
 // Identifier substitution.
@@ -273,9 +243,7 @@ $ch->select("SELECT * FROM users WHERE id IN ({ids:Array(UInt32)})",
 
 ### Settings
 
-`setSettings()` applies client-wide. The 5th argument on `select` /
-`insert` / `execute` / `writeStart` overrides per call. Both accept
-plain `string => string` pairs; PHP scalars are stringified for you.
+`setSettings()` applies client-wide. The 5th argument on `select` / `insert` / `execute` / `writeStart` overrides per call. Both accept plain `string => string` pairs; PHP scalars are stringified for you.
 
 ```php
 $ch->setSettings(["max_execution_time" => "30"]);
@@ -303,12 +271,7 @@ $stats = $ch->getStatistics();
 
 ### Query log
 
-`enableLogQueries(true)` turns on a per-client buffer that records each
-completed `select` / `insert` / `execute` / `writeStart`. Each entry is
-`{sql, query_id, elapsed_ms, rows_read, bytes_read, error_code,
-error_message}`. `error_code` is `0` on success, the server error code
-on a `ServerException`, or `-1` on client/network failure.
-`getLogQueries()` returns the buffer and clears it.
+`enableLogQueries(true)` turns on a per-client buffer that records each completed `select` / `insert` / `execute` / `writeStart`. Each entry is `{sql, query_id, elapsed_ms, rows_read, bytes_read, error_code, error_message}`. `error_code` is `0` on success, the server error code on a `ServerException`, or `-1` on client/network failure. `getLogQueries()` returns the buffer and clears it.
 
 ```php
 $ch->enableLogQueries(true);
@@ -324,24 +287,17 @@ foreach ($ch->getLogQueries() as $q) {
 
 `ClickHouseException` carries three extra public properties:
 
-- `server_code` — ClickHouse error code (e.g. 159 = `TIMEOUT_EXCEEDED`).
-  `0` for client-side errors.
-- `server_name` — server-reported exception name (e.g.
-  `DB::Exception`). `null` for client-side errors.
-- `query_id` — the query id associated with the failed call, when one
-  was supplied. `null` otherwise.
+- `server_code` — ClickHouse error code (e.g. 159 = `TIMEOUT_EXCEEDED`). `0` for client-side errors.
+- `server_name` — server-reported exception name (e.g. `DB::Exception`). `null` for client-side errors.
+- `query_id` — the query id associated with the failed call, when one was supplied. `null` otherwise.
 
-## Benchmarks
+## 📊 Benchmarks
 
-PHP 8.4.22 / ClickHouse 26.3.9.8 / localhost loopback / `Memory` table
-(no disk).
+PHP 8.4.22 / ClickHouse 26.3.9.8 / localhost loopback / `Memory` table (no disk).
 
-Compared against
-[smi2/phpClickHouse](https://github.com/smi2/phpClickHouse), the
-most popular pure-PHP HTTP client.
+Compared against [smi2/phpClickHouse](https://github.com/smi2/phpClickHouse), the most popular pure-PHP HTTP client.
 
-Each cell is total wall-clock seconds for `selectCount` queries plus
-a single bulk insert of `dataCount` rows.
+Each cell is total wall-clock seconds for `selectCount` queries plus a single bulk insert of `dataCount` rows.
 
 | dataCount × selectCount × limit | phpClickHouse (HTTP) | php_clickhouse (uncompressed) | php_clickhouse (LZ4) | php_clickhouse (ZSTD) |
 |---|---:|---:|---:|---:|
@@ -356,34 +312,35 @@ a single bulk insert of `dataCount` rows.
 | 1000 × 800 × 500   | 2.477 | 1.533 | 1.569 | 1.543 |
 | 1000 × 800 × 1000  | 2.498 | 1.588 | 1.563 | 1.519 |
 
-At high select counts the native binary protocol runs 30-40% faster
-than the HTTP client. On small bursts (`dataCount=10000,
-selectCount=1`), php_clickhouse with ZSTD or LZ4 is fastest. To
-reproduce, see [`bench/`](bench/).
+At high select counts the native binary protocol runs 30-40% faster than the HTTP client. On small bursts (`dataCount=10000, selectCount=1`), php_clickhouse with ZSTD or LZ4 is fastest. To reproduce, see [`bench/`](bench/).
+
+## 🔗 PHP Performance Toolkit
+
+Companion native PHP extensions for high-throughput PHP workloads:
+
+- **[php_excel](https://github.com/iliaal/php_excel)** — Native Excel I/O. 7-10× faster than PhpSpreadsheet, full XLS/XLSX with formulas, conditional formatting, and rich text. Powered by LibXL.
+- **[mdparser](https://github.com/iliaal/mdparser)** — Native CommonMark + GFM markdown parser. 15-30× faster than pure-PHP libraries (Parsedown, cebe, michelf). Powered by cmark-gfm.
+
+## 📚 Read more
+
+Full background, fork rationale, and benchmark methodology in the launch post: [php_clickhouse: A Native ClickHouse Client for PHP, Picking Up Where SeasClick Left Off](https://ilia.ws/blog/php-clickhouse-a-native-clickhouse-client-for-php-picking-up-where-seasclick-left-off).
 
 ## License
 
 The PHP-side wrapper is licensed under [PHP-3.01](LICENSE).
 
-The vendored client library at `lib/clickhouse-cpp/` is
-[ClickHouse/clickhouse-cpp](https://github.com/ClickHouse/clickhouse-cpp),
-licensed under the [Apache License 2.0](lib/clickhouse-cpp/LICENSE).
+The vendored client library at `lib/clickhouse-cpp/` is [ClickHouse/clickhouse-cpp](https://github.com/ClickHouse/clickhouse-cpp), licensed under the [Apache License 2.0](lib/clickhouse-cpp/LICENSE).
 
-The vendored compression libraries (`lib/clickhouse-cpp/contrib/lz4/`,
-`contrib/zstd/`, `contrib/cityhash/`) carry BSD-style licenses; abseil
-int128 (`contrib/absl/`) is Apache 2.0. See each subdirectory for the
-exact text.
+The vendored compression libraries (`lib/clickhouse-cpp/contrib/lz4/`, `contrib/zstd/`, `contrib/cityhash/`) carry BSD-style licenses; abseil int128 (`contrib/absl/`) is Apache 2.0. See each subdirectory for the exact text.
 
 ## Credits
 
-`php_clickhouse` started as a fork of
-[SeasX/SeasClick](https://github.com/SeasX/SeasClick) by SeasX Group
-(`ahhhh.wang@gmail.com`). The original PR-4 work to add fetch modes
-landed in 2019 and the upstream maintainer hasn't accepted external
-PRs since. Independent re-vendoring, port to clickhouse-cpp v2.6.1,
-new types, TLS, and packaging are by Ilia Alshanetsky <ilia@ilia.ws>.
+`php_clickhouse` started as a fork of [SeasX/SeasClick](https://github.com/SeasX/SeasClick) by SeasX Group (`ahhhh.wang@gmail.com`). The original PR-4 work to add fetch modes landed in 2019 and the upstream maintainer hasn't accepted external PRs since. Independent re-vendoring, port to clickhouse-cpp v2.6.1, new types, TLS, and packaging are by Ilia Alshanetsky <ilia@ilia.ws>.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Security issues:
-[SECURITY.md](SECURITY.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md). Security issues: [SECURITY.md](SECURITY.md).
+
+---
+
+[Follow @iliaa on X](https://x.com/iliaa) • [Blog](https://ilia.ws) • If this sped up your stack, ⭐ star it!
