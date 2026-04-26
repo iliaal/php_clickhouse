@@ -37,11 +37,13 @@ $call_count = 0;
 $c->select("SELECT count() FROM numbers(100000)");
 echo "no callback: ", ($call_count === 0 ? "0" : (string)$call_count), "\n";
 
-// Bad callable rejected.
+// Bad callable rejected. PHP 7.4's ZPP strictly validates `callable` and
+// rejects with TypeError; 8.0+ relaxed this so our C-body is_callable()
+// check fires ClickHouseException instead. Catch Throwable to cover both.
 try {
     $c->setProgressCallback("not_a_real_function_xyz");
     echo "bad: no throw\n";
-} catch (ClickHouseException $e) {
+} catch (\Throwable $e) {
     echo "bad: throw\n";
 }
 ?>
