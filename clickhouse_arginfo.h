@@ -1,0 +1,253 @@
+/* This is a generated file, edit clickhouse.stub.php instead.
+ * Stub hash: 02d2137e4fd31f8228051e32915cfdec1055d519 */
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_class_ClickHouse___construct, 0, 0, 1)
+	ZEND_ARG_TYPE_INFO(0, connectParams, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_class_ClickHouse___destruct, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_select, 0, 1, IS_MIXED, 0)
+	ZEND_ARG_TYPE_INFO(0, sql, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, params, IS_ARRAY, 0, "[]")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, fetch_mode, IS_LONG, 0, "0")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, query_id, IS_STRING, 0, "\"\"")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, settings, IS_ARRAY, 0, "[]")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_insert, 0, 3, _IS_BOOL, 0)
+	ZEND_ARG_TYPE_INFO(0, table, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO(0, columns, IS_ARRAY, 0)
+	ZEND_ARG_TYPE_INFO(0, values, IS_ARRAY, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, query_id, IS_STRING, 0, "\"\"")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, settings, IS_ARRAY, 0, "[]")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_insertAssoc, 0, 2, _IS_BOOL, 0)
+	ZEND_ARG_TYPE_INFO(0, table, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO(0, rows, IS_ARRAY, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, query_id, IS_STRING, 0, "\"\"")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, settings, IS_ARRAY, 0, "[]")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_writeStart, 0, 2, _IS_BOOL, 0)
+	ZEND_ARG_TYPE_INFO(0, table, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO(0, columns, IS_ARRAY, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, query_id, IS_STRING, 0, "\"\"")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, settings, IS_ARRAY, 0, "[]")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_write, 0, 1, _IS_BOOL, 0)
+	ZEND_ARG_TYPE_INFO(0, values, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_writeEnd, 0, 0, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_execute, 0, 1, _IS_BOOL, 0)
+	ZEND_ARG_TYPE_INFO(0, sql, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, params, IS_ARRAY, 0, "[]")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, query_id, IS_STRING, 0, "\"\"")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, settings, IS_ARRAY, 0, "[]")
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_ClickHouse_ping arginfo_class_ClickHouse_writeEnd
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_setSettings, 0, 1, _IS_BOOL, 0)
+	ZEND_ARG_TYPE_INFO(0, settings, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_setProgressCallback, 0, 1, _IS_BOOL, 0)
+	ZEND_ARG_TYPE_INFO(0, callback, IS_CALLABLE, 1)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_getStatistics, 0, 0, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_databaseSize, 0, 0, IS_ARRAY, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, database, IS_STRING, 1, "null")
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_ClickHouse_tablesSize arginfo_class_ClickHouse_databaseSize
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_partitions, 0, 1, IS_ARRAY, 0)
+	ZEND_ARG_TYPE_INFO(0, table, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_showTables, 0, 0, IS_ARRAY, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, database, IS_STRING, 1, "null")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, like, IS_STRING, 1, "null")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_showCreateTable, 0, 1, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO(0, table, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_getServerUptime, 0, 0, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_enableLogQueries, 0, 0, _IS_BOOL, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, enabled, _IS_BOOL, 0, "true")
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_ClickHouse_getLogQueries arginfo_class_ClickHouse_getStatistics
+
+ZEND_METHOD(ClickHouse, __construct);
+ZEND_METHOD(ClickHouse, __destruct);
+ZEND_METHOD(ClickHouse, select);
+ZEND_METHOD(ClickHouse, insert);
+ZEND_METHOD(ClickHouse, insertAssoc);
+ZEND_METHOD(ClickHouse, writeStart);
+ZEND_METHOD(ClickHouse, write);
+ZEND_METHOD(ClickHouse, writeEnd);
+ZEND_METHOD(ClickHouse, execute);
+ZEND_METHOD(ClickHouse, ping);
+ZEND_METHOD(ClickHouse, setSettings);
+ZEND_METHOD(ClickHouse, setProgressCallback);
+ZEND_METHOD(ClickHouse, getStatistics);
+ZEND_METHOD(ClickHouse, databaseSize);
+ZEND_METHOD(ClickHouse, tablesSize);
+ZEND_METHOD(ClickHouse, partitions);
+ZEND_METHOD(ClickHouse, showTables);
+ZEND_METHOD(ClickHouse, showCreateTable);
+ZEND_METHOD(ClickHouse, getServerUptime);
+ZEND_METHOD(ClickHouse, enableLogQueries);
+ZEND_METHOD(ClickHouse, getLogQueries);
+
+static const zend_function_entry class_ClickHouse_methods[] = {
+	ZEND_ME(ClickHouse, __construct, arginfo_class_ClickHouse___construct, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, __destruct, arginfo_class_ClickHouse___destruct, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, select, arginfo_class_ClickHouse_select, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, insert, arginfo_class_ClickHouse_insert, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, insertAssoc, arginfo_class_ClickHouse_insertAssoc, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, writeStart, arginfo_class_ClickHouse_writeStart, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, write, arginfo_class_ClickHouse_write, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, writeEnd, arginfo_class_ClickHouse_writeEnd, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, execute, arginfo_class_ClickHouse_execute, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, ping, arginfo_class_ClickHouse_ping, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, setSettings, arginfo_class_ClickHouse_setSettings, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, setProgressCallback, arginfo_class_ClickHouse_setProgressCallback, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, getStatistics, arginfo_class_ClickHouse_getStatistics, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, databaseSize, arginfo_class_ClickHouse_databaseSize, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, tablesSize, arginfo_class_ClickHouse_tablesSize, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, partitions, arginfo_class_ClickHouse_partitions, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, showTables, arginfo_class_ClickHouse_showTables, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, showCreateTable, arginfo_class_ClickHouse_showCreateTable, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, getServerUptime, arginfo_class_ClickHouse_getServerUptime, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, enableLogQueries, arginfo_class_ClickHouse_enableLogQueries, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, getLogQueries, arginfo_class_ClickHouse_getLogQueries, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static zend_class_entry *register_class_ClickHouse(void)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_CLASS_ENTRY(ce, "ClickHouse", class_ClickHouse_methods);
+	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
+
+	zval const_FETCH_ONE_value;
+	ZVAL_LONG(&const_FETCH_ONE_value, 1);
+	zend_string *const_FETCH_ONE_name = zend_string_init_interned("FETCH_ONE", sizeof("FETCH_ONE") - 1, true);
+	zend_declare_typed_class_constant(class_entry, const_FETCH_ONE_name, &const_FETCH_ONE_value, ZEND_ACC_PUBLIC, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_LONG));
+	zend_string_release_ex(const_FETCH_ONE_name, true);
+
+	zval const_FETCH_KEY_PAIR_value;
+	ZVAL_LONG(&const_FETCH_KEY_PAIR_value, 2);
+	zend_string *const_FETCH_KEY_PAIR_name = zend_string_init_interned("FETCH_KEY_PAIR", sizeof("FETCH_KEY_PAIR") - 1, true);
+	zend_declare_typed_class_constant(class_entry, const_FETCH_KEY_PAIR_name, &const_FETCH_KEY_PAIR_value, ZEND_ACC_PUBLIC, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_LONG));
+	zend_string_release_ex(const_FETCH_KEY_PAIR_name, true);
+
+	zval const_DATE_AS_STRINGS_value;
+	ZVAL_LONG(&const_DATE_AS_STRINGS_value, 4);
+	zend_string *const_DATE_AS_STRINGS_name = zend_string_init_interned("DATE_AS_STRINGS", sizeof("DATE_AS_STRINGS") - 1, true);
+	zend_declare_typed_class_constant(class_entry, const_DATE_AS_STRINGS_name, &const_DATE_AS_STRINGS_value, ZEND_ACC_PUBLIC, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_LONG));
+	zend_string_release_ex(const_DATE_AS_STRINGS_name, true);
+
+	zval const_FETCH_COLUMN_value;
+	ZVAL_LONG(&const_FETCH_COLUMN_value, 8);
+	zend_string *const_FETCH_COLUMN_name = zend_string_init_interned("FETCH_COLUMN", sizeof("FETCH_COLUMN") - 1, true);
+	zend_declare_typed_class_constant(class_entry, const_FETCH_COLUMN_name, &const_FETCH_COLUMN_value, ZEND_ACC_PUBLIC, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_LONG));
+	zend_string_release_ex(const_FETCH_COLUMN_name, true);
+
+	zval property_host_default_value;
+	zend_string *property_host_default_value_str = zend_string_init("127.0.0.1", strlen("127.0.0.1"), 1);
+	ZVAL_STR(&property_host_default_value, property_host_default_value_str);
+	zend_declare_typed_property(class_entry, ZSTR_KNOWN(ZEND_STR_HOST), &property_host_default_value, ZEND_ACC_PROTECTED, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_STRING));
+
+	zval property_port_default_value;
+	ZVAL_LONG(&property_port_default_value, 9000);
+	zend_declare_typed_property(class_entry, ZSTR_KNOWN(ZEND_STR_PORT), &property_port_default_value, ZEND_ACC_PROTECTED, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_LONG));
+
+	zval property_database_default_value;
+	zend_string *property_database_default_value_str = zend_string_init("default", strlen("default"), 1);
+	ZVAL_STR(&property_database_default_value, property_database_default_value_str);
+	zend_string *property_database_name = zend_string_init("database", sizeof("database") - 1, true);
+	zend_declare_typed_property(class_entry, property_database_name, &property_database_default_value, ZEND_ACC_PROTECTED, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_STRING));
+	zend_string_release_ex(property_database_name, true);
+
+	zval property_user_default_value;
+	ZVAL_NULL(&property_user_default_value);
+	zend_declare_typed_property(class_entry, ZSTR_KNOWN(ZEND_STR_USER), &property_user_default_value, ZEND_ACC_PROTECTED, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_STRING|MAY_BE_NULL));
+
+	zval property_compression_default_value;
+	ZVAL_FALSE(&property_compression_default_value);
+	zend_string *property_compression_name = zend_string_init("compression", sizeof("compression") - 1, true);
+	zend_declare_typed_property(class_entry, property_compression_name, &property_compression_default_value, ZEND_ACC_PROTECTED, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_BOOL));
+	zend_string_release_ex(property_compression_name, true);
+
+	zval property_retry_timeout_default_value;
+	ZVAL_LONG(&property_retry_timeout_default_value, 5);
+	zend_string *property_retry_timeout_name = zend_string_init("retry_timeout", sizeof("retry_timeout") - 1, true);
+	zend_declare_typed_property(class_entry, property_retry_timeout_name, &property_retry_timeout_default_value, ZEND_ACC_PROTECTED, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_LONG));
+	zend_string_release_ex(property_retry_timeout_name, true);
+
+	zval property_retry_count_default_value;
+	ZVAL_LONG(&property_retry_count_default_value, 1);
+	zend_string *property_retry_count_name = zend_string_init("retry_count", sizeof("retry_count") - 1, true);
+	zend_declare_typed_property(class_entry, property_retry_count_name, &property_retry_count_default_value, ZEND_ACC_PROTECTED, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_LONG));
+	zend_string_release_ex(property_retry_count_name, true);
+
+	zval property_receive_timeout_default_value;
+	ZVAL_LONG(&property_receive_timeout_default_value, 0);
+	zend_string *property_receive_timeout_name = zend_string_init("receive_timeout", sizeof("receive_timeout") - 1, true);
+	zend_declare_typed_property(class_entry, property_receive_timeout_name, &property_receive_timeout_default_value, ZEND_ACC_PROTECTED, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_LONG));
+	zend_string_release_ex(property_receive_timeout_name, true);
+
+	zval property_connect_timeout_default_value;
+	ZVAL_LONG(&property_connect_timeout_default_value, 5);
+	zend_string *property_connect_timeout_name = zend_string_init("connect_timeout", sizeof("connect_timeout") - 1, true);
+	zend_declare_typed_property(class_entry, property_connect_timeout_name, &property_connect_timeout_default_value, ZEND_ACC_PROTECTED, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_LONG));
+	zend_string_release_ex(property_connect_timeout_name, true);
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_ClickHouseException(zend_class_entry *class_entry_Exception)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_CLASS_ENTRY(ce, "ClickHouseException", NULL);
+	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_Exception, 0);
+
+	zval property_server_code_default_value;
+	ZVAL_LONG(&property_server_code_default_value, 0);
+	zend_string *property_server_code_name = zend_string_init("server_code", sizeof("server_code") - 1, true);
+	zend_declare_typed_property(class_entry, property_server_code_name, &property_server_code_default_value, ZEND_ACC_PUBLIC, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_LONG));
+	zend_string_release_ex(property_server_code_name, true);
+
+	zval property_server_name_default_value;
+	ZVAL_NULL(&property_server_name_default_value);
+	zend_string *property_server_name_name = zend_string_init("server_name", sizeof("server_name") - 1, true);
+	zend_declare_typed_property(class_entry, property_server_name_name, &property_server_name_default_value, ZEND_ACC_PUBLIC, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_STRING|MAY_BE_NULL));
+	zend_string_release_ex(property_server_name_name, true);
+
+	zval property_query_id_default_value;
+	ZVAL_NULL(&property_query_id_default_value);
+	zend_string *property_query_id_name = zend_string_init("query_id", sizeof("query_id") - 1, true);
+	zend_declare_typed_property(class_entry, property_query_id_name, &property_query_id_default_value, ZEND_ACC_PUBLIC, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_STRING|MAY_BE_NULL));
+	zend_string_release_ex(property_query_id_name, true);
+
+	return class_entry;
+}

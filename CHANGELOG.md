@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Migrated to stub-driven arginfo (`clickhouse.stub.php` + generated
+  `clickhouse_arginfo.h`). ClickHouse method parameter types and return
+  types are now declared and visible to Reflection / IDEs / static
+  analyzers; previously they were untyped at the engine boundary.
+  Behavior is unchanged for correctly-typed callers; pass-the-wrong-type
+  callers now hit ZPP at the boundary instead of a custom thrown
+  exception inside the method body.
+- ClickHouse and ClickHouseException properties are now declared with
+  types via the stub.
+- Compat shim for `zend_register_internal_class_with_flags` (added in
+  PHP 8.4) keeps the generated arginfo header compiling cleanly against
+  PHP 8.3.
+
 ## [0.7.0]
 
 Feature release closing the ergonomics gap with smi2/phpClickHouse.
