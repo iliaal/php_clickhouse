@@ -7,28 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- Migrated to stub-driven arginfo (`clickhouse.stub.php` + generated
-  `clickhouse_arginfo.h`). ClickHouse method parameter types and return
-  types are now declared and visible to Reflection / IDEs / static
-  analyzers; previously they were untyped at the engine boundary.
-  Behavior is unchanged for correctly-typed callers; pass-the-wrong-type
-  callers now hit ZPP at the boundary instead of a custom thrown
-  exception inside the method body.
-- ClickHouse and ClickHouseException properties are now declared with
-  types via the stub.
-- Compat shim for `zend_register_internal_class_with_flags` (added in
-  PHP 8.4) keeps the generated arginfo header compiling cleanly against
-  PHP 8.3.
-
-## [0.7.0]
+## [0.7.0] - 2026-04-26
 
 Feature release closing the ergonomics gap with smi2/phpClickHouse.
 Adds per-query and client-wide settings, server-side typed parameters,
 a progress callback, a statistics getter, structured exception fields,
 millisecond timeout precision, an associative-row insert helper, and a
 small set of SQL helper methods. All additive; no BC breaks.
+
+Method signatures, return types, and class properties are now declared
+via a stub-driven arginfo workflow and visible to Reflection / IDEs /
+static analyzers.
 
 ### Added
 
@@ -81,6 +70,20 @@ small set of SQL helper methods. All additive; no BC breaks.
   `Client::BeginInsert(const Query&)` so the streaming insert path
   honors per-query settings and progress callbacks. Documented in
   `lib/clickhouse-cpp/LOCAL_PATCHES.md`.
+- Migrated to stub-driven arginfo (`clickhouse.stub.php` + generated
+  `clickhouse_arginfo.h`). Method parameter and return types are now
+  declared and visible to Reflection / IDEs / static analyzers;
+  previously they were untyped at the engine boundary. Behavior is
+  unchanged for correctly-typed callers; wrong-type callers now hit
+  ZPP at the boundary instead of a custom thrown exception inside the
+  method body.
+- ClickHouse and ClickHouseException properties are now declared with
+  types via the stub.
+- Compat shims in `php7_wrapper.h` keep the generated arginfo header
+  compiling unchanged across the entire build matrix (PHP 7.4 through
+  8.5). On pre-8.0 builds the polyfills drop type information rather
+  than emulate it, so reflection signatures revert to untyped on those
+  versions; runtime behavior is unchanged.
 
 ### For contributors
 
@@ -317,6 +320,7 @@ own way.
   emits a clear "unsupported" warning. Full Windows build of the
   vendored zstd + absl + lz4 + cityhash is a separate project.
 
-[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.6.0...HEAD
+[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.7.0...HEAD
+[0.7.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.7.0
 [0.6.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.6.0
 [0.5.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.5.0
