@@ -58,6 +58,15 @@ static inline void sc_zend_update_property_long(zend_class_entry *scope, zval *o
 #endif
 }
 
+static inline void sc_zend_update_property_stringl(zend_class_entry *scope, zval *object, const char *name, size_t name_length, const char *value, size_t value_length)
+{
+#if PHP_VERSION_ID < 80000
+    zend_update_property_stringl(scope, object, name, name_length, value, value_length);
+#else
+    zend_update_property_stringl(scope, Z_OBJ_P(object), name, name_length, value, value_length);
+#endif
+}
+
 #define sc_add_next_index_stringl(arr, str, len, dup)    add_next_index_stringl(arr, str, len)
 
 static inline int sc_zend_hash_get_current_data(HashTable *ht, void **v)

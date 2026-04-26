@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0]
+
+Feature release closing the ergonomics gap with smi2/phpClickHouse.
+Adds per-query and client-wide settings, server-side typed parameters,
+a progress callback, a statistics getter, structured exception fields,
+millisecond timeout precision, an associative-row insert helper, and a
+small set of SQL helper methods. All additive; no BC breaks.
+
+### Added
+
+- `setSettings(array $settings)` for client-wide ClickHouse settings
+  (e.g. `max_execution_time`, `max_memory_usage`, `async_insert`).
+  Per-call settings take a 5th array argument on `select()`,
+  `insert()`, `execute()`, `writeStart()`. Per-call overrides global.
+- Server-side typed parameters via the `{name:Type}` placeholder
+  syntax. Routed through `Query::SetParam` so the server quotes and
+  parses according to the declared `Type`. Plain `{name}`
+  placeholders keep their existing client-side identifier-substitution
+  behavior. Arrays format as ClickHouse array literals so
+  `Array(UInt32)`, `Array(String)`, etc. round-trip cleanly.
+- `setProgressCallback(?callable $cb)` invokes the callable for every
+  `Progress` packet during a query, receiving an associative array of
+  `rows`, `bytes`, `total_rows`, `written_rows`, `written_bytes`.
+- `getStatistics()` returns `rows_read`, `bytes_read`, `total_rows`,
+  `written_rows`, `written_bytes`, `blocks`, `rows_before_limit`,
+  `applied_limit`, `elapsed_ms` from the last completed query. Reset
+  at the start of each `select` / `execute` / `insert` / `writeStart`.
+- Structured `ClickHouseException` fields: `server_code` (server
+  error code, e.g. 159 for TIMEOUT_EXCEEDED), `server_name` (e.g.
+  `DB::Exception`), and `query_id`. Populated on server errors and on
+  any throw that has a query-id context; unset on pure client errors.
+- `insertAssoc(string $table, array $rows, string $query_id = "",
+  array $settings = [])` derives the column list from the keys of
+  the first row and forwards to `insert()`.
+- SQL helper methods: `databaseSize(?string $database)`,
+  `tablesSize(?string $database)`, `partitions(string $table)`,
+  `showTables(?string $database, ?string $like)`,
+  `showCreateTable(string $table)`, `getServerUptime()`. Each
+  validates identifiers against the existing safe-character set.
+- Config keys `connect_timeout_ms`, `receive_timeout_ms`, and
+  `send_timeout_ms` for sub-second timeout precision. Override the
+  existing seconds-based keys when present.
+- `enableLogQueries(bool $enabled = true)` toggles a per-client query
+  log accumulator; `getLogQueries()` returns the entries and clears
+  the buffer. Each entry carries `sql`, `query_id`, `elapsed_ms`,
+  `rows_read`, `bytes_read`, `error_code`, `error_message`. Errors
+  are recorded with the ClickHouse server code (or `-1` for
+  client/network failures).
+
+### Changed
+
+- `select()`, `insert()`, `execute()`, and `writeStart()` now build a
+  full `clickhouse::Query` object internally so settings, server-side
+  params, progress, and profile callbacks can attach. Behavior of
+  existing call sites is unchanged.
+- Vendored `clickhouse-cpp` patched to expose
+  `Client::BeginInsert(const Query&)` so the streaming insert path
+  honors per-query settings and progress callbacks. Documented in
+  `lib/clickhouse-cpp/LOCAL_PATCHES.md`.
+
+### For contributors
+
+- New phpt tests `034`–`041` cover structured exception fields,
+  settings precedence, typed-param round-trip, progress callback
+  firing, fast connect-timeout, `insertAssoc`, each SQL helper, and
+  the query log accumulator.
+
 ## [0.6.0] - 2026-04-25
 
 Hardening release on top of 0.5.0. Closes a SQL-injection class
