@@ -88,123 +88,29 @@ extern "C" {
 }
 #endif
 
-static PHP_METHOD(CLICKHOUSE_RES_NAME, __construct);
-static PHP_METHOD(CLICKHOUSE_RES_NAME, __destruct);
-static PHP_METHOD(CLICKHOUSE_RES_NAME, select);
-static PHP_METHOD(CLICKHOUSE_RES_NAME, insert);
-static PHP_METHOD(CLICKHOUSE_RES_NAME, insertAssoc);
-static PHP_METHOD(CLICKHOUSE_RES_NAME, writeStart);
-static PHP_METHOD(CLICKHOUSE_RES_NAME, write);
-static PHP_METHOD(CLICKHOUSE_RES_NAME, writeEnd);
-static PHP_METHOD(CLICKHOUSE_RES_NAME, execute);
-static PHP_METHOD(CLICKHOUSE_RES_NAME, ping);
-static PHP_METHOD(CLICKHOUSE_RES_NAME, setSettings);
-static PHP_METHOD(CLICKHOUSE_RES_NAME, setProgressCallback);
-static PHP_METHOD(CLICKHOUSE_RES_NAME, getStatistics);
-static PHP_METHOD(CLICKHOUSE_RES_NAME, databaseSize);
-static PHP_METHOD(CLICKHOUSE_RES_NAME, tablesSize);
-static PHP_METHOD(CLICKHOUSE_RES_NAME, partitions);
-static PHP_METHOD(CLICKHOUSE_RES_NAME, showTables);
-static PHP_METHOD(CLICKHOUSE_RES_NAME, showCreateTable);
-static PHP_METHOD(CLICKHOUSE_RES_NAME, getServerUptime);
-static PHP_METHOD(CLICKHOUSE_RES_NAME, enableLogQueries);
-static PHP_METHOD(CLICKHOUSE_RES_NAME, getLogQueries);
+static PHP_METHOD(ClickHouse, __construct);
+static PHP_METHOD(ClickHouse, __destruct);
+static PHP_METHOD(ClickHouse, select);
+static PHP_METHOD(ClickHouse, insert);
+static PHP_METHOD(ClickHouse, insertAssoc);
+static PHP_METHOD(ClickHouse, writeStart);
+static PHP_METHOD(ClickHouse, write);
+static PHP_METHOD(ClickHouse, writeEnd);
+static PHP_METHOD(ClickHouse, execute);
+static PHP_METHOD(ClickHouse, ping);
+static PHP_METHOD(ClickHouse, setSettings);
+static PHP_METHOD(ClickHouse, setProgressCallback);
+static PHP_METHOD(ClickHouse, getStatistics);
+static PHP_METHOD(ClickHouse, databaseSize);
+static PHP_METHOD(ClickHouse, tablesSize);
+static PHP_METHOD(ClickHouse, partitions);
+static PHP_METHOD(ClickHouse, showTables);
+static PHP_METHOD(ClickHouse, showCreateTable);
+static PHP_METHOD(ClickHouse, getServerUptime);
+static PHP_METHOD(ClickHouse, enableLogQueries);
+static PHP_METHOD(ClickHouse, getLogQueries);
 
-ZEND_BEGIN_ARG_INFO_EX(clickhouse_construct, 0, 0, 1)
-ZEND_ARG_INFO(0, connectParams)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(clickhouse_destruct, 0, 0, 0)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(clickhouse_select, 0, 0, 1)
-ZEND_ARG_INFO(0, sql)
-ZEND_ARG_INFO(0, params)
-ZEND_ARG_INFO(0, fetch_mode)
-ZEND_ARG_INFO(0, query_id)
-ZEND_ARG_INFO(0, settings)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(clickhouse_insert, 0, 0, 3)
-ZEND_ARG_INFO(0, table)
-ZEND_ARG_INFO(0, columns)
-ZEND_ARG_INFO(0, values)
-ZEND_ARG_INFO(0, query_id)
-ZEND_ARG_INFO(0, settings)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(clickhouse_insertAssoc, 0, 0, 2)
-ZEND_ARG_INFO(0, table)
-ZEND_ARG_INFO(0, rows)
-ZEND_ARG_INFO(0, query_id)
-ZEND_ARG_INFO(0, settings)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(clickhouse_writeStart, 0, 0, 2)
-ZEND_ARG_INFO(0, table)
-ZEND_ARG_INFO(0, columns)
-ZEND_ARG_INFO(0, query_id)
-ZEND_ARG_INFO(0, settings)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(clickhouse_write, 0, 0, 1)
-ZEND_ARG_INFO(0, values)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(clickhouse_writeEnd, 0, 0, 0)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(clickhouse_execute, 0, 0, 1)
-ZEND_ARG_INFO(0, sql)
-ZEND_ARG_INFO(0, params)
-ZEND_ARG_INFO(0, query_id)
-ZEND_ARG_INFO(0, settings)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(clickhouse_ping, 0, 0, 0)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(clickhouse_setSettings, 0, 0, 1)
-ZEND_ARG_INFO(0, settings)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(clickhouse_setProgressCallback, 0, 0, 1)
-ZEND_ARG_INFO(0, callback)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(clickhouse_getStatistics, 0, 0, 0)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(clickhouse_databaseSize, 0, 0, 0)
-ZEND_ARG_INFO(0, database)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(clickhouse_tablesSize, 0, 0, 0)
-ZEND_ARG_INFO(0, database)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(clickhouse_partitions, 0, 0, 1)
-ZEND_ARG_INFO(0, table)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(clickhouse_showTables, 0, 0, 0)
-ZEND_ARG_INFO(0, database)
-ZEND_ARG_INFO(0, like)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(clickhouse_showCreateTable, 0, 0, 1)
-ZEND_ARG_INFO(0, table)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(clickhouse_getServerUptime, 0, 0, 0)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(clickhouse_enableLogQueries, 0, 0, 0)
-ZEND_ARG_INFO(0, enabled)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(clickhouse_getLogQueries, 0, 0, 0)
-ZEND_END_ARG_INFO()
+#include "clickhouse_arginfo.h"
 
 /* {{{ clickhouse_functions[] */
 const zend_function_entry clickhouse_functions[] =
@@ -212,35 +118,6 @@ const zend_function_entry clickhouse_functions[] =
     PHP_FE_END
 };
 /* }}} */
-
-const zend_function_entry clickhouse_methods[] =
-{
-    PHP_ME(CLICKHOUSE_RES_NAME, __construct,         clickhouse_construct, ZEND_ACC_PUBLIC | ZEND_ACC_CTOR)
-    PHP_ME(CLICKHOUSE_RES_NAME, __destruct,          clickhouse_destruct, ZEND_ACC_PUBLIC)
-    PHP_ME(CLICKHOUSE_RES_NAME, select,              clickhouse_select, ZEND_ACC_PUBLIC)
-    PHP_ME(CLICKHOUSE_RES_NAME, insert,              clickhouse_insert, ZEND_ACC_PUBLIC)
-    PHP_ME(CLICKHOUSE_RES_NAME, insertAssoc,         clickhouse_insertAssoc, ZEND_ACC_PUBLIC)
-    PHP_ME(CLICKHOUSE_RES_NAME, writeStart,          clickhouse_writeStart, ZEND_ACC_PUBLIC)
-    PHP_ME(CLICKHOUSE_RES_NAME, write,               clickhouse_write, ZEND_ACC_PUBLIC)
-    PHP_ME(CLICKHOUSE_RES_NAME, writeEnd,            clickhouse_writeEnd, ZEND_ACC_PUBLIC)
-    PHP_ME(CLICKHOUSE_RES_NAME, execute,             clickhouse_execute, ZEND_ACC_PUBLIC)
-    PHP_ME(CLICKHOUSE_RES_NAME, ping,                clickhouse_ping, ZEND_ACC_PUBLIC)
-    PHP_ME(CLICKHOUSE_RES_NAME, setSettings,         clickhouse_setSettings, ZEND_ACC_PUBLIC)
-    PHP_ME(CLICKHOUSE_RES_NAME, setProgressCallback, clickhouse_setProgressCallback, ZEND_ACC_PUBLIC)
-    PHP_ME(CLICKHOUSE_RES_NAME, getStatistics,       clickhouse_getStatistics, ZEND_ACC_PUBLIC)
-    PHP_ME(CLICKHOUSE_RES_NAME, databaseSize,        clickhouse_databaseSize, ZEND_ACC_PUBLIC)
-    PHP_ME(CLICKHOUSE_RES_NAME, tablesSize,          clickhouse_tablesSize, ZEND_ACC_PUBLIC)
-    PHP_ME(CLICKHOUSE_RES_NAME, partitions,          clickhouse_partitions, ZEND_ACC_PUBLIC)
-    PHP_ME(CLICKHOUSE_RES_NAME, showTables,          clickhouse_showTables, ZEND_ACC_PUBLIC)
-    PHP_ME(CLICKHOUSE_RES_NAME, showCreateTable,     clickhouse_showCreateTable, ZEND_ACC_PUBLIC)
-    PHP_ME(CLICKHOUSE_RES_NAME, getServerUptime,     clickhouse_getServerUptime, ZEND_ACC_PUBLIC)
-    PHP_ME(CLICKHOUSE_RES_NAME, enableLogQueries,    clickhouse_enableLogQueries, ZEND_ACC_PUBLIC)
-    PHP_ME(CLICKHOUSE_RES_NAME, getLogQueries,       clickhouse_getLogQueries, ZEND_ACC_PUBLIC)
-    PHP_FE_END
-};
-
-#define REGISTER_CLICKHOUSE_CONST_LONG(const_name, value) \
-	zend_declare_class_constant_long(clickhouse_ce, const_name, sizeof(const_name)-1, (zend_long)value);
 
 /* {{{ PHP_MINIT_FUNCTION
  */
@@ -259,43 +136,14 @@ PHP_MINIT_FUNCTION(clickhouse)
     return FAILURE;
 #endif
 
-    zend_class_entry ce_main, ce_exception;
-    INIT_CLASS_ENTRY(ce_main, CLICKHOUSE_RES_NAME, clickhouse_methods);
-    INIT_CLASS_ENTRY(ce_exception, CLICKHOUSE_EXCEPTION_NAME, NULL);
-
-    clickhouse_ce = zend_register_internal_class_ex(&ce_main, NULL);
-    clickhouse_exception_ce = zend_register_internal_class_ex(&ce_exception, zend_ce_exception);
-
-    /* Structured ServerException fields. Populated only when the cause
-     * is a clickhouse::ServerException; for client/network errors they
-     * stay at the defaults below. */
-    zend_declare_property_long(clickhouse_exception_ce, "server_code", sizeof("server_code") - 1, 0, ZEND_ACC_PUBLIC);
-    zend_declare_property_null(clickhouse_exception_ce, "server_name", sizeof("server_name") - 1, ZEND_ACC_PUBLIC);
-    zend_declare_property_null(clickhouse_exception_ce, "query_id", sizeof("query_id") - 1, ZEND_ACC_PUBLIC);
+    clickhouse_ce = register_class_ClickHouse();
+    clickhouse_exception_ce = register_class_ClickHouseException(zend_ce_exception);
 
     /* Back-compat aliases for the original SeasClick name. Deprecated;
      * removed in the next major release. */
     zend_register_class_alias(CLICKHOUSE_RES_NAME_LEGACY, clickhouse_ce);
     zend_register_class_alias(CLICKHOUSE_EXCEPTION_NAME_LEGACY, clickhouse_exception_ce);
 
-    zend_declare_property_stringl(clickhouse_ce, "host", strlen("host"), "127.0.0.1", sizeof("127.0.0.1") - 1, ZEND_ACC_PROTECTED);
-    zend_declare_property_long(clickhouse_ce, "port", strlen("port"), 9000, ZEND_ACC_PROTECTED);
-    zend_declare_property_stringl(clickhouse_ce, "database", strlen("database"), "default", sizeof("default") - 1, ZEND_ACC_PROTECTED);
-    zend_declare_property_null(clickhouse_ce, "user", strlen("user"), ZEND_ACC_PROTECTED);
-    /* No "passwd" property: keeping the secret out of get_object_vars,
-     * var_dump, serialize, and reflection by simply not storing it. */
-    zend_declare_property_bool(clickhouse_ce, "compression", strlen("compression"), false, ZEND_ACC_PROTECTED);
-    zend_declare_property_long(clickhouse_ce, "retry_timeout", strlen("retry_timeout"), 5, ZEND_ACC_PROTECTED);
-    zend_declare_property_long(clickhouse_ce, "retry_count", strlen("retry_count"), 1, ZEND_ACC_PROTECTED);
-    zend_declare_property_long(clickhouse_ce, "receive_timeout", strlen("receive_timeout"), 0, ZEND_ACC_PROTECTED);
-    zend_declare_property_long(clickhouse_ce, "connect_timeout", strlen("connect_timeout"), 5, ZEND_ACC_PROTECTED);
-
-    REGISTER_CLICKHOUSE_CONST_LONG("FETCH_ONE", (zend_long)SC_FETCH_ONE);
-    REGISTER_CLICKHOUSE_CONST_LONG("FETCH_KEY_PAIR", (zend_long)SC_FETCH_KEY_PAIR);
-    REGISTER_CLICKHOUSE_CONST_LONG("DATE_AS_STRINGS", (zend_long)SC_FETCH_DATE_AS_STRINGS);
-    REGISTER_CLICKHOUSE_CONST_LONG("FETCH_COLUMN", (zend_long)SC_FETCH_COLUMN);
-
-    clickhouse_ce->ce_flags |= ZEND_ACC_FINAL;
     return SUCCESS;
 }
 /* }}} */
@@ -333,7 +181,7 @@ zend_module_entry clickhouse_module_entry =
 
 /* {{{ proto object __construct(array connectParams)
  */
-PHP_METHOD(CLICKHOUSE_RES_NAME, __construct)
+PHP_METHOD(ClickHouse, __construct)
 {
     zval *connectParams;
 
@@ -1117,7 +965,7 @@ static void attachTypedParams(Query &q, const std::vector<TypedParam> &params)
 
 /* {{{ proto bool ping()
  */
-PHP_METHOD(CLICKHOUSE_RES_NAME, ping)
+PHP_METHOD(ClickHouse, ping)
 {
     int key = Z_OBJ_HANDLE(*getThis());
     try {
@@ -1132,7 +980,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, ping)
 
 /* {{{ proto array select(string sql, array params, int mode, string query_id, array settings)
  */
-PHP_METHOD(CLICKHOUSE_RES_NAME, select)
+PHP_METHOD(ClickHouse, select)
 {
     char *sql = NULL;
     size_t l_sql = 0;
@@ -1251,7 +1099,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, select)
 
 /* {{{ proto array insert(string table, array columns, array values, string query_id, array settings)
  */
-PHP_METHOD(CLICKHOUSE_RES_NAME, insert)
+PHP_METHOD(ClickHouse, insert)
 {
     char *table = NULL;
     size_t l_table = 0;
@@ -1375,7 +1223,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, insert)
 
 /* {{{ proto bool writeStart(string table, array columns, string query_id, array settings)
  */
-PHP_METHOD(CLICKHOUSE_RES_NAME, writeStart)
+PHP_METHOD(ClickHouse, writeStart)
 {
     char *table = NULL;
     size_t l_table = 0;
@@ -1425,7 +1273,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, writeStart)
 
 /* {{{ proto array insert(string table, array columns, array values)
  */
-PHP_METHOD(CLICKHOUSE_RES_NAME, write)
+PHP_METHOD(ClickHouse, write)
 {
     zval *values;
 
@@ -1522,7 +1370,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, write)
 
 /* {{{ proto array insert(string table, array columns, array values)
  */
-PHP_METHOD(CLICKHOUSE_RES_NAME, writeEnd)
+PHP_METHOD(ClickHouse, writeEnd)
 {
     try
     {
@@ -1546,7 +1394,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, writeEnd)
 
 /* {{{ proto bool execute(string sql, array params, string query_id, array settings)
  */
-PHP_METHOD(CLICKHOUSE_RES_NAME, execute)
+PHP_METHOD(ClickHouse, execute)
 {
     char *sql = NULL;
     size_t l_sql = 0;
@@ -1610,7 +1458,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, execute)
  * select/insert/execute/writeStart override these. Pass an empty array
  * to clear.
  */
-PHP_METHOD(CLICKHOUSE_RES_NAME, setSettings)
+PHP_METHOD(ClickHouse, setSettings)
 {
     zval *arr;
     if (zend_parse_parameters(ZEND_NUM_ARGS(), "a", &arr) == FAILURE) {
@@ -1639,7 +1487,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, setSettings)
  * a single associative array: rows, bytes, total_rows, written_rows,
  * written_bytes.
  */
-PHP_METHOD(CLICKHOUSE_RES_NAME, setProgressCallback)
+PHP_METHOD(ClickHouse, setProgressCallback)
 {
     zval *cb;
     if (zend_parse_parameters(ZEND_NUM_ARGS(), "z", &cb) == FAILURE) {
@@ -1673,7 +1521,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, setProgressCallback)
  * Return the rows / bytes / time recorded for the last completed
  * select / execute / insert. Reset on every query.
  */
-PHP_METHOD(CLICKHOUSE_RES_NAME, getStatistics)
+PHP_METHOD(ClickHouse, getStatistics)
 {
     int key = Z_OBJ_HANDLE(*getThis());
     array_init(return_value);
@@ -1697,7 +1545,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, getStatistics)
  * keys of the first row, then forwards to insert(). All rows must share
  * the same key set (positional alignment is by first-row key order).
  */
-PHP_METHOD(CLICKHOUSE_RES_NAME, insertAssoc)
+PHP_METHOD(ClickHouse, insertAssoc)
 {
     char *table = NULL;
     size_t l_table = 0;
@@ -1879,7 +1727,7 @@ static void runHelperSelectFirstRow(zval *return_value, zval *this_obj, const st
 
 /* {{{ proto array databaseSize(?string database)
  */
-PHP_METHOD(CLICKHOUSE_RES_NAME, databaseSize)
+PHP_METHOD(ClickHouse, databaseSize)
 {
     char *db = NULL;
     size_t l_db = 0;
@@ -1902,7 +1750,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, databaseSize)
 
 /* {{{ proto array tablesSize(?string database)
  */
-PHP_METHOD(CLICKHOUSE_RES_NAME, tablesSize)
+PHP_METHOD(ClickHouse, tablesSize)
 {
     char *db = NULL;
     size_t l_db = 0;
@@ -1927,7 +1775,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, tablesSize)
 
 /* {{{ proto array partitions(string table)
  */
-PHP_METHOD(CLICKHOUSE_RES_NAME, partitions)
+PHP_METHOD(ClickHouse, partitions)
 {
     char *table = NULL;
     size_t l_table = 0;
@@ -1962,7 +1810,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, partitions)
 
 /* {{{ proto array showTables(?string database, ?string like)
  */
-PHP_METHOD(CLICKHOUSE_RES_NAME, showTables)
+PHP_METHOD(ClickHouse, showTables)
 {
     char *db = NULL, *like = NULL;
     size_t l_db = 0, l_like = 0;
@@ -2003,7 +1851,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, showTables)
 
 /* {{{ proto string showCreateTable(string table)
  */
-PHP_METHOD(CLICKHOUSE_RES_NAME, showCreateTable)
+PHP_METHOD(ClickHouse, showCreateTable)
 {
     char *table = NULL;
     size_t l_table = 0;
@@ -2024,7 +1872,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, showCreateTable)
 
 /* {{{ proto int getServerUptime()
  */
-PHP_METHOD(CLICKHOUSE_RES_NAME, getServerUptime)
+PHP_METHOD(ClickHouse, getServerUptime)
 {
     runHelperSelect(return_value, getThis(),
         "SELECT uptime() AS uptime",
@@ -2038,7 +1886,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, getServerUptime)
  * select / insert / execute / writeStart appends an entry. Toggling
  * off does NOT clear; getLogQueries() returns and clears.
  */
-PHP_METHOD(CLICKHOUSE_RES_NAME, enableLogQueries)
+PHP_METHOD(ClickHouse, enableLogQueries)
 {
     zend_bool enabled = 1;
     if (zend_parse_parameters(ZEND_NUM_ARGS(), "|b", &enabled) == FAILURE) {
@@ -2057,7 +1905,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, enableLogQueries)
  * bytes_read, error_code (0 = success, server code on server error,
  * -1 on client/network error), error_message.
  */
-PHP_METHOD(CLICKHOUSE_RES_NAME, getLogQueries)
+PHP_METHOD(ClickHouse, getLogQueries)
 {
     int key = Z_OBJ_HANDLE(*getThis());
     array_init(return_value);
@@ -2084,7 +1932,7 @@ PHP_METHOD(CLICKHOUSE_RES_NAME, getLogQueries)
 
 /* {{{ proto array __destruct()
  */
-PHP_METHOD(CLICKHOUSE_RES_NAME, __destruct)
+PHP_METHOD(ClickHouse, __destruct)
 {
     int key = Z_OBJ_HANDLE(*getThis());
     auto it = clientMap.find(key);

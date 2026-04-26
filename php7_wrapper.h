@@ -83,6 +83,26 @@ static inline int sc_zend_hash_get_current_data(HashTable *ht, void **v)
 #define php_array_get_value(ht, str, v) ((v = sc_zend_hash_find(ht, (char *)str, sizeof(str)-1)) && !ZVAL_IS_NULL(v))
 
 /*
+ * gen_stub.php on PHP master emits register_class_*() functions that call
+ * zend_register_internal_class_with_flags(), which only exists in PHP-8.4+.
+ * Polyfill for older targets so the generated arginfo header compiles
+ * unchanged across the build matrix.
+ */
+#if PHP_VERSION_ID < 80400
+static zend_always_inline zend_class_entry *zend_register_internal_class_with_flags(
+    zend_class_entry *class_entry,
+    zend_class_entry *parent_ce,
+    uint32_t ce_flags)
+{
+    zend_class_entry *ce = zend_register_internal_class_ex(class_entry, parent_ce);
+    if (ce && ce_flags) {
+        ce->ce_flags |= ce_flags;
+    }
+    return ce;
+}
+#endif
+
+/*
  * Local variables:
  * tab-width: 4
  * c-basic-offset: 4
