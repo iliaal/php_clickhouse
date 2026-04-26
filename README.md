@@ -26,7 +26,12 @@ and several follow-up PRs have been pending for years. This fork:
 - Ships an updated test suite, CI, PIE-based packaging, and benchmarks
 
 The original `SeasClick` and `SeasClickException` class names continue
-to work as deprecated aliases for the 0.5.x cycle.
+to work as deprecated aliases.
+
+Method signatures, return types, and class properties are declared with
+PHP types via a stub-driven arginfo workflow (`clickhouse.stub.php` →
+`clickhouse_arginfo.h`). Reflection, IDE completion, and static analyzers
+(PHPStan, Psalm) see the typed surface without manual stubs.
 
 ## Install
 
