@@ -4,7 +4,7 @@
 
 | Version | Supported          |
 |---------|--------------------|
-| 0.5.x   | :white_check_mark: |
+| 0.7.x   | :white_check_mark: |
 
 Once 1.0 ships, the two most recent minor versions will receive
 security fixes.
