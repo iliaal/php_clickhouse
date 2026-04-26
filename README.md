@@ -287,9 +287,9 @@ foreach ($ch->getLogQueries() as $q) {
 
 `ClickHouseException` carries three extra public properties:
 
-- `server_code` — ClickHouse error code (e.g. 159 = `TIMEOUT_EXCEEDED`). `0` for client-side errors.
-- `server_name` — server-reported exception name (e.g. `DB::Exception`). `null` for client-side errors.
-- `query_id` — the query id associated with the failed call, when one was supplied. `null` otherwise.
+- `server_code`: ClickHouse error code (e.g. 159 = `TIMEOUT_EXCEEDED`). `0` for client-side errors.
+- `server_name`: server-reported exception name (e.g. `DB::Exception`). `null` for client-side errors.
+- `query_id`: the query id associated with the failed call, when one was supplied. `null` otherwise.
 
 ## 📊 Benchmarks
 
@@ -318,8 +318,8 @@ At high select counts the native binary protocol runs 30-40% faster than the HTT
 
 Companion native PHP extensions for high-throughput PHP workloads:
 
-- **[php_excel](https://github.com/iliaal/php_excel)** — Native Excel I/O. 7-10× faster than PhpSpreadsheet, full XLS/XLSX with formulas, conditional formatting, and rich text. Powered by LibXL.
-- **[mdparser](https://github.com/iliaal/mdparser)** — Native CommonMark + GFM markdown parser. 15-30× faster than pure-PHP libraries (Parsedown, cebe, michelf). Powered by cmark-gfm.
+- **[php_excel](https://github.com/iliaal/php_excel)**: native Excel I/O. 7-10× faster than PhpSpreadsheet, full XLS/XLSX with formulas, conditional formatting, and rich text. Powered by LibXL.
+- **[mdparser](https://github.com/iliaal/mdparser)**: native CommonMark + GFM markdown parser. 15-30× faster than pure-PHP libraries (Parsedown, cebe, michelf). Powered by cmark-gfm.
 
 ## 📚 Read more
 
