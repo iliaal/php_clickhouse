@@ -1,5 +1,5 @@
 /* This is a generated file, edit clickhouse.stub.php instead.
- * Stub hash: 88d95b57a193f38e6641804b04ea483a0168bd71 */
+ * Stub hash: ff72082d4d1a5668f78eb849284fa2fd3d76ce53 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_ClickHouse___construct, 0, 0, 1)
 	ZEND_ARG_TYPE_INFO(0, connectParams, IS_ARRAY, 0)
@@ -74,7 +74,7 @@ ZEND_END_ARG_INFO()
 #define arginfo_class_ClickHouse_setProfileCallback arginfo_class_ClickHouse_setProgressCallback
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_setVerbose, 0, 1, IS_STATIC, 0)
-	ZEND_ARG_TYPE_MASK(0, sink, MAY_BE_BOOL|MAY_BE_CALLABLE, NULL)
+	ZEND_ARG_TYPE_INFO(0, sink, IS_MIXED, 0)
 ZEND_END_ARG_INFO()
 
 #define arginfo_class_ClickHouse_resetConnection arginfo_class_ClickHouse_writeEnd
