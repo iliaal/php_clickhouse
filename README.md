@@ -207,20 +207,42 @@ $ch->writeEnd();
 
 $ch->ping();          // returns true on success, throws on failure
 
+// Streaming reads (no full-result PHP array)
+$iter = $ch->selectStream(string $sql, array $params = [],
+                          string $query_id = "", array $settings = []);
+foreach ($iter as $row) { /* ... */ }   // ClickHouseRowIterator: Iterator+Countable
+
+$ch->selectStreamCallback(string $sql, callable $cb,
+                          array $params = [], string $query_id = "",
+                          array $settings = []);  // true per-row stream
+
 // Settings, observability, helpers
 $ch->setSettings(array $settings);     // client-wide; per-call overrides
 $ch->setProgressCallback(?callable $cb);
-$stats = $ch->getStatistics();         // last query: rows, bytes, elapsed_ms
+$ch->setProfileCallback(?callable $cb);
+$stats = $ch->getStatistics();         // last query: rows, bytes, elapsed_ms, query_id
+
+$ch->resetConnection();
+$info = $ch->getServerInfo();          // name, version_*, revision, timezone, display_name
+$ep   = $ch->getCurrentEndpoint();     // {host, port} of the active endpoint, or null
 
 $ch->enableLogQueries(bool $enabled = true);
 $log = $ch->getLogQueries();           // returns and clears the buffer
 
+// DDL / introspection helpers
+$ch->isExists(string $database, string $table);
+$ch->showDatabases();
+$ch->showProcesslist();
+$ch->getServerVersion();
 $ch->databaseSize(?string $database = null);     // {bytes_on_disk, rows}
 $ch->tablesSize(?string $database = null);
+$ch->tableSize(string $table);                   // {rows, bytes_on_disk, partitions, modification_time}
 $ch->partitions(string $table);
 $ch->showTables(?string $database = null, ?string $like = null);
 $ch->showCreateTable(string $table);
 $ch->getServerUptime();                // seconds
+$ch->truncateTable(string $table);
+$ch->dropPartition(string $table, string $partition);
 ```
 
 `fetch_mode` is a bitmask of `ClickHouse::FETCH_ONE`, `ClickHouse::FETCH_KEY_PAIR`, `ClickHouse::FETCH_COLUMN`, and `ClickHouse::DATE_AS_STRINGS`.

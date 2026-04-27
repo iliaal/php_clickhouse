@@ -7,6 +7,103 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-04-26
+
+Architecture refactor that moves per-Client state from file-scope
+`std::map` banks onto the `zend_object` itself. The change unblocks
+ZTS support (no more global state to thread-isolate), plugs a
+pre-existing leak on bailout (`free_obj` fires; the old userspace-only
+`__destruct` did not), and fixes a refcount bug on the progress
+callback. ZTS Linux builds are now first-class; a Windows
+`config.w32` ships and is exercised in CI as a build-only smoke
+test. Adds streaming via `ClickHouseRowIterator` plus a true
+per-row callback path, four new Client knobs / introspection
+methods, seven DDL helpers, transparent `LowCardinality(Nullable(T))`
+and geo-type round-trips, and `query_id` echo through
+`getStatistics()`.
+
+### Added
+
+- Streaming row iterator: `selectStream(string $sql, ...)` returns a
+  `ClickHouseRowIterator` (`Iterator` + `Countable`) so large result
+  sets walk lazily without materializing as a single PHP array. The
+  iterator survives `unset($client)` since blocks own their column
+  data via `shared_ptr`.
+- True per-row callback path: `selectStreamCallback(string $sql,
+  callable $cb, ...)` invokes the callback once per row as blocks
+  arrive, never accumulating the full result. Use this for unbounded
+  streams.
+- Client knobs and introspection: `ping_before_query` constructor
+  config key (round-trip ping before each query), `resetConnection()`
+  method, `getServerInfo()` (name, version_major/minor/patch,
+  revision, timezone, display_name), `getCurrentEndpoint()`
+  (host/port of the active endpoint when an endpoints[] pool is in
+  use), `setProfileCallback(?callable $cb)` for `Profile` packets
+  (rows, blocks, bytes, rows_before_limit, applied_limit).
+- `query_id` echoed through `getStatistics()` so callers can correlate
+  a recorded statistics snapshot to a server-side query in
+  `system.query_log`.
+- DDL helpers: `isExists(string $database, string $table): bool`,
+  `showDatabases(): array`, `showProcesslist(): array`,
+  `getServerVersion(): string`, `tableSize(string $table): array`,
+  `truncateTable(string $table): bool`,
+  `dropPartition(string $table, string $partition): bool`. All
+  identifier arguments validated; `dropPartition` SQL-escapes the
+  partition value.
+- Type coverage: `LowCardinality(Nullable(String))` and
+  `LowCardinality(Nullable(FixedString))` round-trip on both read
+  and write paths. Geo types Point, Ring, Polygon, MultiPolygon
+  round-trip via `ColumnGeo` (Point as `[Float64, Float64]`, others
+  as nested arrays). `SimpleAggregateFunction(f, T)` reads
+  transparently as `T`.
+- `ClickHouseRowIterator` class registered alongside `ClickHouse`.
+
+### Changed
+
+- Per-Client state (Client*, insert Block, ClientStats, settings,
+  progress/profile callbacks, log_enabled, query_log) lives on the
+  `zend_object` itself via custom `create_object`/`free_obj`
+  handlers. Replaces the seven file-scope `std::map<int, ...>` banks
+  keyed on `Z_OBJ_HANDLE`.
+- ZTS gate at MINIT removed. The extension loads under `--enable-zts`
+  builds; per-object state means no thread-shared mutable state to
+  protect.
+- `config.w32` rewritten from a 9-line warning stub to a full Windows
+  build script that mirrors `config.m4`'s source list, includes, and
+  flags. Optional `--enable-clickhouse-openssl` plumbing is mirrored
+  via `CHECK_LIB("libssl.lib", ...)`. CI exercises Windows as a build
+  + extension-load smoke (no live server tests on Windows).
+- CI matrix gains a `linux-zts` job (PHP 8.4 ZTS built from source)
+  and a `windows` job (build-only).
+
+### Fixed
+
+- IPv4 / IPv6 read paths no longer crash. Vendored clickhouse-cpp
+  v2.6.1 made `ColumnIPv4`/`ColumnIPv6` siblings of (not subclasses
+  of) `ColumnUInt32`/`ColumnFixedString`, so the prior
+  `As<ColumnUInt32>()` / `As<ColumnFixedString>()` calls returned
+  null and segfaulted on dereference. Use `ColumnIPv*::AsString(row)`
+  for canonical dotted-quad / `::1` form.
+- Progress callback zval refcount: `setProgressCallback` now uses
+  `ZVAL_COPY` instead of a struct copy, so the callable doesn't get
+  freed out from under us when the caller goes out of scope.
+- Connection / insert-block leaks on bailout: cleanup runs in the new
+  `free_obj` handler, which fires unconditionally. Previously the
+  userspace `__destruct` didn't run on fatal errors, leaking the
+  underlying `Client*` and any half-open insert stream.
+
+### Known limitations
+
+- `SELECT ... WITH TOTALS` and `SETTINGS extremes=1` still throw
+  `unimplemented 7` from the cpp layer. clickhouse-cpp v2.6.1 does
+  not dispatch the Totals/Extremes packet types
+  ([upstream issue #297](https://github.com/ClickHouse/clickhouse-cpp/issues/297));
+  `getTotals()` / `getExtremes()` are deferred to a future release.
+- `Map(LowCardinality(K), V)` read paths are not yet decoded;
+  `showProcesslist()` selects a fixed projection of standard
+  columns to avoid the unsupported map columns
+  (`ProfileEvents`, `Settings`, `used_*`).
+
 ## [0.7.0] - 2026-04-26
 
 Feature release closing the ergonomics gap with smi2/phpClickHouse.

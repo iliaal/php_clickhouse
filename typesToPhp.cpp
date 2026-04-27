@@ -32,6 +32,9 @@ extern "C" {
 #include "lib/clickhouse-cpp/clickhouse/error_codes.h"
 #include "lib/clickhouse-cpp/clickhouse/types/type_parser.h"
 #include "lib/clickhouse-cpp/clickhouse/columns/factory.h"
+#include "lib/clickhouse-cpp/clickhouse/columns/geo.h"
+#include "lib/clickhouse-cpp/clickhouse/columns/ip4.h"
+#include "lib/clickhouse-cpp/clickhouse/columns/ip6.h"
 #include "lib/clickhouse-cpp/clickhouse/columns/lowcardinality.h"
 #include "lib/clickhouse-cpp/clickhouse/columns/map.h"
 #include <map>
@@ -187,16 +190,27 @@ ColumnRef createColumn(TypeRef type)
     case Type::Code::LowCardinality:
     {
         TypeRef nested = type->As<LowCardinalityType>()->GetNestedType();
-        if (nested->GetCode() == Type::Code::String) {
+        bool is_nullable = (nested->GetCode() == Type::Code::Nullable);
+        TypeRef inner = is_nullable
+            ? nested->As<NullableType>()->GetNestedType()
+            : nested;
+        if (inner->GetCode() == Type::Code::String) {
+            if (is_nullable) {
+                return std::make_shared<ColumnLowCardinalityT<ColumnNullableT<ColumnString>>>();
+            }
             return std::make_shared<ColumnLowCardinalityT<ColumnString>>();
         }
-        if (nested->GetCode() == Type::Code::FixedString) {
-            string typeName = nested->GetName();
+        if (inner->GetCode() == Type::Code::FixedString) {
+            string typeName = inner->GetName();
             typeName.erase(typeName.find("FixedString("), 12);
             typeName.erase(typeName.find(")"), 1);
-            return std::make_shared<ColumnLowCardinalityT<ColumnFixedString>>(std::stoi(typeName));
+            int width = std::stoi(typeName);
+            if (is_nullable) {
+                return std::make_shared<ColumnLowCardinalityT<ColumnNullableT<ColumnFixedString>>>(width);
+            }
+            return std::make_shared<ColumnLowCardinalityT<ColumnFixedString>>(width);
         }
-        throw std::runtime_error("LowCardinality only supported over String / FixedString");
+        throw std::runtime_error("LowCardinality only supported over String / FixedString (Nullable allowed)");
     }
 
     case Type::Code::Map:
@@ -318,6 +332,53 @@ static ColumnRef appendMapColumn(HashTable *values_ht, KFn extract_key, VFn extr
         col->Append(entries);
     } ZEND_HASH_FOREACH_END();
     return col;
+}
+
+// Coerce a PHP 2-element numeric array into a (double, double) point tuple.
+// Used by Point/Ring/Polygon/MultiPolygon insert paths.
+static std::tuple<double, double> phpToPoint(zval *zv)
+{
+    if (Z_TYPE_P(zv) != IS_ARRAY) {
+        throw std::runtime_error("Point must be a PHP array of 2 numbers");
+    }
+    HashTable *ht = Z_ARRVAL_P(zv);
+    if (zend_hash_num_elements(ht) != 2) {
+        throw std::runtime_error("Point must have exactly 2 elements");
+    }
+    zval *x = sc_zend_hash_index_find(ht, 0);
+    zval *y = sc_zend_hash_index_find(ht, 1);
+    if (!x || !y) {
+        throw std::runtime_error("Point is missing an element");
+    }
+    convert_to_double(x);
+    convert_to_double(y);
+    return std::make_tuple(Z_DVAL_P(x), Z_DVAL_P(y));
+}
+
+static std::vector<std::tuple<double, double>> phpToRing(zval *zv)
+{
+    if (Z_TYPE_P(zv) != IS_ARRAY) {
+        throw std::runtime_error("Ring must be a PHP array of points");
+    }
+    std::vector<std::tuple<double, double>> ring;
+    zval *pt;
+    ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(zv), pt) {
+        ring.push_back(phpToPoint(pt));
+    } ZEND_HASH_FOREACH_END();
+    return ring;
+}
+
+static std::vector<std::vector<std::tuple<double, double>>> phpToPolygon(zval *zv)
+{
+    if (Z_TYPE_P(zv) != IS_ARRAY) {
+        throw std::runtime_error("Polygon must be a PHP array of rings");
+    }
+    std::vector<std::vector<std::tuple<double, double>>> poly;
+    zval *r;
+    ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(zv), r) {
+        poly.push_back(phpToRing(r));
+    } ZEND_HASH_FOREACH_END();
+    return poly;
 }
 
 ColumnRef insertColumn(TypeRef type, zval *value_zval)
@@ -776,7 +837,26 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     case Type::Code::LowCardinality:
     {
         TypeRef nested = type->As<LowCardinalityType>()->GetNestedType();
-        if (nested->GetCode() == Type::Code::String) {
+        bool is_nullable = (nested->GetCode() == Type::Code::Nullable);
+        TypeRef inner = is_nullable
+            ? nested->As<NullableType>()->GetNestedType()
+            : nested;
+
+        if (inner->GetCode() == Type::Code::String) {
+            if (is_nullable) {
+                auto value = std::make_shared<ColumnLowCardinalityT<ColumnNullableT<ColumnString>>>();
+                ZEND_HASH_FOREACH_VAL(values_ht, array_value)
+                {
+                    if (Z_TYPE_P(array_value) == IS_NULL) {
+                        value->Append(std::nullopt);
+                    } else {
+                        convert_to_string(array_value);
+                        value->Append(std::string_view(Z_STRVAL_P(array_value), Z_STRLEN_P(array_value)));
+                    }
+                }
+                ZEND_HASH_FOREACH_END();
+                return value;
+            }
             auto value = std::make_shared<ColumnLowCardinalityT<ColumnString>>();
             ZEND_HASH_FOREACH_VAL(values_ht, array_value)
             {
@@ -786,11 +866,26 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
             ZEND_HASH_FOREACH_END();
             return value;
         }
-        if (nested->GetCode() == Type::Code::FixedString) {
-            string typeName = nested->GetName();
+        if (inner->GetCode() == Type::Code::FixedString) {
+            string typeName = inner->GetName();
             typeName.erase(typeName.find("FixedString("), 12);
             typeName.erase(typeName.find(")"), 1);
-            auto value = std::make_shared<ColumnLowCardinalityT<ColumnFixedString>>(std::stoi(typeName));
+            int width = std::stoi(typeName);
+            if (is_nullable) {
+                auto value = std::make_shared<ColumnLowCardinalityT<ColumnNullableT<ColumnFixedString>>>(width);
+                ZEND_HASH_FOREACH_VAL(values_ht, array_value)
+                {
+                    if (Z_TYPE_P(array_value) == IS_NULL) {
+                        value->Append(std::nullopt);
+                    } else {
+                        convert_to_string(array_value);
+                        value->Append(std::string_view(Z_STRVAL_P(array_value), Z_STRLEN_P(array_value)));
+                    }
+                }
+                ZEND_HASH_FOREACH_END();
+                return value;
+            }
+            auto value = std::make_shared<ColumnLowCardinalityT<ColumnFixedString>>(width);
             ZEND_HASH_FOREACH_VAL(values_ht, array_value)
             {
                 convert_to_string(array_value);
@@ -799,7 +894,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
             ZEND_HASH_FOREACH_END();
             return value;
         }
-        throw std::runtime_error("LowCardinality only supported over String / FixedString");
+        throw std::runtime_error("LowCardinality only supported over String / FixedString (Nullable allowed)");
     }
 
     case Type::Code::Map:
@@ -860,6 +955,47 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                                    ColumnInt64, ColumnString>(values_ht, i64Key, strVal);
         }
         throw std::runtime_error("Unsupported Map(K, V) for row write: " + type->GetName());
+    }
+
+    case Type::Code::Point:
+    {
+        auto col = std::make_shared<ColumnPoint>();
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
+            col->Append(phpToPoint(array_value));
+        } ZEND_HASH_FOREACH_END();
+        return col;
+    }
+    case Type::Code::Ring:
+    {
+        auto col = std::make_shared<ColumnRing>();
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
+            col->Append(phpToRing(array_value));
+        } ZEND_HASH_FOREACH_END();
+        return col;
+    }
+    case Type::Code::Polygon:
+    {
+        auto col = std::make_shared<ColumnPolygon>();
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
+            col->Append(phpToPolygon(array_value));
+        } ZEND_HASH_FOREACH_END();
+        return col;
+    }
+    case Type::Code::MultiPolygon:
+    {
+        auto col = std::make_shared<ColumnMultiPolygon>();
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
+            if (Z_TYPE_P(array_value) != IS_ARRAY) {
+                throw std::runtime_error("MultiPolygon must be a PHP array of polygons");
+            }
+            std::vector<std::vector<std::vector<std::tuple<double, double>>>> mp;
+            zval *poly;
+            ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(array_value), poly) {
+                mp.push_back(phpToPolygon(poly));
+            } ZEND_HASH_FOREACH_END();
+            col->Append(mp);
+        } ZEND_HASH_FOREACH_END();
+        return col;
     }
 
     case Type::Code::Void:
@@ -952,6 +1088,54 @@ static inline void emitIntColumn(zval *arr, const ColumnRef& columnRef, int row,
     }
 }
 
+// Build a PHP 2-element numeric array for a Point. Output is a freshly
+// initialized zval owned by the caller; the caller decides how to attach
+// it (next_index, assoc, or write-into-arr).
+static void pointToZval(zval *out, const std::tuple<double, double>& pt)
+{
+    array_init(out);
+    add_next_index_double(out, std::get<0>(pt));
+    add_next_index_double(out, std::get<1>(pt));
+}
+
+// Geo nested types come back as clickhouse::ColumnArrayT::ArrayValueView,
+// not std::vector. The view is STL-iterable but not assignable to a
+// vector reference, so the helpers below take templated iterables.
+template <typename PointRange>
+static void ringRangeToZval(zval *out, const PointRange& ring)
+{
+    array_init(out);
+    for (auto pt : ring) {
+        zval pt_zv;
+        pointToZval(&pt_zv, pt);
+        add_next_index_zval(out, &pt_zv);
+    }
+}
+
+template <typename RingRange>
+static void polygonRangeToZval(zval *out, const RingRange& poly)
+{
+    array_init(out);
+    for (auto ring : poly) {
+        zval r_zv;
+        ringRangeToZval(&r_zv, ring);
+        add_next_index_zval(out, &r_zv);
+    }
+}
+
+// Attach a built-up nested zval to the parent according to (is_array,
+// fetch_mode, column_name). Mirrors the dispatch pattern Array/Tuple use.
+static void emitNestedZval(zval *arr, zval *built, const string& column_name, int8_t is_array, long fetch_mode)
+{
+    if (is_array) {
+        add_next_index_zval(arr, built);
+    } else if (fetch_mode & SC_FETCH_ONE) {
+        ZVAL_COPY_VALUE(arr, built);
+    } else {
+        sc_add_assoc_zval_ex(arr, column_name.c_str(), column_name.length(), built);
+    }
+}
+
 void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column_name, int8_t is_array, long fetch_mode)
 {
     switch (columnRef->Type()->GetCode())
@@ -966,9 +1150,24 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
         emitIntColumn<ColumnUInt16>(arr, columnRef, row, column_name, is_array, fetch_mode);
         break;
     case Type::Code::UInt32:
-    case Type::Code::IPv4:
         emitIntColumn<ColumnUInt32>(arr, columnRef, row, column_name, is_array, fetch_mode);
         break;
+    case Type::Code::IPv4:
+    {
+        /* As above, ColumnIPv4 is no longer a ColumnUInt32 subclass in
+         * v2.6.1; emit as canonical dotted-quad string via AsString(). */
+        auto col_ip = columnRef->As<ColumnIPv4>();
+        std::string s = col_ip ? col_ip->AsString(row) : std::string();
+        if (is_array)
+        {
+            sc_add_next_index_stringl(arr, (char*)s.data(), s.size(), 1);
+        }
+        else
+        {
+            SC_SINGLE_STRING((char*)s.data(), s.size());
+        }
+        break;
+    }
     case Type::Code::Int8:
         emitIntColumn<ColumnInt8>(arr, columnRef, row, column_name, is_array, fetch_mode);
         break;
@@ -1097,15 +1296,19 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
     }
     case Type::Code::IPv6:
     {
-        // IPv6 is always 16 raw bytes; trailing NULs are meaningful, don't trim.
-        auto col = (*columnRef->As<ColumnFixedString>())[row];
+        /* clickhouse-cpp v2.6.1 made ColumnIPv6 a sibling of ColumnFixedString
+         * (composition, not inheritance), so As<ColumnFixedString>() returns
+         * null and crashed every IPv6 read. Use AsString() to get the
+         * canonical "::1" form. */
+        auto col_ip = columnRef->As<ColumnIPv6>();
+        std::string s = col_ip ? col_ip->AsString(row) : std::string();
         if (is_array)
         {
-            sc_add_next_index_stringl(arr, (char*)col.data(), col.length(), 1);
+            sc_add_next_index_stringl(arr, (char*)s.data(), s.size(), 1);
         }
         else
         {
-            SC_SINGLE_STRING((char*)col.data(), col.length());
+            SC_SINGLE_STRING((char*)s.data(), s.size());
         }
         break;
     }
@@ -1371,14 +1574,45 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
 
     case Type::Code::LowCardinality:
     {
+        // Drop through ColumnLowCardinality::GetItem so the same code
+        // path covers LC(String), LC(FixedString), LC(Nullable(String)),
+        // and LC(Nullable(FixedString)) -- a NULL entry returns an
+        // ItemView with type Void regardless of the nested column.
+        auto lc = columnRef->As<ColumnLowCardinality>();
+        if (!lc) {
+            throw std::runtime_error("LowCardinality column downcast failed");
+        }
         TypeRef nested = columnRef->Type()->As<LowCardinalityType>()->GetNestedType();
-        std::string_view sv;
-        if (nested->GetCode() == Type::Code::String) {
-            sv = columnRef->As<ColumnLowCardinalityT<ColumnString>>()->At(row);
-        } else if (nested->GetCode() == Type::Code::FixedString) {
-            sv = columnRef->As<ColumnLowCardinalityT<ColumnFixedString>>()->At(row);
-        } else {
+        bool is_nullable = (nested->GetCode() == Type::Code::Nullable);
+        TypeRef inner = is_nullable
+            ? nested->As<NullableType>()->GetNestedType()
+            : nested;
+        if (inner->GetCode() != Type::Code::String &&
+            inner->GetCode() != Type::Code::FixedString) {
             throw std::runtime_error("LowCardinality read only supports String / FixedString");
+        }
+
+        ItemView iv = lc->GetItem(row);
+        if (is_nullable && iv.type == Type::Code::Void) {
+            if (is_array) {
+                add_next_index_null(arr);
+            } else if (fetch_mode & SC_FETCH_ONE) {
+                ZVAL_NULL(arr);
+            } else {
+                sc_add_assoc_null_ex(arr, column_name.c_str(), column_name.length());
+            }
+            break;
+        }
+
+        std::string_view sv = iv.AsBinaryData();
+        // FixedString views include trailing NULs from server-side padding;
+        // trim them so the round-trip preserves the original input.
+        if (inner->GetCode() == Type::Code::FixedString) {
+            size_t len = sv.length();
+            while (len > 0 && sv.data()[len - 1] == '\0') {
+                --len;
+            }
+            sv = std::string_view(sv.data(), len);
         }
         if (is_array) {
             sc_add_next_index_stringl(arr, (char*)sv.data(), sv.length(), 1);
@@ -1475,6 +1709,48 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
         } else {
             sc_add_assoc_zval_ex(arr, column_name.c_str(), column_name.length(), map_zv);
         }
+        break;
+    }
+
+    case Type::Code::Point:
+    {
+        auto col = columnRef->As<ColumnPoint>();
+        if (!col) throw std::runtime_error("Point column downcast failed");
+        zval pt_zv;
+        pointToZval(&pt_zv, col->At(row));
+        emitNestedZval(arr, &pt_zv, column_name, is_array, fetch_mode);
+        break;
+    }
+    case Type::Code::Ring:
+    {
+        auto col = columnRef->As<ColumnRing>();
+        if (!col) throw std::runtime_error("Ring column downcast failed");
+        zval r_zv;
+        ringRangeToZval(&r_zv, col->At(row));
+        emitNestedZval(arr, &r_zv, column_name, is_array, fetch_mode);
+        break;
+    }
+    case Type::Code::Polygon:
+    {
+        auto col = columnRef->As<ColumnPolygon>();
+        if (!col) throw std::runtime_error("Polygon column downcast failed");
+        zval p_zv;
+        polygonRangeToZval(&p_zv, col->At(row));
+        emitNestedZval(arr, &p_zv, column_name, is_array, fetch_mode);
+        break;
+    }
+    case Type::Code::MultiPolygon:
+    {
+        auto col = columnRef->As<ColumnMultiPolygon>();
+        if (!col) throw std::runtime_error("MultiPolygon column downcast failed");
+        zval mp_zv;
+        array_init(&mp_zv);
+        for (auto poly : col->At(row)) {
+            zval poly_zv;
+            polygonRangeToZval(&poly_zv, poly);
+            add_next_index_zval(&mp_zv, &poly_zv);
+        }
+        emitNestedZval(arr, &mp_zv, column_name, is_array, fetch_mode);
         break;
     }
 

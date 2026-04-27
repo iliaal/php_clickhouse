@@ -1,8 +1,58 @@
+// vim:ft=javascript
+
 ARG_ENABLE("clickhouse", "Enable ClickHouse client support", "no");
+ARG_ENABLE("clickhouse-openssl", "Enable TLS/SSL support in php_clickhouse (requires OpenSSL)", "no");
 
 if (PHP_CLICKHOUSE != "no") {
-    // Full Windows build of the vendored clickhouse-cpp + zstd + absl + lz4 + cityhash
-    // is non-trivial and currently out of scope. The Linux/macOS builds via PIE
-    // (see composer.json + config.m4) are the supported path. Patches welcome.
-    WARNING("clickhouse extension does not yet ship a Windows config.w32; build is unsupported on this platform.");
+    var ext_dir = configure_module_dirname;
+    var ch_root = ext_dir + "\\lib\\clickhouse-cpp";
+
+    // C++17 + zstd ASM workaround + ws2_32 for sockets. /EHsc enables C++
+    // exception unwinding (clickhouse-cpp throws across the wire layer).
+    ADD_FLAG("CFLAGS_CLICKHOUSE",   "/std:c++17 /EHsc /DZSTD_DISABLE_ASM /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS");
+    ADD_FLAG("CXXFLAGS_CLICKHOUSE", "/std:c++17 /EHsc /DZSTD_DISABLE_ASM /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS");
+    ADD_FLAG("LDFLAGS_CLICKHOUSE",  "ws2_32.lib");
+
+    ADD_FLAG("CFLAGS_CLICKHOUSE",
+        "/I" + ch_root +
+        " /I" + ch_root + "\\contrib" +
+        " /I" + ch_root + "\\contrib\\absl" +
+        " /I" + ch_root + "\\contrib\\cityhash" +
+        " /I" + ch_root + "\\contrib\\cityhash\\cityhash" +
+        " /I" + ch_root + "\\contrib\\lz4" +
+        " /I" + ch_root + "\\contrib\\lz4\\lz4" +
+        " /I" + ch_root + "\\contrib\\zstd\\zstd" +
+        " /I" + ch_root + "\\contrib\\zstd\\zstd\\common");
+
+    var clickhouse_ssl_src = "";
+    if (PHP_CLICKHOUSE_OPENSSL != "no") {
+        if (CHECK_LIB("libssl.lib", "clickhouse") &&
+            CHECK_LIB("libcrypto.lib", "clickhouse") &&
+            CHECK_HEADER_ADD_INCLUDE("openssl/ssl.h", "CFLAGS_CLICKHOUSE")) {
+            ADD_FLAG("CXXFLAGS_CLICKHOUSE", "/DWITH_OPENSSL");
+            ADD_FLAG("CFLAGS_CLICKHOUSE",   "/DWITH_OPENSSL");
+            AC_DEFINE("WITH_OPENSSL", 1, "Build php_clickhouse with TLS/SSL support");
+            clickhouse_ssl_src = "sslsocket.cpp";
+        } else {
+            WARNING("clickhouse-openssl was requested but libssl/libcrypto were not found; building without TLS support.");
+        }
+    }
+
+    EXTENSION("clickhouse", "clickhouse.cpp typesToPhp.cpp", null, "/DZEND_ENABLE_STATIC_TSRMLS_CACHE=1");
+
+    ADD_SOURCES(ch_root + "\\clickhouse",            "block.cpp client.cpp query.cpp",                                                                                                                                                                                                                              "clickhouse");
+    ADD_SOURCES(ch_root + "\\clickhouse\\base",      "compressed.cpp endpoints_iterator.cpp input.cpp output.cpp platform.cpp socket.cpp wire_format.cpp " + clickhouse_ssl_src,                                                                                                                                    "clickhouse");
+    ADD_SOURCES(ch_root + "\\clickhouse\\columns",   "array.cpp column.cpp date.cpp decimal.cpp enum.cpp factory.cpp geo.cpp ip4.cpp ip6.cpp itemview.cpp lowcardinality.cpp map.cpp nullable.cpp numeric.cpp string.cpp time.cpp tuple.cpp uuid.cpp",                                                              "clickhouse");
+    ADD_SOURCES(ch_root + "\\clickhouse\\types",     "type_parser.cpp types.cpp",                                                                                                                                                                                                                                   "clickhouse");
+
+    // Vendored dependencies (pure C/C++; built into the same module).
+    ADD_SOURCES(ch_root + "\\contrib\\cityhash\\cityhash", "city.cc", "clickhouse");
+    ADD_SOURCES(ch_root + "\\contrib\\lz4\\lz4",           "lz4.c lz4hc.c", "clickhouse");
+    ADD_SOURCES(ch_root + "\\contrib\\absl\\absl\\numeric", "int128.cc", "clickhouse");
+    ADD_SOURCES(ch_root + "\\contrib\\zstd\\zstd\\common",
+        "debug.c entropy_common.c error_private.c fse_decompress.c pool.c threading.c xxhash.c zstd_common.c", "clickhouse");
+    ADD_SOURCES(ch_root + "\\contrib\\zstd\\zstd\\compress",
+        "fse_compress.c hist.c huf_compress.c zstd_compress.c zstd_compress_literals.c zstd_compress_sequences.c zstd_compress_superblock.c zstd_double_fast.c zstd_fast.c zstd_lazy.c zstd_ldm.c zstd_opt.c zstdmt_compress.c", "clickhouse");
+    ADD_SOURCES(ch_root + "\\contrib\\zstd\\zstd\\decompress",
+        "huf_decompress.c zstd_ddict.c zstd_decompress.c zstd_decompress_block.c", "clickhouse");
 }
