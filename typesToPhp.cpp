@@ -313,8 +313,7 @@ static ColumnRef appendFloatColumn(HashTable *values_ht)
 
 // Build a ColumnMapT<KCol, VCol> from PHP rows. Each row is an assoc
 // array; the caller supplies extractors that turn (zend_string*, ulong)
-// into K and (zval*) into V. Five near-identical Map(K, V) arms route
-// through here.
+// into K and (zval*) into V.
 template <typename K, typename V, typename KCol, typename VCol,
           typename KFn, typename VFn>
 static ColumnRef appendMapColumn(HashTable *values_ht, KFn extract_key, VFn extract_val)
@@ -337,6 +336,84 @@ static ColumnRef appendMapColumn(HashTable *values_ht, KFn extract_key, VFn extr
         col->Append(entries);
     } ZEND_HASH_FOREACH_END();
     return col;
+}
+
+// Parse a PHP zval into a clickhouse UUID. Mirrors the standalone-UUID
+// insert path; used by Map(*, UUID) value extraction.
+static UUID phpToUUID(zval *zv)
+{
+    if (Z_TYPE_P(zv) == IS_NULL) {
+        return UUID{0, 0};
+    }
+    convert_to_string(zv);
+    std::string s(Z_STRVAL_P(zv), Z_STRLEN_P(zv));
+    s.erase(std::remove(s.begin(), s.end(), '-'), s.end());
+    if (s.length() != 32) {
+        throw std::runtime_error("UUID format error");
+    }
+    return UUID{
+        std::stoull(s.substr(0, 16), nullptr, 16),
+        std::stoull(s.substr(16, 16), nullptr, 16),
+    };
+}
+
+// Second-stage Map dispatch: key column type already resolved at the
+// call site, dispatch on value type code. Kept as a function template so
+// each (KCol, K) tuple instantiates its own value-side switch and the
+// compiler can fold identical extractor lambdas across instantiations.
+template <typename KCol, typename K, typename KFn>
+static ColumnRef appendMapByValueType(HashTable *values_ht, TypeRef vtype, KFn key_fn)
+{
+    auto strVal = [](zval *mv) -> std::string {
+        convert_to_string(mv);
+        return std::string(Z_STRVAL_P(mv), Z_STRLEN_P(mv));
+    };
+    auto i64Val = [](zval *mv) -> int64_t {
+        convert_to_long(mv); return (int64_t)Z_LVAL_P(mv);
+    };
+    auto u64Val = [](zval *mv) -> uint64_t {
+        convert_to_long(mv); return (uint64_t)Z_LVAL_P(mv);
+    };
+    auto f64Val = [](zval *mv) -> double {
+        convert_to_double(mv); return Z_DVAL_P(mv);
+    };
+
+    Type::Code vc = vtype->GetCode();
+    switch (vc) {
+        case Type::Code::String:
+            return appendMapColumn<K, std::string, KCol, ColumnString>(values_ht, key_fn, strVal);
+        case Type::Code::Int8:
+            return appendMapColumn<K, int64_t,    KCol, ColumnInt8>(values_ht, key_fn, i64Val);
+        case Type::Code::Int16:
+            return appendMapColumn<K, int64_t,    KCol, ColumnInt16>(values_ht, key_fn, i64Val);
+        case Type::Code::Int32:
+            return appendMapColumn<K, int64_t,    KCol, ColumnInt32>(values_ht, key_fn, i64Val);
+        case Type::Code::Int64:
+            return appendMapColumn<K, int64_t,    KCol, ColumnInt64>(values_ht, key_fn, i64Val);
+        case Type::Code::UInt8:
+            return appendMapColumn<K, uint64_t,   KCol, ColumnUInt8>(values_ht, key_fn, u64Val);
+        case Type::Code::UInt16:
+            return appendMapColumn<K, uint64_t,   KCol, ColumnUInt16>(values_ht, key_fn, u64Val);
+        case Type::Code::UInt32:
+            return appendMapColumn<K, uint64_t,   KCol, ColumnUInt32>(values_ht, key_fn, u64Val);
+        case Type::Code::UInt64:
+            return appendMapColumn<K, uint64_t,   KCol, ColumnUInt64>(values_ht, key_fn, u64Val);
+        case Type::Code::Float32:
+            return appendMapColumn<K, double,     KCol, ColumnFloat32>(values_ht, key_fn, f64Val);
+        case Type::Code::Float64:
+            return appendMapColumn<K, double,     KCol, ColumnFloat64>(values_ht, key_fn, f64Val);
+        case Type::Code::UUID:
+            return appendMapColumn<K, UUID,       KCol, ColumnUUID>(values_ht, key_fn, phpToUUID);
+        case Type::Code::LowCardinality: {
+            TypeRef inner = vtype->As<LowCardinalityType>()->GetNestedType();
+            if (inner->GetCode() == Type::Code::String) {
+                return appendMapColumn<K, std::string, KCol, ColumnLowCardinalityT<ColumnString>>(values_ht, key_fn, strVal);
+            }
+            throw std::runtime_error("Unsupported Map value type LowCardinality(" + inner->GetName() + ")");
+        }
+        default:
+            throw std::runtime_error("Unsupported Map value type: " + vtype->GetName());
+    }
 }
 
 // Coerce a PHP 2-element numeric array into a (double, double) point tuple.
@@ -907,11 +984,9 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         TypeRef k = type->As<MapType>()->GetKeyType();
         TypeRef v = type->As<MapType>()->GetValueType();
         Type::Code kc = k->GetCode();
-        Type::Code vc = v->GetCode();
 
-        // Key extractors: string keys reject integer-keyed PHP entries
-        // outright; Int64 keys parse the string form or fall back to the
-        // numeric key.
+        // String keys reject integer-keyed PHP entries outright; integer
+        // keys parse the string form or fall back to the numeric key.
         auto strKey = [](zend_string *zk, zend_ulong) -> std::string {
             if (!zk) {
                 throw std::runtime_error("Map(String, *) row entry must have a string key");
@@ -921,45 +996,62 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         auto i64Key = [](zend_string *zk, zend_ulong nk) -> int64_t {
             return zk ? (int64_t)strtoll(ZSTR_VAL(zk), NULL, 10) : (int64_t)nk;
         };
-        // Value extractors mutate the zval to coerce its type, then read.
-        auto strVal = [](zval *mv) -> std::string {
-            convert_to_string(mv);
-            return std::string(Z_STRVAL_P(mv), Z_STRLEN_P(mv));
+        auto u64Key = [](zend_string *zk, zend_ulong nk) -> uint64_t {
+            return zk ? (uint64_t)strtoull(ZSTR_VAL(zk), NULL, 10) : (uint64_t)nk;
         };
-        auto i64Val = [](zval *mv) -> int64_t {
-            convert_to_long(mv);
-            return (int64_t)Z_LVAL_P(mv);
+        auto f64Key = [](zend_string *zk, zend_ulong nk) -> double {
+            return zk ? strtod(ZSTR_VAL(zk), NULL) : (double)nk;
         };
-        auto u64Val = [](zval *mv) -> uint64_t {
-            convert_to_long(mv);
-            return (uint64_t)Z_LVAL_P(mv);
-        };
-        auto f64Val = [](zval *mv) -> double {
-            convert_to_double(mv);
-            return Z_DVAL_P(mv);
+        auto uuidKey = [](zend_string *zk, zend_ulong) -> UUID {
+            if (!zk) {
+                throw std::runtime_error("Map(UUID, *) row entry must have a string key");
+            }
+            std::string s(ZSTR_VAL(zk), ZSTR_LEN(zk));
+            s.erase(std::remove(s.begin(), s.end(), '-'), s.end());
+            if (s.length() != 32) {
+                throw std::runtime_error("UUID key format error");
+            }
+            return UUID{
+                std::stoull(s.substr(0, 16), nullptr, 16),
+                std::stoull(s.substr(16, 16), nullptr, 16),
+            };
         };
 
-        if (kc == Type::Code::String && vc == Type::Code::String) {
-            return appendMapColumn<std::string, std::string,
-                                   ColumnString, ColumnString>(values_ht, strKey, strVal);
+        switch (kc) {
+            case Type::Code::String:
+                return appendMapByValueType<ColumnString,  std::string>(values_ht, v, strKey);
+            case Type::Code::Int8:
+                return appendMapByValueType<ColumnInt8,    int64_t>(values_ht, v, i64Key);
+            case Type::Code::Int16:
+                return appendMapByValueType<ColumnInt16,   int64_t>(values_ht, v, i64Key);
+            case Type::Code::Int32:
+                return appendMapByValueType<ColumnInt32,   int64_t>(values_ht, v, i64Key);
+            case Type::Code::Int64:
+                return appendMapByValueType<ColumnInt64,   int64_t>(values_ht, v, i64Key);
+            case Type::Code::UInt8:
+                return appendMapByValueType<ColumnUInt8,   uint64_t>(values_ht, v, u64Key);
+            case Type::Code::UInt16:
+                return appendMapByValueType<ColumnUInt16,  uint64_t>(values_ht, v, u64Key);
+            case Type::Code::UInt32:
+                return appendMapByValueType<ColumnUInt32,  uint64_t>(values_ht, v, u64Key);
+            case Type::Code::UInt64:
+                return appendMapByValueType<ColumnUInt64,  uint64_t>(values_ht, v, u64Key);
+            case Type::Code::Float32:
+                return appendMapByValueType<ColumnFloat32, double>(values_ht, v, f64Key);
+            case Type::Code::Float64:
+                return appendMapByValueType<ColumnFloat64, double>(values_ht, v, f64Key);
+            case Type::Code::UUID:
+                return appendMapByValueType<ColumnUUID,    UUID>(values_ht, v, uuidKey);
+            case Type::Code::LowCardinality: {
+                TypeRef inner = k->As<LowCardinalityType>()->GetNestedType();
+                if (inner->GetCode() == Type::Code::String) {
+                    return appendMapByValueType<ColumnLowCardinalityT<ColumnString>, std::string>(values_ht, v, strKey);
+                }
+                throw std::runtime_error("Unsupported Map key type LowCardinality(" + inner->GetName() + ")");
+            }
+            default:
+                throw std::runtime_error("Unsupported Map(K, V) for row write: " + type->GetName());
         }
-        if (kc == Type::Code::String && vc == Type::Code::Int64) {
-            return appendMapColumn<std::string, int64_t,
-                                   ColumnString, ColumnInt64>(values_ht, strKey, i64Val);
-        }
-        if (kc == Type::Code::String && vc == Type::Code::UInt64) {
-            return appendMapColumn<std::string, uint64_t,
-                                   ColumnString, ColumnUInt64>(values_ht, strKey, u64Val);
-        }
-        if (kc == Type::Code::String && vc == Type::Code::Float64) {
-            return appendMapColumn<std::string, double,
-                                   ColumnString, ColumnFloat64>(values_ht, strKey, f64Val);
-        }
-        if (kc == Type::Code::Int64 && vc == Type::Code::String) {
-            return appendMapColumn<int64_t, std::string,
-                                   ColumnInt64, ColumnString>(values_ht, i64Key, strVal);
-        }
-        throw std::runtime_error("Unsupported Map(K, V) for row write: " + type->GetName());
     }
 
     case Type::Code::Point:
@@ -1643,35 +1735,91 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
         SC_MAKE_STD_ZVAL(map_zv);
         array_init(map_zv);
 
+        // Decode a key column at row i into one of three forms: string,
+        // long integer, or double. PHP arrays only key by string or
+        // long; doubles get formatted to a canonical string key.
+        auto decodeKey = [&](size_t i, std::string &str_buf, zend_long &long_out, double &dbl_out) -> int {
+            // Returns 0 = string, 1 = long, 2 = double-as-string.
+            switch (key_code) {
+                case Type::Code::String: {
+                    std::string_view kv = (*keys_any->As<ColumnString>())[i];
+                    str_buf.assign(kv.data(), kv.length());
+                    return 0;
+                }
+                case Type::Code::Int64:  long_out = (zend_long)keys_any->As<ColumnInt64>()->At(i);  return 1;
+                case Type::Code::UInt64: long_out = (zend_long)keys_any->As<ColumnUInt64>()->At(i); return 1;
+                case Type::Code::Int32:  long_out = (zend_long)keys_any->As<ColumnInt32>()->At(i);  return 1;
+                case Type::Code::UInt32: long_out = (zend_long)keys_any->As<ColumnUInt32>()->At(i); return 1;
+                case Type::Code::Int16:  long_out = (zend_long)keys_any->As<ColumnInt16>()->At(i);  return 1;
+                case Type::Code::UInt16: long_out = (zend_long)keys_any->As<ColumnUInt16>()->At(i); return 1;
+                case Type::Code::Int8:   long_out = (zend_long)keys_any->As<ColumnInt8>()->At(i);   return 1;
+                case Type::Code::UInt8:  long_out = (zend_long)keys_any->As<ColumnUInt8>()->At(i);  return 1;
+                case Type::Code::Float32: dbl_out = (double)keys_any->As<ColumnFloat32>()->At(i);   return 2;
+                case Type::Code::Float64: dbl_out = (double)keys_any->As<ColumnFloat64>()->At(i);   return 2;
+                case Type::Code::UUID: {
+                    UUID u = keys_any->As<ColumnUUID>()->At(i);
+                    char buf[64];
+                    snprintf(buf, sizeof(buf), "%08x-%04x-%04x-%04x-%012lx",
+                             (uint32_t)(u.first >> 32),
+                             (uint16_t)((u.first >> 16) & 0xffff),
+                             (uint16_t)(u.first & 0xffff),
+                             (uint16_t)(u.second >> 48),
+                             (unsigned long)(u.second & 0xffffffffffffull));
+                    str_buf.assign(buf);
+                    return 0;
+                }
+                default:
+                    throw std::runtime_error("Map read: unsupported key type " + map_type->As<MapType>()->GetKeyType()->GetName());
+            }
+        };
+
+        // Helper: add (string|long-as-string) keyed value into map_zv.
+        // Handles all three key categories returned by decodeKey.
+        auto addStrL = [&](int kkind, const std::string &sb, zend_long lk, double dk,
+                           const char *vptr, size_t vlen) {
+            if (kkind == 0) {
+                sc_add_assoc_stringl_ex(map_zv, sb.c_str(), sb.length(), (char*)vptr, vlen, 1);
+            } else if (kkind == 1) {
+                add_index_stringl(map_zv, lk, (char*)vptr, vlen);
+            } else {
+                char kbuf[64];
+                int klen = snprintf(kbuf, sizeof(kbuf), "%.17g", dk);
+                sc_add_assoc_stringl_ex(map_zv, kbuf, klen, (char*)vptr, vlen, 1);
+            }
+        };
+        auto addLong = [&](int kkind, const std::string &sb, zend_long lk, double dk, zend_long lv) {
+            if (kkind == 0) {
+                add_assoc_long_ex(map_zv, sb.c_str(), sb.length(), lv);
+            } else if (kkind == 1) {
+                add_index_long(map_zv, lk, lv);
+            } else {
+                char kbuf[64];
+                int klen = snprintf(kbuf, sizeof(kbuf), "%.17g", dk);
+                add_assoc_long_ex(map_zv, kbuf, klen, lv);
+            }
+        };
+        auto addDbl = [&](int kkind, const std::string &sb, zend_long lk, double dk, double dv) {
+            if (kkind == 0) {
+                add_assoc_double_ex(map_zv, sb.c_str(), sb.length(), dv);
+            } else if (kkind == 1) {
+                add_index_double(map_zv, lk, dv);
+            } else {
+                char kbuf[64];
+                int klen = snprintf(kbuf, sizeof(kbuf), "%.17g", dk);
+                add_assoc_double_ex(map_zv, kbuf, klen, dv);
+            }
+        };
+
         for (size_t i = 0; i < entry_count; ++i) {
-            // Build PHP key.
             std::string str_key_buf;
             zend_long long_key = 0;
-            bool key_is_string = (key_code == Type::Code::String);
-            if (key_is_string) {
-                std::string_view kv = (*keys_any->As<ColumnString>())[i];
-                str_key_buf.assign(kv.data(), kv.length());
-            } else if (key_code == Type::Code::Int64) {
-                long_key = (zend_long)keys_any->As<ColumnInt64>()->At(i);
-            } else if (key_code == Type::Code::UInt64) {
-                long_key = (zend_long)keys_any->As<ColumnUInt64>()->At(i);
-            } else if (key_code == Type::Code::Int32) {
-                long_key = (zend_long)keys_any->As<ColumnInt32>()->At(i);
-            } else if (key_code == Type::Code::UInt32) {
-                long_key = (zend_long)keys_any->As<ColumnUInt32>()->At(i);
-            } else {
-                throw std::runtime_error("Map read: unsupported key type " + map_type->As<MapType>()->GetKeyType()->GetName());
-            }
+            double dbl_key = 0.0;
+            int kkind = decodeKey(i, str_key_buf, long_key, dbl_key);
 
-            // Build PHP value and add under the right key.
+            // Decode value, dispatch by value type.
             if (value_code == Type::Code::String) {
                 std::string_view vv = (*values_any->As<ColumnString>())[i];
-                if (key_is_string) {
-                    sc_add_assoc_stringl_ex(map_zv, str_key_buf.c_str(), str_key_buf.length(),
-                                            (char*)vv.data(), vv.length(), 1);
-                } else {
-                    add_index_stringl(map_zv, long_key, (char*)vv.data(), vv.length());
-                }
+                addStrL(kkind, str_key_buf, long_key, dbl_key, vv.data(), vv.length());
             } else if (value_code == Type::Code::Int64 || value_code == Type::Code::UInt64
                     || value_code == Type::Code::Int32 || value_code == Type::Code::UInt32
                     || value_code == Type::Code::Int16 || value_code == Type::Code::UInt16
@@ -1688,20 +1836,22 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
                     case Type::Code::UInt8:  lv = (zend_long)values_any->As<ColumnUInt8>()->At(i); break;
                     default: break;
                 }
-                if (key_is_string) {
-                    add_assoc_long_ex(map_zv, str_key_buf.c_str(), str_key_buf.length(), lv);
-                } else {
-                    add_index_long(map_zv, long_key, lv);
-                }
+                addLong(kkind, str_key_buf, long_key, dbl_key, lv);
             } else if (value_code == Type::Code::Float64 || value_code == Type::Code::Float32) {
                 double dv = (value_code == Type::Code::Float64)
                     ? (double)values_any->As<ColumnFloat64>()->At(i)
                     : (double)values_any->As<ColumnFloat32>()->At(i);
-                if (key_is_string) {
-                    add_assoc_double_ex(map_zv, str_key_buf.c_str(), str_key_buf.length(), dv);
-                } else {
-                    add_index_double(map_zv, long_key, dv);
-                }
+                addDbl(kkind, str_key_buf, long_key, dbl_key, dv);
+            } else if (value_code == Type::Code::UUID) {
+                UUID u = values_any->As<ColumnUUID>()->At(i);
+                char buf[64];
+                int blen = snprintf(buf, sizeof(buf), "%08x-%04x-%04x-%04x-%012lx",
+                         (uint32_t)(u.first >> 32),
+                         (uint16_t)((u.first >> 16) & 0xffff),
+                         (uint16_t)(u.first & 0xffff),
+                         (uint16_t)(u.second >> 48),
+                         (unsigned long)(u.second & 0xffffffffffffull));
+                addStrL(kkind, str_key_buf, long_key, dbl_key, buf, blen);
             } else {
                 throw std::runtime_error("Map read: unsupported value type " + map_type->As<MapType>()->GetValueType()->GetName());
             }
