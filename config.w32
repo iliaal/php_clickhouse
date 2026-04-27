@@ -9,8 +9,12 @@ if (PHP_CLICKHOUSE != "no") {
 
     // C++17 + zstd ASM workaround + ws2_32 for sockets. /EHsc enables C++
     // exception unwinding (clickhouse-cpp throws across the wire layer).
-    ADD_FLAG("CFLAGS_CLICKHOUSE",   "/std:c++17 /EHsc /DZSTD_DISABLE_ASM /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS");
-    ADD_FLAG("CXXFLAGS_CLICKHOUSE", "/std:c++17 /EHsc /DZSTD_DISABLE_ASM /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS");
+    // /DNOMINMAX suppresses the windows.h max/min macros that otherwise
+    // collide with std::numeric_limits<T>::max() inside clickhouse-cpp
+    // (array.h template specializations). /bigobj covers the object-
+    // section count blow-up from the heavily templated columns code.
+    ADD_FLAG("CFLAGS_CLICKHOUSE",   "/std:c++17 /EHsc /bigobj /DNOMINMAX /DZSTD_DISABLE_ASM /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS");
+    ADD_FLAG("CXXFLAGS_CLICKHOUSE", "/std:c++17 /EHsc /bigobj /DNOMINMAX /DZSTD_DISABLE_ASM /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS");
     ADD_FLAG("LDFLAGS_CLICKHOUSE",  "ws2_32.lib");
 
     ADD_FLAG("CFLAGS_CLICKHOUSE",
