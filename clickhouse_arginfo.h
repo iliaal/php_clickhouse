@@ -1,5 +1,5 @@
 /* This is a generated file, edit clickhouse.stub.php instead.
- * Stub hash: 02d2137e4fd31f8228051e32915cfdec1055d519 */
+ * Stub hash: 5c8a724fc3e2deb1bed537c92718e3112e4ddc57 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_ClickHouse___construct, 0, 0, 1)
 	ZEND_ARG_TYPE_INFO(0, connectParams, IS_ARRAY, 0)
@@ -62,8 +62,17 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_setProgressCall
 	ZEND_ARG_TYPE_INFO(0, callback, IS_CALLABLE, 1)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_getStatistics, 0, 0, IS_ARRAY, 0)
+#define arginfo_class_ClickHouse_setProfileCallback arginfo_class_ClickHouse_setProgressCallback
+
+#define arginfo_class_ClickHouse_resetConnection arginfo_class_ClickHouse_writeEnd
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_getServerInfo, 0, 0, IS_ARRAY, 0)
 ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_getCurrentEndpoint, 0, 0, IS_ARRAY, 1)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_ClickHouse_getStatistics arginfo_class_ClickHouse_getServerInfo
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_databaseSize, 0, 0, IS_ARRAY, 0)
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, database, IS_STRING, 1, "null")
@@ -91,7 +100,58 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_enableLogQuerie
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, enabled, _IS_BOOL, 0, "true")
 ZEND_END_ARG_INFO()
 
-#define arginfo_class_ClickHouse_getLogQueries arginfo_class_ClickHouse_getStatistics
+#define arginfo_class_ClickHouse_getLogQueries arginfo_class_ClickHouse_getServerInfo
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_ClickHouse_selectStream, 0, 1, ClickHouseRowIterator, 0)
+	ZEND_ARG_TYPE_INFO(0, sql, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, params, IS_ARRAY, 0, "[]")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, query_id, IS_STRING, 0, "\"\"")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, settings, IS_ARRAY, 0, "[]")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_selectStreamCallback, 0, 2, _IS_BOOL, 0)
+	ZEND_ARG_TYPE_INFO(0, sql, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO(0, callback, IS_CALLABLE, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, params, IS_ARRAY, 0, "[]")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, query_id, IS_STRING, 0, "\"\"")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, settings, IS_ARRAY, 0, "[]")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_isExists, 0, 2, _IS_BOOL, 0)
+	ZEND_ARG_TYPE_INFO(0, database, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO(0, table, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_ClickHouse_showDatabases arginfo_class_ClickHouse_getServerInfo
+
+#define arginfo_class_ClickHouse_showProcesslist arginfo_class_ClickHouse_getServerInfo
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_getServerVersion, 0, 0, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_ClickHouse_tableSize arginfo_class_ClickHouse_partitions
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_truncateTable, 0, 1, _IS_BOOL, 0)
+	ZEND_ARG_TYPE_INFO(0, table, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_dropPartition, 0, 2, _IS_BOOL, 0)
+	ZEND_ARG_TYPE_INFO(0, table, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO(0, partition, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouseRowIterator_rewind, 0, 0, IS_VOID, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_ClickHouseRowIterator_valid arginfo_class_ClickHouse_writeEnd
+
+#define arginfo_class_ClickHouseRowIterator_current arginfo_class_ClickHouse_getServerInfo
+
+#define arginfo_class_ClickHouseRowIterator_key arginfo_class_ClickHouse_getServerUptime
+
+#define arginfo_class_ClickHouseRowIterator_next arginfo_class_ClickHouseRowIterator_rewind
+
+#define arginfo_class_ClickHouseRowIterator_count arginfo_class_ClickHouse_getServerUptime
 
 ZEND_METHOD(ClickHouse, __construct);
 ZEND_METHOD(ClickHouse, __destruct);
@@ -105,6 +165,10 @@ ZEND_METHOD(ClickHouse, execute);
 ZEND_METHOD(ClickHouse, ping);
 ZEND_METHOD(ClickHouse, setSettings);
 ZEND_METHOD(ClickHouse, setProgressCallback);
+ZEND_METHOD(ClickHouse, setProfileCallback);
+ZEND_METHOD(ClickHouse, resetConnection);
+ZEND_METHOD(ClickHouse, getServerInfo);
+ZEND_METHOD(ClickHouse, getCurrentEndpoint);
 ZEND_METHOD(ClickHouse, getStatistics);
 ZEND_METHOD(ClickHouse, databaseSize);
 ZEND_METHOD(ClickHouse, tablesSize);
@@ -114,6 +178,21 @@ ZEND_METHOD(ClickHouse, showCreateTable);
 ZEND_METHOD(ClickHouse, getServerUptime);
 ZEND_METHOD(ClickHouse, enableLogQueries);
 ZEND_METHOD(ClickHouse, getLogQueries);
+ZEND_METHOD(ClickHouse, selectStream);
+ZEND_METHOD(ClickHouse, selectStreamCallback);
+ZEND_METHOD(ClickHouse, isExists);
+ZEND_METHOD(ClickHouse, showDatabases);
+ZEND_METHOD(ClickHouse, showProcesslist);
+ZEND_METHOD(ClickHouse, getServerVersion);
+ZEND_METHOD(ClickHouse, tableSize);
+ZEND_METHOD(ClickHouse, truncateTable);
+ZEND_METHOD(ClickHouse, dropPartition);
+ZEND_METHOD(ClickHouseRowIterator, rewind);
+ZEND_METHOD(ClickHouseRowIterator, valid);
+ZEND_METHOD(ClickHouseRowIterator, current);
+ZEND_METHOD(ClickHouseRowIterator, key);
+ZEND_METHOD(ClickHouseRowIterator, next);
+ZEND_METHOD(ClickHouseRowIterator, count);
 
 static const zend_function_entry class_ClickHouse_methods[] = {
 	ZEND_ME(ClickHouse, __construct, arginfo_class_ClickHouse___construct, ZEND_ACC_PUBLIC)
@@ -128,6 +207,10 @@ static const zend_function_entry class_ClickHouse_methods[] = {
 	ZEND_ME(ClickHouse, ping, arginfo_class_ClickHouse_ping, ZEND_ACC_PUBLIC)
 	ZEND_ME(ClickHouse, setSettings, arginfo_class_ClickHouse_setSettings, ZEND_ACC_PUBLIC)
 	ZEND_ME(ClickHouse, setProgressCallback, arginfo_class_ClickHouse_setProgressCallback, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, setProfileCallback, arginfo_class_ClickHouse_setProfileCallback, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, resetConnection, arginfo_class_ClickHouse_resetConnection, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, getServerInfo, arginfo_class_ClickHouse_getServerInfo, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, getCurrentEndpoint, arginfo_class_ClickHouse_getCurrentEndpoint, ZEND_ACC_PUBLIC)
 	ZEND_ME(ClickHouse, getStatistics, arginfo_class_ClickHouse_getStatistics, ZEND_ACC_PUBLIC)
 	ZEND_ME(ClickHouse, databaseSize, arginfo_class_ClickHouse_databaseSize, ZEND_ACC_PUBLIC)
 	ZEND_ME(ClickHouse, tablesSize, arginfo_class_ClickHouse_tablesSize, ZEND_ACC_PUBLIC)
@@ -137,6 +220,25 @@ static const zend_function_entry class_ClickHouse_methods[] = {
 	ZEND_ME(ClickHouse, getServerUptime, arginfo_class_ClickHouse_getServerUptime, ZEND_ACC_PUBLIC)
 	ZEND_ME(ClickHouse, enableLogQueries, arginfo_class_ClickHouse_enableLogQueries, ZEND_ACC_PUBLIC)
 	ZEND_ME(ClickHouse, getLogQueries, arginfo_class_ClickHouse_getLogQueries, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, selectStream, arginfo_class_ClickHouse_selectStream, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, selectStreamCallback, arginfo_class_ClickHouse_selectStreamCallback, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, isExists, arginfo_class_ClickHouse_isExists, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, showDatabases, arginfo_class_ClickHouse_showDatabases, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, showProcesslist, arginfo_class_ClickHouse_showProcesslist, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, getServerVersion, arginfo_class_ClickHouse_getServerVersion, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, tableSize, arginfo_class_ClickHouse_tableSize, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, truncateTable, arginfo_class_ClickHouse_truncateTable, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, dropPartition, arginfo_class_ClickHouse_dropPartition, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_ClickHouseRowIterator_methods[] = {
+	ZEND_ME(ClickHouseRowIterator, rewind, arginfo_class_ClickHouseRowIterator_rewind, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouseRowIterator, valid, arginfo_class_ClickHouseRowIterator_valid, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouseRowIterator, current, arginfo_class_ClickHouseRowIterator_current, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouseRowIterator, key, arginfo_class_ClickHouseRowIterator_key, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouseRowIterator, next, arginfo_class_ClickHouseRowIterator_next, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouseRowIterator, count, arginfo_class_ClickHouseRowIterator_count, ZEND_ACC_PUBLIC)
 	ZEND_FE_END
 };
 
@@ -220,6 +322,17 @@ static zend_class_entry *register_class_ClickHouse(void)
 	zend_string *property_connect_timeout_name = zend_string_init("connect_timeout", sizeof("connect_timeout") - 1, true);
 	zend_declare_typed_property(class_entry, property_connect_timeout_name, &property_connect_timeout_default_value, ZEND_ACC_PROTECTED, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_LONG));
 	zend_string_release_ex(property_connect_timeout_name, true);
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_ClickHouseRowIterator(zend_class_entry *class_entry_Iterator, zend_class_entry *class_entry_Countable)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_CLASS_ENTRY(ce, "ClickHouseRowIterator", class_ClickHouseRowIterator_methods);
+	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
+	zend_class_implements(class_entry, 2, class_entry_Iterator, class_entry_Countable);
 
 	return class_entry;
 }

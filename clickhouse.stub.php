@@ -73,6 +73,14 @@ final class ClickHouse
 
     public function setProgressCallback(?callable $callback): bool {}
 
+    public function setProfileCallback(?callable $callback): bool {}
+
+    public function resetConnection(): bool {}
+
+    public function getServerInfo(): array {}
+
+    public function getCurrentEndpoint(): ?array {}
+
     public function getStatistics(): array {}
 
     public function databaseSize(?string $database = null): array {}
@@ -90,6 +98,50 @@ final class ClickHouse
     public function enableLogQueries(bool $enabled = true): bool {}
 
     public function getLogQueries(): array {}
+
+    public function selectStream(
+        string $sql,
+        array $params = [],
+        string $query_id = "",
+        array $settings = []
+    ): ClickHouseRowIterator {}
+
+    public function selectStreamCallback(
+        string $sql,
+        callable $callback,
+        array $params = [],
+        string $query_id = "",
+        array $settings = []
+    ): bool {}
+
+    public function isExists(string $database, string $table): bool {}
+
+    public function showDatabases(): array {}
+
+    public function showProcesslist(): array {}
+
+    public function getServerVersion(): string {}
+
+    public function tableSize(string $table): array {}
+
+    public function truncateTable(string $table): bool {}
+
+    public function dropPartition(string $table, string $partition): bool {}
+}
+
+final class ClickHouseRowIterator implements Iterator, Countable
+{
+    public function rewind(): void {}
+
+    public function valid(): bool {}
+
+    public function current(): array {}
+
+    public function key(): int {}
+
+    public function next(): void {}
+
+    public function count(): int {}
 }
 
 class ClickHouseException extends Exception
