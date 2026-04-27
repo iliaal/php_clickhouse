@@ -49,9 +49,18 @@ phpize
 make && sudo make install
 ```
 
-Add `extension=clickhouse.so` to your `php.ini`. The build needs a C++17-capable compiler (GCC 8+, Clang 7+); LZ4, ZSTD, abseil-int128, and CityHash are vendored under `lib/clickhouse-cpp/contrib/`.
+Add `extension=clickhouse.so` to your `php.ini`. The build needs a C++17-capable compiler (GCC 8+, Clang 7+, MSVC 2019+); LZ4, ZSTD, abseil-int128, and CityHash are vendored under `lib/clickhouse-cpp/contrib/`.
 
-Only NTS PHP builds are supported. The extension stores Client state in process-global maps; under ZTS the same handle space is shared across worker threads, so the wrapper refuses to load.
+### Platforms
+
+| Platform | Status | Notes |
+|----------|--------|-------|
+| Linux NTS | first-class | PHP 7.4 through 8.5, CI matrix |
+| Linux ZTS | first-class | PHP 8.4 ZTS in CI |
+| Windows (NTS, TS) | supported | PHP 8.4 x86 / x64 in CI; pre-built `.dll` released via PIE |
+| macOS | unverified | should build (POSIX path); no CI lane |
+
+Per-Client state lives on the `zend_object` itself (custom `create_object` / `free_obj` handlers), so ZTS works without locking — there is no module-global state to thread-isolate.
 
 ### Test server
 
