@@ -63,6 +63,18 @@ and geo-type round-trips, and `query_id` echo through
   `LowCardinality` keys (vendor gap). Previously only five
   hardcoded combinations worked.
 - `ClickHouseRowIterator` class registered alongside `ClickHouse`.
+- smi2/phpClickHouse-style ergonomics:
+  - `setSettings()` returns `$this` instead of `bool` so callers
+    can chain. Truthy semantics preserved.
+  - `setSetting(string $key, mixed $value): static` for single-key
+    chainable sugar on top of the array form.
+  - `setDatabase(string $database): static` issues `USE` on the
+    server and updates the cached default used by helpers like
+    `databaseSize()` and `showTables()`. Validates the identifier.
+  - `ClickHouseException::getServerCode()`, `getServerName()`,
+    `getQueryId()` getter aliases for the existing public
+    `server_code`/`server_name`/`query_id` properties. Same data,
+    smi2-compatible call shape.
 
 ### Changed
 

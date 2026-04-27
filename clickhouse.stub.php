@@ -69,7 +69,11 @@ final class ClickHouse
 
     public function ping(): bool {}
 
-    public function setSettings(array $settings): bool {}
+    public function setSettings(array $settings): static {}
+
+    public function setSetting(string $key, mixed $value): static {}
+
+    public function setDatabase(string $database): static {}
 
     public function setProgressCallback(?callable $callback): bool {}
 
@@ -149,4 +153,10 @@ class ClickHouseException extends Exception
     public int $server_code = 0;
     public ?string $server_name = null;
     public ?string $query_id = null;
+
+    public function getServerCode(): int {}
+
+    public function getServerName(): ?string {}
+
+    public function getQueryId(): ?string {}
 }

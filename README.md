@@ -227,7 +227,9 @@ $ch->selectStreamCallback(string $sql, callable $cb,
                           array $settings = []);  // true per-row stream
 
 // Settings, observability, helpers
-$ch->setSettings(array $settings);     // client-wide; per-call overrides
+$ch->setSettings(array $settings);     // client-wide; per-call overrides; chainable
+$ch->setSetting(string $key, mixed $value);  // single-key sugar, chainable
+$ch->setDatabase(string $database);    // USE on the server, updates default; chainable
 $ch->setProgressCallback(?callable $cb);
 $ch->setProfileCallback(?callable $cb);
 $stats = $ch->getStatistics();         // last query: rows, bytes, elapsed_ms, query_id
