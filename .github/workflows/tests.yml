@@ -138,40 +138,40 @@ jobs:
           export TEST_PHP_ARGS="-d extension=$(pwd)/modules/clickhouse.so"
           /tmp/php-zts/bin/php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK tests/
 
-  windows:
-    name: PHP ${{ matrix.php }} ${{ matrix.ts }} - Windows (build only)
-    runs-on: windows-latest
-
-    strategy:
-      fail-fast: false
-      matrix:
-        php: ['8.4']
-        ts: ['ts', 'nts']
-
-    env:
-      phpts: ${{ matrix.ts }}
-
+  # Windows extension builds need the official PHP SDK + matching MSVC
+  # toolset, not the autotools phpize/configure flow. The php-org
+  # composite action below bundles SDK download, VS detection,
+  # phpize / configure / nmake invocation, and a .dll smoke load.
+  # We disable run-tests because there's no ClickHouse server reachable
+  # from windows-latest in CI.
+  windows-matrix:
+    name: Resolve Windows matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
       - uses: actions/checkout@v6
-
-      - name: Setup PHP + dev tools
-        uses: shivammathur/setup-php@v2
+      - id: matrix
+        uses: php/php-windows-builder/extension-matrix@v1
         with:
-          php-version: ${{ matrix.php }}
-          tools: phpize, php-config
+          php-version-list: '8.4'
 
-      - name: Build extension on Windows
-        shell: cmd
-        run: |
-          phpize
-          configure --enable-clickhouse=shared
-          nmake
-
-      - name: Smoke test extension load
-        shell: cmd
-        run: |
-          for /f %%f in ('dir /b /s php_clickhouse.dll') do set DLL=%%f
-          php -d extension=%DLL% -m | findstr /R /C:"clickhouse" || (echo "extension did not load" && exit /b 1)
+  windows:
+    name: Windows ${{ matrix.php-version }} ${{ matrix.ts }} ${{ matrix.arch }}
+    needs: windows-matrix
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.windows-matrix.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build extension
+        uses: php/php-windows-builder/extension@v1
+        with:
+          php-version: ${{ matrix.php-version }}
+          arch: ${{ matrix.arch }}
+          ts: ${{ matrix.ts }}
+          run-tests: 'false'
 
   asan:
     name: PHP ${{ matrix.php }} - ASAN
