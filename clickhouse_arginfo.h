@@ -1,5 +1,5 @@
 /* This is a generated file, edit clickhouse.stub.php instead.
- * Stub hash: 5c8a724fc3e2deb1bed537c92718e3112e4ddc57 */
+ * Stub hash: 1e6b3f2cd1b48810b120907d9d75415f829b400b */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_ClickHouse___construct, 0, 0, 1)
 	ZEND_ARG_TYPE_INFO(0, connectParams, IS_ARRAY, 0)
@@ -54,8 +54,17 @@ ZEND_END_ARG_INFO()
 
 #define arginfo_class_ClickHouse_ping arginfo_class_ClickHouse_writeEnd
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_setSettings, 0, 1, _IS_BOOL, 0)
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_setSettings, 0, 1, IS_STATIC, 0)
 	ZEND_ARG_TYPE_INFO(0, settings, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_setSetting, 0, 2, IS_STATIC, 0)
+	ZEND_ARG_TYPE_INFO(0, key, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO(0, value, IS_MIXED, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_setDatabase, 0, 1, IS_STATIC, 0)
+	ZEND_ARG_TYPE_INFO(0, database, IS_STRING, 0)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_setProgressCallback, 0, 1, _IS_BOOL, 0)
@@ -153,6 +162,13 @@ ZEND_END_ARG_INFO()
 
 #define arginfo_class_ClickHouseRowIterator_count arginfo_class_ClickHouse_getServerUptime
 
+#define arginfo_class_ClickHouseException_getServerCode arginfo_class_ClickHouse_getServerUptime
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouseException_getServerName, 0, 0, IS_STRING, 1)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_ClickHouseException_getQueryId arginfo_class_ClickHouseException_getServerName
+
 ZEND_METHOD(ClickHouse, __construct);
 ZEND_METHOD(ClickHouse, __destruct);
 ZEND_METHOD(ClickHouse, select);
@@ -164,6 +180,8 @@ ZEND_METHOD(ClickHouse, writeEnd);
 ZEND_METHOD(ClickHouse, execute);
 ZEND_METHOD(ClickHouse, ping);
 ZEND_METHOD(ClickHouse, setSettings);
+ZEND_METHOD(ClickHouse, setSetting);
+ZEND_METHOD(ClickHouse, setDatabase);
 ZEND_METHOD(ClickHouse, setProgressCallback);
 ZEND_METHOD(ClickHouse, setProfileCallback);
 ZEND_METHOD(ClickHouse, resetConnection);
@@ -193,6 +211,9 @@ ZEND_METHOD(ClickHouseRowIterator, current);
 ZEND_METHOD(ClickHouseRowIterator, key);
 ZEND_METHOD(ClickHouseRowIterator, next);
 ZEND_METHOD(ClickHouseRowIterator, count);
+ZEND_METHOD(ClickHouseException, getServerCode);
+ZEND_METHOD(ClickHouseException, getServerName);
+ZEND_METHOD(ClickHouseException, getQueryId);
 
 static const zend_function_entry class_ClickHouse_methods[] = {
 	ZEND_ME(ClickHouse, __construct, arginfo_class_ClickHouse___construct, ZEND_ACC_PUBLIC)
@@ -206,6 +227,8 @@ static const zend_function_entry class_ClickHouse_methods[] = {
 	ZEND_ME(ClickHouse, execute, arginfo_class_ClickHouse_execute, ZEND_ACC_PUBLIC)
 	ZEND_ME(ClickHouse, ping, arginfo_class_ClickHouse_ping, ZEND_ACC_PUBLIC)
 	ZEND_ME(ClickHouse, setSettings, arginfo_class_ClickHouse_setSettings, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, setSetting, arginfo_class_ClickHouse_setSetting, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, setDatabase, arginfo_class_ClickHouse_setDatabase, ZEND_ACC_PUBLIC)
 	ZEND_ME(ClickHouse, setProgressCallback, arginfo_class_ClickHouse_setProgressCallback, ZEND_ACC_PUBLIC)
 	ZEND_ME(ClickHouse, setProfileCallback, arginfo_class_ClickHouse_setProfileCallback, ZEND_ACC_PUBLIC)
 	ZEND_ME(ClickHouse, resetConnection, arginfo_class_ClickHouse_resetConnection, ZEND_ACC_PUBLIC)
@@ -239,6 +262,13 @@ static const zend_function_entry class_ClickHouseRowIterator_methods[] = {
 	ZEND_ME(ClickHouseRowIterator, key, arginfo_class_ClickHouseRowIterator_key, ZEND_ACC_PUBLIC)
 	ZEND_ME(ClickHouseRowIterator, next, arginfo_class_ClickHouseRowIterator_next, ZEND_ACC_PUBLIC)
 	ZEND_ME(ClickHouseRowIterator, count, arginfo_class_ClickHouseRowIterator_count, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_ClickHouseException_methods[] = {
+	ZEND_ME(ClickHouseException, getServerCode, arginfo_class_ClickHouseException_getServerCode, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouseException, getServerName, arginfo_class_ClickHouseException_getServerName, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouseException, getQueryId, arginfo_class_ClickHouseException_getQueryId, ZEND_ACC_PUBLIC)
 	ZEND_FE_END
 };
 
@@ -341,7 +371,7 @@ static zend_class_entry *register_class_ClickHouseException(zend_class_entry *cl
 {
 	zend_class_entry ce, *class_entry;
 
-	INIT_CLASS_ENTRY(ce, "ClickHouseException", NULL);
+	INIT_CLASS_ENTRY(ce, "ClickHouseException", class_ClickHouseException_methods);
 	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_Exception, 0);
 
 	zval property_server_code_default_value;

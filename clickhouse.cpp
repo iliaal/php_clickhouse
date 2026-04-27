@@ -225,6 +225,8 @@ static PHP_METHOD(ClickHouse, writeEnd);
 static PHP_METHOD(ClickHouse, execute);
 static PHP_METHOD(ClickHouse, ping);
 static PHP_METHOD(ClickHouse, setSettings);
+static PHP_METHOD(ClickHouse, setSetting);
+static PHP_METHOD(ClickHouse, setDatabase);
 static PHP_METHOD(ClickHouse, setProgressCallback);
 static PHP_METHOD(ClickHouse, setProfileCallback);
 static PHP_METHOD(ClickHouse, resetConnection);
@@ -255,6 +257,10 @@ static PHP_METHOD(ClickHouseRowIterator, current);
 static PHP_METHOD(ClickHouseRowIterator, key);
 static PHP_METHOD(ClickHouseRowIterator, next);
 static PHP_METHOD(ClickHouseRowIterator, count);
+
+static PHP_METHOD(ClickHouseException, getServerCode);
+static PHP_METHOD(ClickHouseException, getServerName);
+static PHP_METHOD(ClickHouseException, getQueryId);
 
 #include "clickhouse_arginfo.h"
 
@@ -1604,11 +1610,11 @@ PHP_METHOD(ClickHouse, execute)
 }
 /* }}} */
 
-/* {{{ proto bool setSettings(array settings)
+/* {{{ proto static setSettings(array settings)
  *
  * Replace the client-wide settings map. Per-call settings supplied to
  * select/insert/execute/writeStart override these. Pass an empty array
- * to clear.
+ * to clear. Returns $this so callers can chain.
  */
 PHP_METHOD(ClickHouse, setSettings)
 {
@@ -1628,7 +1634,66 @@ PHP_METHOD(ClickHouse, setSettings)
         m[std::string(ZSTR_VAL(zk), ZSTR_LEN(zk))] = formatScalarParam(vz);
     } ZEND_HASH_FOREACH_END();
     obj->settings = std::move(m);
-    RETURN_TRUE;
+    RETURN_ZVAL(getThis(), 1, 0);
+}
+/* }}} */
+
+/* {{{ proto static setSetting(string key, mixed value)
+ *
+ * Set a single client-wide setting. Equivalent to calling setSettings()
+ * with a one-key array merged onto the existing map. Returns $this.
+ */
+PHP_METHOD(ClickHouse, setSetting)
+{
+    char *key = NULL;
+    size_t l_key = 0;
+    zval *value = NULL;
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "sz", &key, &l_key, &value) == FAILURE) {
+        return;
+    }
+    if (l_key == 0) {
+        throwClickHouseError(std::runtime_error("setting key must not be empty"));
+        return;
+    }
+    clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
+    obj->settings[std::string(key, l_key)] = formatScalarParam(value);
+    RETURN_ZVAL(getThis(), 1, 0);
+}
+/* }}} */
+
+/* {{{ proto static setDatabase(string database)
+ *
+ * Switch the active database for subsequent queries. Issues USE on the
+ * server, then updates the cached `database` property used by helpers
+ * that take a default database (databaseSize, tablesSize, etc.).
+ * Returns $this.
+ */
+PHP_METHOD(ClickHouse, setDatabase)
+{
+    char *db = NULL;
+    size_t l_db = 0;
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "s", &db, &l_db) == FAILURE) {
+        return;
+    }
+    try {
+        validateIdentifier(db, l_db, "database name", false);
+    } catch (const std::exception &e) {
+        throwClickHouseError(e);
+        return;
+    }
+    clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
+    if (!obj->client) {
+        throwClickHouseError(std::runtime_error("Client is not connected"));
+        return;
+    }
+    try {
+        obj->client->Execute(Query("USE " + std::string(db, l_db)));
+    } catch (const std::exception &e) {
+        throwClickHouseError(e);
+        return;
+    }
+    sc_zend_update_property_stringl(clickhouse_ce, getThis(), "database", sizeof("database") - 1, db, l_db);
+    RETURN_ZVAL(getThis(), 1, 0);
 }
 /* }}} */
 
@@ -2616,6 +2681,51 @@ PHP_METHOD(ClickHouse, dropPartition)
  */
 PHP_METHOD(ClickHouse, __destruct)
 {
+}
+/* }}} */
+
+/* {{{ proto int ClickHouseException::getServerCode()
+ * proto ?string ClickHouseException::getServerName()
+ * proto ?string ClickHouseException::getQueryId()
+ *
+ * smi2/phpClickHouse-style getter aliases for the public
+ * `server_code`/`server_name`/`query_id` properties. Same data, easier
+ * to call from code that was written against the smi2 client.
+ */
+PHP_METHOD(ClickHouseException, getServerCode)
+{
+    if (zend_parse_parameters_none() == FAILURE) {
+        return;
+    }
+    zval *p = sc_zend_read_property(clickhouse_exception_ce, getThis(), "server_code", sizeof("server_code") - 1, 0);
+    if (p && Z_TYPE_P(p) == IS_LONG) {
+        RETURN_LONG(Z_LVAL_P(p));
+    }
+    RETURN_LONG(0);
+}
+
+PHP_METHOD(ClickHouseException, getServerName)
+{
+    if (zend_parse_parameters_none() == FAILURE) {
+        return;
+    }
+    zval *p = sc_zend_read_property(clickhouse_exception_ce, getThis(), "server_name", sizeof("server_name") - 1, 0);
+    if (p && Z_TYPE_P(p) == IS_STRING) {
+        RETURN_STRINGL(Z_STRVAL_P(p), Z_STRLEN_P(p));
+    }
+    RETURN_NULL();
+}
+
+PHP_METHOD(ClickHouseException, getQueryId)
+{
+    if (zend_parse_parameters_none() == FAILURE) {
+        return;
+    }
+    zval *p = sc_zend_read_property(clickhouse_exception_ce, getThis(), "query_id", sizeof("query_id") - 1, 0);
+    if (p && Z_TYPE_P(p) == IS_STRING) {
+        RETURN_STRINGL(Z_STRVAL_P(p), Z_STRLEN_P(p));
+    }
+    RETURN_NULL();
 }
 /* }}} */
 
