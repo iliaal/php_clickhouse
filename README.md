@@ -60,7 +60,7 @@ Add `extension=clickhouse.so` to your `php.ini`. The build needs a C++17-capable
 | Windows (NTS, TS) | supported | PHP 8.4 x86 / x64 in CI; pre-built `.dll` released via PIE |
 | macOS | unverified | should build (POSIX path); no CI lane |
 
-Per-Client state lives on the `zend_object` itself (custom `create_object` / `free_obj` handlers), so ZTS works without locking — there is no module-global state to thread-isolate.
+Per-Client state lives on the `zend_object` itself (custom `create_object` / `free_obj` handlers), so ZTS works without locking. There is no module-global state to thread-isolate.
 
 ### Test server
 
@@ -117,8 +117,9 @@ foreach ($ch->select("SELECT id, ts, tag FROM events ORDER BY id",
 * `Int8` … `Int64`, `UInt8` … `UInt64`
 * `Int128`, `UInt128` (round-trip as decimal strings; PHP integers are 64-bit)
 * `IPv4`, `IPv6`
-* `LowCardinality(String)`, `LowCardinality(FixedString(N))`
-* `Map(K, V)` for `(String, String)`, `(String, Int64)`, `(String, UInt64)`, `(String, Float64)`, `(Int64, String)`. Other K/V pairs are read-only via the lib's generic factory.
+* `LowCardinality(String)`, `LowCardinality(FixedString(N))`, `LowCardinality(Nullable(String))`, `LowCardinality(Nullable(FixedString(N)))`
+* `Map(K, V)` over scalar K and V (`String`, `Int8` through `Int64`, `UInt8` through `UInt64`, `Float32`, `Float64`, `UUID`) plus `LowCardinality(String)` keys and values. `Map(LowCardinality(K), V)` reads are not yet decoded by the vendored client; writes succeed and the data is queryable server side.
+* `Point`, `Ring`, `Polygon`, `MultiPolygon` (geo)
 * `Nullable(T)`
 * `String`
 * `Tuple` (read-only)
