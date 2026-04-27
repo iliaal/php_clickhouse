@@ -27,7 +27,9 @@
 // possible hash functions, by using SIMD instructions, or by
 // compromising on hash quality.
 
+#ifdef HAVE_CONFIG_H
 #include "config.h"
+#endif
 #include "city.h"
 
 #include <algorithm>
