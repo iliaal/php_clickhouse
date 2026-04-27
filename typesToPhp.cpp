@@ -60,7 +60,12 @@ static std::time_t to_time_t(const std::string& str, bool is_date = true)
     std::tm t = {0};
     std::istringstream ss(str);
     ss >> std::get_time(&t, is_date ? "%Y-%m-%d" : "%Y-%m-%d %H:%M:%S");
+#ifdef _WIN32
+    /* MSVC has no timegm(); _mkgmtime() is the documented equivalent. */
+    return _mkgmtime(&t);
+#else
     return timegm(&t);
+#endif
 }
 
 ColumnRef createColumn(TypeRef type)
