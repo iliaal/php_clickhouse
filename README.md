@@ -245,6 +245,12 @@ $ch->setSetting(string $key, mixed $value);  // single-key sugar, chainable
 $ch->setDatabase(string $database);    // USE on the server, updates default; chainable
 $ch->setProgressCallback(?callable $cb);
 $ch->setProfileCallback(?callable $cb);
+$ch->setVerbose(true);                 // JSON lifecycle lines on STDERR
+$ch->setVerbose(fn($e, $ctx) => ...);  // or custom sink: select_start /
+                                       // data_block / select_finish /
+                                       // execute_start / execute_finish /
+                                       // server_exception
+$ch->setVerbose(false);                // disable
 $stats = $ch->getStatistics();         // last query: rows, bytes, elapsed_ms, query_id
 
 $ch->resetConnection();

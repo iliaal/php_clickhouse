@@ -29,11 +29,11 @@ Scope: vendor blocker. Two paths:
 
 Once decoded, surface via `getTotals()` / `getExtremes()` methods on `ClickHouse`.
 
-### Protocol-level verbose tracing
+### Protocol-level verbose tracing (landed in 0.8.0)
 
-smi2 has `verbose()` / `setStdErrOut()` for HTTP request/response logging. We have `enableLogQueries()` for SQL-level visibility but nothing on the wire layer.
+`setVerbose(bool|callable $sink): static`. `true` writes JSON lines to STDERR; `false` disables; a callable is invoked with `($event, $context)` per event. Events emitted at lifecycle points (`select_start`, `data_block`, `select_finish`, `execute_start`, `execute_finish`) plus `server_exception` from the protocol's exception packet path. Existing progress/profile callbacks are unaffected.
 
-Scope: small. Add a `setVerbose(bool|callable)` that hooks into clickhouse-cpp's logging or instruments the socket layer to emit packet-type traces.
+True byte-level wire tracing (raw packet hex dumps) was not implemented. The event-level surface above is what the native protocol's hookable callbacks expose, and matches the operational debugging value of smi2's HTTP request/response logging without the dependency on the underlying transport.
 
 ## Cosmetic / porting friction (smi2 -> php_clickhouse)
 

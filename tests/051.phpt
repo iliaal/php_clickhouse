@@ -32,7 +32,7 @@ $methods = [
     "insert", "insertAssoc", "writeStart", "write", "writeEnd",
     "execute", "ping",
     "setSettings", "setSetting", "setDatabase",
-    "setProgressCallback", "setProfileCallback",
+    "setProgressCallback", "setProfileCallback", "setVerbose",
     "resetConnection", "getServerInfo", "getCurrentEndpoint",
     "getStatistics",
     "isExists", "showDatabases", "showProcesslist", "getServerVersion",

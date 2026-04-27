@@ -79,6 +79,8 @@ final class ClickHouse
 
     public function setProfileCallback(?callable $callback): bool {}
 
+    public function setVerbose(bool|callable $sink): static {}
+
     public function resetConnection(): bool {}
 
     public function getServerInfo(): array {}

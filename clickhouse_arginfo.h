@@ -1,5 +1,5 @@
 /* This is a generated file, edit clickhouse.stub.php instead.
- * Stub hash: b2b51fbb4df641bfa8fcfc916901fc3565d066c2 */
+ * Stub hash: 88d95b57a193f38e6641804b04ea483a0168bd71 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_ClickHouse___construct, 0, 0, 1)
 	ZEND_ARG_TYPE_INFO(0, connectParams, IS_ARRAY, 0)
@@ -72,6 +72,10 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_setProgressCall
 ZEND_END_ARG_INFO()
 
 #define arginfo_class_ClickHouse_setProfileCallback arginfo_class_ClickHouse_setProgressCallback
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_setVerbose, 0, 1, IS_STATIC, 0)
+	ZEND_ARG_TYPE_MASK(0, sink, MAY_BE_BOOL|MAY_BE_CALLABLE, NULL)
+ZEND_END_ARG_INFO()
 
 #define arginfo_class_ClickHouse_resetConnection arginfo_class_ClickHouse_writeEnd
 
@@ -235,6 +239,7 @@ ZEND_METHOD(ClickHouse, setSetting);
 ZEND_METHOD(ClickHouse, setDatabase);
 ZEND_METHOD(ClickHouse, setProgressCallback);
 ZEND_METHOD(ClickHouse, setProfileCallback);
+ZEND_METHOD(ClickHouse, setVerbose);
 ZEND_METHOD(ClickHouse, resetConnection);
 ZEND_METHOD(ClickHouse, getServerInfo);
 ZEND_METHOD(ClickHouse, getCurrentEndpoint);
@@ -300,6 +305,7 @@ static const zend_function_entry class_ClickHouse_methods[] = {
 	ZEND_ME(ClickHouse, setDatabase, arginfo_class_ClickHouse_setDatabase, ZEND_ACC_PUBLIC)
 	ZEND_ME(ClickHouse, setProgressCallback, arginfo_class_ClickHouse_setProgressCallback, ZEND_ACC_PUBLIC)
 	ZEND_ME(ClickHouse, setProfileCallback, arginfo_class_ClickHouse_setProfileCallback, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, setVerbose, arginfo_class_ClickHouse_setVerbose, ZEND_ACC_PUBLIC)
 	ZEND_ME(ClickHouse, resetConnection, arginfo_class_ClickHouse_resetConnection, ZEND_ACC_PUBLIC)
 	ZEND_ME(ClickHouse, getServerInfo, arginfo_class_ClickHouse_getServerInfo, ZEND_ACC_PUBLIC)
 	ZEND_ME(ClickHouse, getCurrentEndpoint, arginfo_class_ClickHouse_getCurrentEndpoint, ZEND_ACC_PUBLIC)

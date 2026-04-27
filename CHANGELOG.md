@@ -85,6 +85,14 @@ and geo-type round-trips, and `query_id` echo through
   Read-only: `offsetSet`/`offsetUnset` throw. Plain `select()` is
   unchanged and remains the faster path when you just need the
   array.
+- `setVerbose(bool|callable $sink): static` for protocol-level
+  lifecycle tracing. Pass `true` to log JSON lines on STDERR,
+  `false` to disable, or a callable invoked with
+  `($eventName, $context)` per event. Events: `select_start`,
+  `data_block`, `select_finish`, `execute_start`,
+  `execute_finish`, `server_exception`. Existing
+  progress/profile callbacks are unaffected. No-op when off,
+  so the hot path stays cheap on production deployments.
 
 ### Changed
 
