@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.8.0] - 2026-04-26
+## [0.8.0] - 2026-04-27
 
 Architecture refactor that moves per-Client state from file-scope
 `std::map` banks onto the `zend_object` itself. The change unblocks
@@ -56,6 +56,12 @@ and geo-type round-trips, and `query_id` echo through
   round-trip via `ColumnGeo` (Point as `[Float64, Float64]`, others
   as nested arrays). `SimpleAggregateFunction(f, T)` reads
   transparently as `T`.
+- Map matrix expansion. The insert path now accepts any
+  `Map(K, V)` over scalar K and V (String, all signed/unsigned
+  integer widths, Float32/64, UUID) plus `LowCardinality(String)`
+  keys and values. Read path mirrors the same matrix except for
+  `LowCardinality` keys (vendor gap). Previously only five
+  hardcoded combinations worked.
 - `ClickHouseRowIterator` class registered alongside `ClickHouse`.
 
 ### Changed
@@ -99,10 +105,10 @@ and geo-type round-trips, and `query_id` echo through
   not dispatch the Totals/Extremes packet types
   ([upstream issue #297](https://github.com/ClickHouse/clickhouse-cpp/issues/297));
   `getTotals()` / `getExtremes()` are deferred to a future release.
-- `Map(LowCardinality(K), V)` read paths are not yet decoded;
-  `showProcesslist()` selects a fixed projection of standard
-  columns to avoid the unsupported map columns
-  (`ProfileEvents`, `Settings`, `used_*`).
+- `Map(LowCardinality(K), V)` read paths are not yet decoded by
+  the vendored library (writes succeed). `showProcesslist()`
+  selects a fixed projection of standard columns to avoid the
+  unsupported map columns (`ProfileEvents`, `Settings`, `used_*`).
 
 ## [0.7.0] - 2026-04-26
 
