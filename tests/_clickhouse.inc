@@ -35,6 +35,12 @@ function clickhouse_skip_if_no_server(): void
         print "skip clickhouse extension not loaded";
         exit;
     }
+    /* Windows CI runners have no ClickHouse server reachable. Skip
+     * up-front rather than burning a 1s connect timeout per test. */
+    if (PHP_OS_FAMILY === "Windows") {
+        print "skip ClickHouse server unavailable on Windows runner";
+        exit;
+    }
     $h = getenv("CLICKHOUSE_HOST") ?: "clickhouse";
     $p = (int)(getenv("CLICKHOUSE_PORT") ?: "9000");
     $sock = @stream_socket_client("tcp://$h:$p", $err, $errstr, 1);
@@ -67,6 +73,10 @@ function clickhouse_skip_if_no_tls_server(): void
 {
     if (!extension_loaded("clickhouse")) {
         print "skip clickhouse extension not loaded";
+        exit;
+    }
+    if (PHP_OS_FAMILY === "Windows") {
+        print "skip ClickHouse TLS server unavailable on Windows runner";
         exit;
     }
     $h = getenv("CLICKHOUSE_HOST") ?: "clickhouse";
