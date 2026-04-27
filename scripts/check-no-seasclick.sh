@@ -10,6 +10,8 @@
 #     back-compat function aliases
 #   - tests/026.phpt: exercises the SeasClick / SeasClickException
 #     BC aliases on purpose
+#   - tests/051.phpt: server-free surface smoke; verifies the legacy
+#     class-alias names resolve as part of the public surface check
 #   - bench/bench_mark.php: file-header attribution
 #   - composer.json: "Original author of SeasClick" credit string
 #   - documentation files (README, CHANGELOG, CONTRIBUTING, SECURITY,
@@ -38,6 +40,7 @@ UNEXPECTED=$(grep -rn "SeasClick\|SEASCLICK\|seasclick" \
     | grep -vE '^\./clickhouse\.cpp:.*(Original SeasClick|aliases for the original SeasClick)' \
     | grep -vE '^\./tests/_clickhouse\.inc:.*(seasclick_test_config|seasclick_skip_if_no_server)' \
     | grep -vE '^\./tests/026\.phpt:' \
+    | grep -vE '^\./tests/051\.phpt:' \
     | grep -vE '^\./bench/bench_mark\.php:.*for SeasClick\.' \
     | grep -vE '^\./composer\.json:.*(SeasX Group \(original SeasClick\)|Original author of SeasClick)')
 
