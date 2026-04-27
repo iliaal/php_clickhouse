@@ -26,6 +26,7 @@ extern "C" {
 #include "ext/standard/info.h"
 #include "Zend/zend_exceptions.h"
 #include "Zend/zend_interfaces.h"
+#include "Zend/zend_smart_str.h"
 #include "ext/json/php_json.h"
 #include "php7_wrapper.h"
 }
@@ -88,6 +89,8 @@ struct clickhouse_object {
     std::unordered_map<std::string, std::string> settings;
     zval progress_callback;        // IS_UNDEF when unset
     zval profile_callback;         // IS_UNDEF when unset
+    zval verbose_callback;         // IS_UNDEF when off or stderr-mode
+    bool verbose_to_stderr;        // true when setVerbose(true) was used
     bool log_enabled;
     std::vector<QueryLog> query_log;
     zend_object std;
@@ -109,12 +112,14 @@ static zend_object *clickhouse_create_object(zend_class_entry *ce)
     obj->client = nullptr;
     obj->has_insert_block = false;
     obj->log_enabled = false;
+    obj->verbose_to_stderr = false;
     new (&obj->insert_block) Block();
     new (&obj->stats) ClientStats();
     new (&obj->settings) std::unordered_map<std::string, std::string>();
     new (&obj->query_log) std::vector<QueryLog>();
     ZVAL_UNDEF(&obj->progress_callback);
     ZVAL_UNDEF(&obj->profile_callback);
+    ZVAL_UNDEF(&obj->verbose_callback);
 
     zend_object_std_init(&obj->std, ce);
     object_properties_init(&obj->std, ce);
@@ -145,6 +150,10 @@ static void clickhouse_free_obj(zend_object *object)
     if (Z_TYPE(obj->profile_callback) != IS_UNDEF) {
         zval_ptr_dtor(&obj->profile_callback);
         ZVAL_UNDEF(&obj->profile_callback);
+    }
+    if (Z_TYPE(obj->verbose_callback) != IS_UNDEF) {
+        zval_ptr_dtor(&obj->verbose_callback);
+        ZVAL_UNDEF(&obj->verbose_callback);
     }
 
     obj->insert_block.~Block();
@@ -273,6 +282,7 @@ static PHP_METHOD(ClickHouse, setSetting);
 static PHP_METHOD(ClickHouse, setDatabase);
 static PHP_METHOD(ClickHouse, setProgressCallback);
 static PHP_METHOD(ClickHouse, setProfileCallback);
+static PHP_METHOD(ClickHouse, setVerbose);
 static PHP_METHOD(ClickHouse, resetConnection);
 static PHP_METHOD(ClickHouse, getServerInfo);
 static PHP_METHOD(ClickHouse, getCurrentEndpoint);
@@ -1008,6 +1018,73 @@ static void attachProgressAndProfile(Query &q, clickhouse_object *obj)
     });
 }
 
+/*
+ * Verbose tracing: when enabled (via setVerbose(true|callable)), emit
+ * lifecycle events as either JSON lines on stderr or as calls to a
+ * user sink. ctx is consumed (zval_ptr_dtor'd) by the helper, so call
+ * sites can build a fresh array per event without worrying about
+ * cleanup. ctx may be NULL for events with no payload.
+ */
+static inline bool verbose_active(const clickhouse_object *obj)
+{
+    return obj->verbose_to_stderr || Z_TYPE(obj->verbose_callback) != IS_UNDEF;
+}
+
+static void emitVerbose(clickhouse_object *obj, const char *event, zval *ctx)
+{
+    if (!verbose_active(obj)) {
+        if (ctx) zval_ptr_dtor(ctx);
+        return;
+    }
+    zval payload;
+    if (ctx) {
+        ZVAL_COPY(&payload, ctx);
+    } else {
+        array_init(&payload);
+    }
+    if (obj->verbose_to_stderr) {
+        smart_str buf = {0};
+        php_json_encode(&buf, &payload, 0);
+        smart_str_0(&buf);
+        const char *body = buf.s ? ZSTR_VAL(buf.s) : "{}";
+        size_t body_len = buf.s ? ZSTR_LEN(buf.s) : 2;
+        fprintf(stderr, "[clickhouse] %s %.*s\n", event, (int)body_len, body);
+        smart_str_free(&buf);
+    } else if (Z_TYPE(obj->verbose_callback) != IS_UNDEF) {
+        zval args[2], retval;
+        ZVAL_NULL(&retval);
+        ZVAL_STRING(&args[0], event);
+        ZVAL_COPY(&args[1], &payload);
+        call_user_function(NULL, NULL, &obj->verbose_callback, &retval, 2, args);
+        zval_ptr_dtor(&args[0]);
+        zval_ptr_dtor(&args[1]);
+        zval_ptr_dtor(&retval);
+    }
+    zval_ptr_dtor(&payload);
+    if (ctx) zval_ptr_dtor(ctx);
+}
+
+/*
+ * Wire the protocol-level lifecycle hooks onto a Query when verbose is
+ * active. Adds OnException + a wrapping OnData that emits a data_block
+ * event without disturbing existing OnData consumers (they're attached
+ * elsewhere in select()/execute()/insert()). Idempotent if verbose is
+ * off: returns immediately so the hot path stays cheap.
+ */
+static void attachVerbose(Query &q, clickhouse_object *obj)
+{
+    if (!verbose_active(obj)) return;
+
+    q.OnException([obj](const Exception &e) {
+        zval ctx;
+        array_init(&ctx);
+        add_assoc_long(&ctx, "code", (zend_long)e.code);
+        add_assoc_string(&ctx, "name", e.name.c_str());
+        add_assoc_string(&ctx, "message", e.display_text.c_str());
+        emitVerbose(obj, "server_exception", &ctx);
+    });
+}
+
 static void resetStats(clickhouse_object *obj)
 {
     obj->stats = ClientStats();
@@ -1246,13 +1323,33 @@ static void do_select_into(zval *out, zval *this_obj,
         resetStats(obj);
         obj->stats.last_query_id = qid;
         attachProgressAndProfile(query, obj);
+        attachVerbose(query, obj);
+
+        if (verbose_active(obj)) {
+            zval ctx;
+            array_init(&ctx);
+            add_assoc_stringl(&ctx, "sql", (char*)sql_s.data(), sql_s.size());
+            add_assoc_stringl(&ctx, "query_id", (char*)qid.data(), qid.size());
+            add_assoc_long(&ctx, "settings_count", (zend_long)obj->settings.size());
+            add_assoc_long(&ctx, "fetch_mode", (zend_long)fetch_mode);
+            emitVerbose(obj, "select_start", &ctx);
+        }
 
         if (!(fetch_mode & SC_FETCH_ONE)) {
             array_init(out);
         }
 
+        size_t verbose_block_idx = 0;
         bool fetched_one = false;
-        query.OnData([out, fetch_mode, &fetched_one](const Block &block) {
+        query.OnData([out, fetch_mode, &fetched_one, obj, &verbose_block_idx](const Block &block) {
+            if (verbose_active(obj)) {
+                zval ctx;
+                array_init(&ctx);
+                add_assoc_long(&ctx, "rows", (zend_long)block.GetRowCount());
+                add_assoc_long(&ctx, "columns", (zend_long)block.GetColumnCount());
+                add_assoc_long(&ctx, "block_index", (zend_long)verbose_block_idx++);
+                emitVerbose(obj, "data_block", &ctx);
+            }
             if (fetch_mode & SC_FETCH_ONE) {
                 if (!fetched_one && block.GetRowCount() > 0 && block.GetColumnCount() > 0) {
                     convertToZval(out, block[0], 0, "", 0, fetch_mode);
@@ -1310,6 +1407,16 @@ static void do_select_into(zval *out, zval *this_obj,
         obj->stats.elapsed_ms =
             std::chrono::duration<double, std::milli>(t1 - t0).count();
         recordQuerySuccess(obj, sql_s, qid);
+
+        if (verbose_active(obj)) {
+            zval ctx;
+            array_init(&ctx);
+            add_assoc_double(&ctx, "elapsed_ms", obj->stats.elapsed_ms);
+            add_assoc_long(&ctx, "rows_read", (zend_long)obj->stats.rows_read);
+            add_assoc_long(&ctx, "bytes_read", (zend_long)obj->stats.bytes_read);
+            add_assoc_long(&ctx, "blocks", (zend_long)verbose_block_idx);
+            emitVerbose(obj, "select_finish", &ctx);
+        }
     }
     catch (const std::exception& e)
     {
@@ -1485,6 +1592,7 @@ PHP_METHOD(ClickHouse, insert)
         resetStats(obj);
         obj->stats.last_query_id = qid;
         attachProgressAndProfile(insertQuery, obj);
+        attachVerbose(insertQuery, obj);
         Block blockQuery = client->BeginInsert(insertQuery);
 
         Block blockInsert;
@@ -1558,6 +1666,7 @@ PHP_METHOD(ClickHouse, writeStart)
         resetStats(obj);
         obj->stats.last_query_id = qid;
         attachProgressAndProfile(insertQuery, obj);
+        attachVerbose(insertQuery, obj);
         Block blockQuery = client->BeginInsert(insertQuery);
 
         obj->insert_block = blockQuery;
@@ -1737,6 +1846,16 @@ PHP_METHOD(ClickHouse, execute)
         resetStats(obj);
         obj->stats.last_query_id = qid;
         attachProgressAndProfile(query, obj);
+        attachVerbose(query, obj);
+
+        if (verbose_active(obj)) {
+            zval ctx;
+            array_init(&ctx);
+            add_assoc_stringl(&ctx, "sql", (char*)sql_s.data(), sql_s.size());
+            add_assoc_stringl(&ctx, "query_id", (char*)qid.data(), qid.size());
+            add_assoc_long(&ctx, "settings_count", (zend_long)obj->settings.size());
+            emitVerbose(obj, "execute_start", &ctx);
+        }
 
         auto t0 = std::chrono::steady_clock::now();
         client->Execute(query);
@@ -1744,6 +1863,13 @@ PHP_METHOD(ClickHouse, execute)
         obj->stats.elapsed_ms =
             std::chrono::duration<double, std::milli>(t1 - t0).count();
         recordQuerySuccess(obj, sql_s, qid);
+
+        if (verbose_active(obj)) {
+            zval ctx;
+            array_init(&ctx);
+            add_assoc_double(&ctx, "elapsed_ms", obj->stats.elapsed_ms);
+            emitVerbose(obj, "execute_finish", &ctx);
+        }
     }
     catch (const std::exception& e)
     {
@@ -1903,6 +2029,45 @@ PHP_METHOD(ClickHouse, setProfileCallback)
     }
     ZVAL_COPY(&obj->profile_callback, cb);
     RETURN_TRUE;
+}
+/* }}} */
+
+/* {{{ proto static setVerbose(bool|callable sink)
+ *
+ * Enable protocol-level lifecycle tracing. Pass true to log JSON
+ * lines on STDERR, false to disable, or a callable invoked with
+ * (string $event, array $context) per event. Events: select_start,
+ * data_block, select_finish, execute_start, execute_finish,
+ * server_exception (plus the existing progress / profile callbacks
+ * are unaffected). Returns $this so callers can chain.
+ */
+PHP_METHOD(ClickHouse, setVerbose)
+{
+    zval *sink;
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "z", &sink) == FAILURE) {
+        return;
+    }
+    clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
+
+    /* Reset prior state. */
+    if (Z_TYPE(obj->verbose_callback) != IS_UNDEF) {
+        zval_ptr_dtor(&obj->verbose_callback);
+        ZVAL_UNDEF(&obj->verbose_callback);
+    }
+    obj->verbose_to_stderr = false;
+
+    if (Z_TYPE_P(sink) == IS_TRUE) {
+        obj->verbose_to_stderr = true;
+    } else if (Z_TYPE_P(sink) == IS_FALSE) {
+        /* already cleared above */
+    } else if (zend_is_callable(sink, 0, NULL)) {
+        ZVAL_COPY(&obj->verbose_callback, sink);
+    } else {
+        zend_throw_exception(clickhouse_exception_ce,
+            "setVerbose expects bool or callable", 0);
+        return;
+    }
+    RETURN_ZVAL(getThis(), 1, 0);
 }
 /* }}} */
 
@@ -2442,6 +2607,7 @@ PHP_METHOD(ClickHouse, selectStream)
         resetStats(obj);
         obj->stats.last_query_id = qid;
         attachProgressAndProfile(query, obj);
+        attachVerbose(query, obj);
 
         query.OnData([iter](const Block &block) {
             if (block.GetRowCount() == 0 || block.GetColumnCount() == 0) return;
@@ -2514,6 +2680,7 @@ PHP_METHOD(ClickHouse, selectStreamCallback)
         resetStats(obj);
         obj->stats.last_query_id = qid;
         attachProgressAndProfile(query, obj);
+        attachVerbose(query, obj);
 
         query.OnData([cb](const Block &block) {
             if (block.GetRowCount() == 0 || block.GetColumnCount() == 0) return;
