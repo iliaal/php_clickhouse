@@ -37,25 +37,26 @@ Scope: small. Add a `setVerbose(bool|callable)` that hooks into clickhouse-cpp's
 
 ## Cosmetic / porting friction (smi2 -> php_clickhouse)
 
-The four highest-leverage items landed in 0.8.0 (`setSettings()` returns `$this`, `setSetting()`, `setDatabase()`, exception getter aliases). Remaining items below are lower-leverage and deferred.
+Landed in 0.8.0:
+- `setSettings()` returns `$this` (was `bool`).
+- `setSetting(string $key, mixed $value): static` for chainable single-key writes.
+- `setDatabase(string $database): static` issues `USE` on the server.
+- `ClickHouseException::getServerCode()` / `getServerName()` / `getQueryId()` getter aliases.
+- `selectStatement(): ClickHouseStatement` opt-in result wrapper. New `ClickHouseStatement` class implements Iterator, Countable, ArrayAccess, JsonSerializable plus `fetchOne` / `fetchKeyPair` / `fetchColumn` / `toArray` / `statistics`. `select()` is unchanged.
+
+Remaining items are lower-leverage and stay deferred.
 
 ### Full chainable settings builder (deferred)
 
 smi2: `$client->settings()->max_execution_time(30)->max_memory_usage(...)`. We have `setSetting($key, $value)` for chainable single-key writes and `setSettings($array)` for bulk replacement, both returning `$this`. The remaining gap is the magic-method-per-key API.
 
-A full `ClickHouseSettings` builder class with one method per setting key is mostly cosmetic; the existing API already chains. Defer unless users specifically ask for it.
+A full `ClickHouseSettings` builder class with one method per setting key is mostly cosmetic; the existing API already chains. ClickHouse has 200+ settings, half unstable, so generating one method per key would couple us to vendor-side churn for marginal benefit. Defer unless users specifically ask for it.
 
-### Bindings / placeholder syntax compatibility
+### Bindings / placeholder syntax compatibility (deferred)
 
 smi2: `:param` style with `bindParams([':a' => 1])`. php_clickhouse: `{name}` (client-side identifier substitution) and `{name:Type}` (server-side typed parameter).
 
-The native-protocol typed form is strictly better, but porting smi2 code requires rewriting every query. Optional: accept `:param` as an alias for `{param}` in the client-side substitution path. Low value, but cuts porting cost to near-zero for simple queries.
-
-### Fetch mode parity
-
-smi2 returns a `Statement` with `fetchOne()`, `rowsAsTree()`, `count()`, `totals()`, `extremes()`, `statistics()`. php_clickhouse returns plain arrays plus bitmask fetch modes (`FETCH_ONE`, `FETCH_KEY_PAIR`, `FETCH_COLUMN`).
-
-Tradeoff: introducing a `ClickHouseStatement` wrapper for `select()` results is a big BC change. Probably keep the array-by-default behavior and document the smi2-to-extension fetch-mode mapping in a porting guide.
+The native-protocol typed form is strictly better. Adding `:param` as a third alias would mean more documentation surface and more cases where a query author has to remember which form does what. We should be steering smi2 users toward `{name:Type}`, not making the unsafe-substitution path feel familiar. Skip on principle.
 
 ## Differentiators to keep highlighting
 

@@ -226,6 +226,19 @@ $ch->selectStreamCallback(string $sql, callable $cb,
                           array $params = [], string $query_id = "",
                           array $settings = []);  // true per-row stream
 
+// smi2-style result wrapper: returns a ClickHouseStatement (Iterator,
+// Countable, ArrayAccess, JsonSerializable) carrying a per-call stats
+// snapshot. Use when you want fetchOne / fetchKeyPair / fetchColumn /
+// statistics() on the result, or want to keep stats around after
+// running other queries on the client. Plain $ch->select() is faster
+// when you just need the array.
+$stmt = $ch->selectStatement(string $sql, array $params = [],
+                             string $query_id = "", array $settings = []);
+foreach ($stmt as $row) { /* ... */ }
+$stmt[0]; count($stmt); json_encode($stmt);
+$stmt->fetchOne(); $stmt->fetchKeyPair(); $stmt->fetchColumn();
+$stmt->toArray(); $stmt->statistics();
+
 // Settings, observability, helpers
 $ch->setSettings(array $settings);     // client-wide; per-call overrides; chainable
 $ch->setSetting(string $key, mixed $value);  // single-key sugar, chainable

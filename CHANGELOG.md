@@ -75,6 +75,16 @@ and geo-type round-trips, and `query_id` echo through
     `getQueryId()` getter aliases for the existing public
     `server_code`/`server_name`/`query_id` properties. Same data,
     smi2-compatible call shape.
+- `selectStatement(string $sql, ...): ClickHouseStatement`
+  result-wrapper variant of `select()`. The new
+  `ClickHouseStatement` class implements Iterator, Countable,
+  ArrayAccess, and JsonSerializable over the materialized rows,
+  plus `fetchOne()` / `fetchKeyPair()` / `fetchColumn()` /
+  `toArray()` / `statistics()`. Carries a per-call stats snapshot
+  so it survives the client running other queries afterwards.
+  Read-only: `offsetSet`/`offsetUnset` throw. Plain `select()` is
+  unchanged and remains the faster path when you just need the
+  array.
 
 ### Changed
 
