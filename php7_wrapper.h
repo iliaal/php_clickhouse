@@ -150,6 +150,13 @@ static zend_always_inline void zend_declare_typed_class_constant(
  * keeps the type info but drops the default-value annotation. */
 # define ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(pass_by_ref, name, type, allow_null, default_value) \
     ZEND_ARG_TYPE_INFO(pass_by_ref, name, type, allow_null)
+/* IS_MIXED is a PHP 8.0+ type tag (value 0x09). On 7.4 it isn't
+ * declared. Return-type uses are stripped above by the
+ * ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX shim, but parameter types
+ * reach ZEND_ARG_TYPE_INFO directly with the IS_MIXED token still in
+ * place. Define it to 0 (= IS_UNDEF, "no type constraint") so the
+ * argument compiles untyped on 7.4, matching pre-8.0 reflection. */
+# define IS_MIXED 0
 /* gen_stub builds typed properties / typed class constants via
  * (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_<TYPE>[|MAY_BE_NULL]). 7.4
  * has typed properties but uses a different zend_type construction
