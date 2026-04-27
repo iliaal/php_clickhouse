@@ -142,8 +142,12 @@ jobs:
   # toolset, not the autotools phpize/configure flow. The php-org
   # composite action below bundles SDK download, VS detection,
   # phpize / configure / nmake invocation, and a .dll smoke load.
-  # We disable run-tests because there's no ClickHouse server reachable
-  # from windows-latest in CI.
+  #
+  # run-tests is enabled so the runner exercises extension load + class
+  # registration + skip handling. Server-required phpts skip up-front
+  # via clickhouse_skip_if_no_server() (which short-circuits on
+  # PHP_OS_FAMILY === Windows). The offline surface smoke (tests/051)
+  # actually runs and validates the public API and exception boundary.
   windows-matrix:
     name: Resolve Windows matrix
     runs-on: ubuntu-latest
@@ -171,7 +175,7 @@ jobs:
           php-version: ${{ matrix.php-version }}
           arch: ${{ matrix.arch }}
           ts: ${{ matrix.ts }}
-          run-tests: 'false'
+          run-tests: 'true'
 
   asan:
     name: PHP ${{ matrix.php }} - ASAN
