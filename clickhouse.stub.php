@@ -110,6 +110,13 @@ final class ClickHouse
         array $settings = []
     ): ClickHouseRowIterator {}
 
+    public function selectStatement(
+        string $sql,
+        array $params = [],
+        string $query_id = "",
+        array $settings = []
+    ): ClickHouseStatement {}
+
     public function selectStreamCallback(
         string $sql,
         callable $callback,
@@ -146,6 +153,43 @@ final class ClickHouseRowIterator implements Iterator, Countable
     public function next(): void {}
 
     public function count(): int {}
+}
+
+final class ClickHouseStatement implements Iterator, Countable, ArrayAccess, JsonSerializable
+{
+    private function __construct() {}
+
+    public function count(): int {}
+
+    public function rewind(): void {}
+
+    public function valid(): bool {}
+
+    public function current(): mixed {}
+
+    public function key(): mixed {}
+
+    public function next(): void {}
+
+    public function offsetExists(mixed $offset): bool {}
+
+    public function offsetGet(mixed $offset): mixed {}
+
+    public function offsetSet(mixed $offset, mixed $value): void {}
+
+    public function offsetUnset(mixed $offset): void {}
+
+    public function jsonSerialize(): array {}
+
+    public function toArray(): array {}
+
+    public function statistics(): array {}
+
+    public function fetchOne(): mixed {}
+
+    public function fetchKeyPair(): array {}
+
+    public function fetchColumn(): array {}
 }
 
 class ClickHouseException extends Exception

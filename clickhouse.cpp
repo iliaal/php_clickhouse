@@ -26,6 +26,7 @@ extern "C" {
 #include "ext/standard/info.h"
 #include "Zend/zend_exceptions.h"
 #include "Zend/zend_interfaces.h"
+#include "ext/json/php_json.h"
 #include "php7_wrapper.h"
 }
 
@@ -44,7 +45,7 @@ extern "C" {
 using namespace clickhouse;
 using namespace std;
 
-zend_class_entry *clickhouse_ce, *clickhouse_exception_ce, *clickhouse_iter_ce;
+zend_class_entry *clickhouse_ce, *clickhouse_exception_ce, *clickhouse_iter_ce, *clickhouse_statement_ce;
 
 struct ClientStats {
     uint64_t rows_read = 0;
@@ -202,6 +203,49 @@ static void clickhouse_iter_free_obj(zend_object *object)
     zend_object_std_dtor(&iter->std);
 }
 
+/*
+ * Materialized result wrapper, returned by selectStatement(). The rows
+ * zval is a PHP array built once at construction time; iteration uses
+ * the HashTable's internal pointer, so a single foreach is the supported
+ * mode (nested foreach on the same Statement would fight over one
+ * cursor). The statistics zval is a per-call snapshot of obj->stats at
+ * the moment selectStatement returned, so callers can stash a Statement
+ * across other queries without losing its stats.
+ */
+struct clickhouse_statement_object {
+    zval rows;
+    zval statistics;
+    zend_object std;
+};
+
+static inline clickhouse_statement_object *clickhouse_statement_from_obj(zend_object *obj)
+{
+    return (clickhouse_statement_object *)((char *)obj - XtOffsetOf(clickhouse_statement_object, std));
+}
+
+#define Z_CLICKHOUSE_STATEMENT_P(zv) clickhouse_statement_from_obj(Z_OBJ_P(zv))
+
+static zend_object_handlers clickhouse_statement_object_handlers;
+
+static zend_object *clickhouse_statement_create_object(zend_class_entry *ce)
+{
+    clickhouse_statement_object *stmt = (clickhouse_statement_object *)zend_object_alloc(sizeof(clickhouse_statement_object), ce);
+    ZVAL_UNDEF(&stmt->rows);
+    ZVAL_UNDEF(&stmt->statistics);
+    zend_object_std_init(&stmt->std, ce);
+    object_properties_init(&stmt->std, ce);
+    stmt->std.handlers = &clickhouse_statement_object_handlers;
+    return &stmt->std;
+}
+
+static void clickhouse_statement_free_obj(zend_object *object)
+{
+    clickhouse_statement_object *stmt = clickhouse_statement_from_obj(object);
+    zval_ptr_dtor(&stmt->rows);
+    zval_ptr_dtor(&stmt->statistics);
+    zend_object_std_dtor(&stmt->std);
+}
+
 static std::string sanitizeError(const char *what);
 static void throwClickHouseError(const std::exception &e, const std::string &query_id = std::string());
 
@@ -242,6 +286,7 @@ static PHP_METHOD(ClickHouse, getServerUptime);
 static PHP_METHOD(ClickHouse, enableLogQueries);
 static PHP_METHOD(ClickHouse, getLogQueries);
 static PHP_METHOD(ClickHouse, selectStream);
+static PHP_METHOD(ClickHouse, selectStatement);
 static PHP_METHOD(ClickHouse, selectStreamCallback);
 static PHP_METHOD(ClickHouse, isExists);
 static PHP_METHOD(ClickHouse, showDatabases);
@@ -261,6 +306,24 @@ static PHP_METHOD(ClickHouseRowIterator, count);
 static PHP_METHOD(ClickHouseException, getServerCode);
 static PHP_METHOD(ClickHouseException, getServerName);
 static PHP_METHOD(ClickHouseException, getQueryId);
+
+static PHP_METHOD(ClickHouseStatement, __construct);
+static PHP_METHOD(ClickHouseStatement, count);
+static PHP_METHOD(ClickHouseStatement, rewind);
+static PHP_METHOD(ClickHouseStatement, valid);
+static PHP_METHOD(ClickHouseStatement, current);
+static PHP_METHOD(ClickHouseStatement, key);
+static PHP_METHOD(ClickHouseStatement, next);
+static PHP_METHOD(ClickHouseStatement, offsetExists);
+static PHP_METHOD(ClickHouseStatement, offsetGet);
+static PHP_METHOD(ClickHouseStatement, offsetSet);
+static PHP_METHOD(ClickHouseStatement, offsetUnset);
+static PHP_METHOD(ClickHouseStatement, jsonSerialize);
+static PHP_METHOD(ClickHouseStatement, toArray);
+static PHP_METHOD(ClickHouseStatement, statistics);
+static PHP_METHOD(ClickHouseStatement, fetchOne);
+static PHP_METHOD(ClickHouseStatement, fetchKeyPair);
+static PHP_METHOD(ClickHouseStatement, fetchColumn);
 
 #include "clickhouse_arginfo.h"
 
@@ -300,6 +363,16 @@ PHP_MINIT_FUNCTION(clickhouse)
     memcpy(&clickhouse_iter_object_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
     clickhouse_iter_object_handlers.offset = XtOffsetOf(clickhouse_iter_object, std);
     clickhouse_iter_object_handlers.free_obj = clickhouse_iter_free_obj;
+
+    clickhouse_statement_ce = register_class_ClickHouseStatement(zend_ce_iterator, zend_ce_countable, zend_ce_arrayaccess, php_json_serializable_ce);
+    clickhouse_statement_ce->create_object = clickhouse_statement_create_object;
+#if PHP_VERSION_ID >= 80400
+    clickhouse_statement_ce->default_object_handlers = &clickhouse_statement_object_handlers;
+#endif
+
+    memcpy(&clickhouse_statement_object_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
+    clickhouse_statement_object_handlers.offset = XtOffsetOf(clickhouse_statement_object, std);
+    clickhouse_statement_object_handlers.free_obj = clickhouse_statement_free_obj;
 
     /* Back-compat aliases for the original SeasClick name. Deprecated;
      * removed in the next major release. */
@@ -1135,24 +1208,19 @@ PHP_METHOD(ClickHouse, ping)
     RETURN_TRUE;
 }
 
-/* {{{ proto array select(string sql, array params, int mode, string query_id, array settings)
+/*
+ * Internal: run a SELECT and write rows into `out`, which the caller
+ * must have zero-initialized (we either array_init it or, for
+ * SC_FETCH_ONE, write a scalar zval directly). On error, throws via
+ * throwClickHouseError() and leaves `out` undefined; callers should
+ * check EG(exception) on return.
  */
-PHP_METHOD(ClickHouse, select)
+static void do_select_into(zval *out, zval *this_obj,
+                           const char *sql, size_t l_sql,
+                           zval *params, zend_long fetch_mode,
+                           const std::string &qid, zval *settings)
 {
-    char *sql = NULL;
-    size_t l_sql = 0;
-    zval* params = NULL;
-    zend_long fetch_mode = 0;
-    char *query_id = NULL;
-    size_t l_query_id = 0;
-    zval *settings = NULL;
-
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "s|zlsa", &sql, &l_sql, &params, &fetch_mode, &query_id, &l_query_id, &settings) == FAILURE)
-    {
-        return;
-    }
-    std::string qid = (query_id && l_query_id > 0) ? std::string(query_id, l_query_id) : std::string();
-    clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
+    clickhouse_object *obj = Z_CLICKHOUSE_P(this_obj);
     try
     {
         Client *client = getClient(obj);
@@ -1162,7 +1230,7 @@ PHP_METHOD(ClickHouse, select)
             throw std::runtime_error("The insert operation is now in progress");
         }
 
-        string sql_s = (string)sql;
+        std::string sql_s(sql, l_sql);
         std::vector<TypedParam> typed_params;
 
         if (params != NULL && Z_TYPE_P(params) == IS_ARRAY)
@@ -1180,17 +1248,14 @@ PHP_METHOD(ClickHouse, select)
         attachProgressAndProfile(query, obj);
 
         if (!(fetch_mode & SC_FETCH_ONE)) {
-            array_init(return_value);
+            array_init(out);
         }
 
-        // Track whether FETCH_ONE has already emitted a row, so a multi-
-        // block result returns the very first row and not the first row
-        // of the last block.
         bool fetched_one = false;
-        query.OnData([return_value, fetch_mode, &fetched_one](const Block &block) {
+        query.OnData([out, fetch_mode, &fetched_one](const Block &block) {
             if (fetch_mode & SC_FETCH_ONE) {
                 if (!fetched_one && block.GetRowCount() > 0 && block.GetColumnCount() > 0) {
-                    convertToZval(return_value, block[0], 0, "", 0, fetch_mode);
+                    convertToZval(out, block[0], 0, "", 0, fetch_mode);
                     fetched_one = true;
                 }
                 return;
@@ -1211,10 +1276,10 @@ PHP_METHOD(ClickHouse, select)
                     convertToZval(col2, block[1], row, "", 0, fetch_mode|SC_FETCH_ONE);
 
                     if (Z_TYPE_P(col1) == IS_LONG) {
-                         sc_zend_hash_index_update(Z_ARRVAL_P(return_value), Z_LVAL_P(col1), col2);
+                         sc_zend_hash_index_update(Z_ARRVAL_P(out), Z_LVAL_P(col1), col2);
                     } else {
                         convert_to_string(col1);
-                        zend_symtable_update(Z_ARRVAL_P(return_value), Z_STR_P(col1), col2);
+                        zend_symtable_update(Z_ARRVAL_P(out), Z_STR_P(col1), col2);
                     }
                     zval_ptr_dtor(col1);
                     continue;
@@ -1235,7 +1300,7 @@ PHP_METHOD(ClickHouse, select)
                         convertToZval(return_tmp, block[column], row, column_name, 0, fetch_mode);
                     }
                 }
-                add_next_index_zval(return_value, return_tmp);
+                add_next_index_zval(out, return_tmp);
             }
         });
 
@@ -1251,6 +1316,85 @@ PHP_METHOD(ClickHouse, select)
         recordQueryError(obj, std::string(sql, l_sql), qid, e);
         throwClickHouseError(e, qid);
     }
+}
+
+/*
+ * Internal: snapshot a ClientStats into a fresh PHP assoc array. Used
+ * by both ClickHouse::getStatistics() and ClickHouseStatement (where
+ * the snapshot lives on the Statement object so it survives the
+ * Client running other queries afterwards).
+ */
+static void buildStatsArray(zval *out, const ClientStats &st)
+{
+    array_init(out);
+    add_assoc_long(out, "rows_read", (zend_long)st.rows_read);
+    add_assoc_long(out, "bytes_read", (zend_long)st.bytes_read);
+    add_assoc_long(out, "total_rows", (zend_long)st.total_rows);
+    add_assoc_long(out, "written_rows", (zend_long)st.written_rows);
+    add_assoc_long(out, "written_bytes", (zend_long)st.written_bytes);
+    add_assoc_long(out, "blocks", (zend_long)st.blocks);
+    add_assoc_long(out, "rows_before_limit", (zend_long)st.rows_before_limit);
+    add_assoc_bool(out, "applied_limit", st.applied_limit ? 1 : 0);
+    add_assoc_double(out, "elapsed_ms", st.elapsed_ms);
+    add_assoc_stringl(out, "query_id", st.last_query_id.data(), st.last_query_id.size());
+}
+
+/* {{{ proto array select(string sql, array params, int mode, string query_id, array settings)
+ */
+PHP_METHOD(ClickHouse, select)
+{
+    char *sql = NULL;
+    size_t l_sql = 0;
+    zval* params = NULL;
+    zend_long fetch_mode = 0;
+    char *query_id = NULL;
+    size_t l_query_id = 0;
+    zval *settings = NULL;
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "s|zlsa", &sql, &l_sql, &params, &fetch_mode, &query_id, &l_query_id, &settings) == FAILURE)
+    {
+        return;
+    }
+    std::string qid = (query_id && l_query_id > 0) ? std::string(query_id, l_query_id) : std::string();
+    do_select_into(return_value, getThis(), sql, l_sql, params, fetch_mode, qid, settings);
+}
+/* }}} */
+
+/* {{{ proto ClickHouseStatement selectStatement(string sql, array params, string query_id, array settings)
+ *
+ * smi2/phpClickHouse-style result wrapper. Runs the SELECT and returns
+ * a ClickHouseStatement that implements Iterator + Countable +
+ * ArrayAccess + JsonSerializable over the materialized rows, plus
+ * fetchOne / fetchKeyPair / fetchColumn / statistics / toArray. The
+ * Statement carries a per-call stats snapshot so it survives the
+ * Client running other queries afterwards.
+ */
+PHP_METHOD(ClickHouse, selectStatement)
+{
+    char *sql = NULL;
+    size_t l_sql = 0;
+    zval *params = NULL;
+    char *query_id = NULL;
+    size_t l_query_id = 0;
+    zval *settings = NULL;
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "s|zsa", &sql, &l_sql, &params, &query_id, &l_query_id, &settings) == FAILURE) {
+        return;
+    }
+    std::string qid = (query_id && l_query_id > 0) ? std::string(query_id, l_query_id) : std::string();
+
+    object_init_ex(return_value, clickhouse_statement_ce);
+    clickhouse_statement_object *stmt = Z_CLICKHOUSE_STATEMENT_P(return_value);
+
+    do_select_into(&stmt->rows, getThis(), sql, l_sql, params, 0, qid, settings);
+    if (EG(exception)) {
+        zval_ptr_dtor(return_value);
+        ZVAL_UNDEF(return_value);
+        return;
+    }
+
+    clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
+    buildStatsArray(&stmt->statistics, obj->stats);
 }
 /* }}} */
 
@@ -1843,18 +1987,7 @@ PHP_METHOD(ClickHouse, getCurrentEndpoint)
 PHP_METHOD(ClickHouse, getStatistics)
 {
     clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
-    ClientStats &st = obj->stats;
-    array_init(return_value);
-    add_assoc_long(return_value, "rows_read", (zend_long)st.rows_read);
-    add_assoc_long(return_value, "bytes_read", (zend_long)st.bytes_read);
-    add_assoc_long(return_value, "total_rows", (zend_long)st.total_rows);
-    add_assoc_long(return_value, "written_rows", (zend_long)st.written_rows);
-    add_assoc_long(return_value, "written_bytes", (zend_long)st.written_bytes);
-    add_assoc_long(return_value, "blocks", (zend_long)st.blocks);
-    add_assoc_long(return_value, "rows_before_limit", (zend_long)st.rows_before_limit);
-    add_assoc_bool(return_value, "applied_limit", st.applied_limit ? 1 : 0);
-    add_assoc_double(return_value, "elapsed_ms", st.elapsed_ms);
-    add_assoc_stringl(return_value, "query_id", st.last_query_id.data(), st.last_query_id.size());
+    buildStatsArray(return_value, obj->stats);
 }
 /* }}} */
 
@@ -2726,6 +2859,266 @@ PHP_METHOD(ClickHouseException, getQueryId)
         RETURN_STRINGL(Z_STRVAL_P(p), Z_STRLEN_P(p));
     }
     RETURN_NULL();
+}
+/* }}} */
+
+/* {{{ ClickHouseStatement methods
+ *
+ * Materialized result wrapper. Constructed only by
+ * ClickHouse::selectStatement(); the public constructor throws.
+ */
+PHP_METHOD(ClickHouseStatement, __construct)
+{
+    zend_throw_exception(clickhouse_exception_ce,
+        "ClickHouseStatement is constructed by ClickHouse::selectStatement(); the constructor is private",
+        0);
+}
+
+PHP_METHOD(ClickHouseStatement, count)
+{
+    if (zend_parse_parameters_none() == FAILURE) return;
+    clickhouse_statement_object *stmt = Z_CLICKHOUSE_STATEMENT_P(getThis());
+    if (Z_TYPE(stmt->rows) != IS_ARRAY) {
+        RETURN_LONG(0);
+    }
+    RETURN_LONG((zend_long)zend_hash_num_elements(Z_ARRVAL(stmt->rows)));
+}
+
+PHP_METHOD(ClickHouseStatement, rewind)
+{
+    if (zend_parse_parameters_none() == FAILURE) return;
+    clickhouse_statement_object *stmt = Z_CLICKHOUSE_STATEMENT_P(getThis());
+    if (Z_TYPE(stmt->rows) == IS_ARRAY) {
+        zend_hash_internal_pointer_reset(Z_ARRVAL(stmt->rows));
+    }
+}
+
+PHP_METHOD(ClickHouseStatement, valid)
+{
+    if (zend_parse_parameters_none() == FAILURE) return;
+    clickhouse_statement_object *stmt = Z_CLICKHOUSE_STATEMENT_P(getThis());
+    if (Z_TYPE(stmt->rows) != IS_ARRAY) {
+        RETURN_FALSE;
+    }
+    RETURN_BOOL(zend_hash_get_current_data(Z_ARRVAL(stmt->rows)) != NULL);
+}
+
+PHP_METHOD(ClickHouseStatement, current)
+{
+    if (zend_parse_parameters_none() == FAILURE) return;
+    clickhouse_statement_object *stmt = Z_CLICKHOUSE_STATEMENT_P(getThis());
+    if (Z_TYPE(stmt->rows) != IS_ARRAY) {
+        RETURN_NULL();
+    }
+    zval *cur = zend_hash_get_current_data(Z_ARRVAL(stmt->rows));
+    if (!cur) {
+        RETURN_NULL();
+    }
+    ZVAL_COPY(return_value, cur);
+}
+
+PHP_METHOD(ClickHouseStatement, key)
+{
+    if (zend_parse_parameters_none() == FAILURE) return;
+    clickhouse_statement_object *stmt = Z_CLICKHOUSE_STATEMENT_P(getThis());
+    if (Z_TYPE(stmt->rows) != IS_ARRAY) {
+        RETURN_NULL();
+    }
+    zend_string *str_key;
+    zend_ulong num_key;
+    int t = zend_hash_get_current_key(Z_ARRVAL(stmt->rows), &str_key, &num_key);
+    if (t == HASH_KEY_IS_STRING) {
+        RETURN_STR_COPY(str_key);
+    } else if (t == HASH_KEY_IS_LONG) {
+        RETURN_LONG((zend_long)num_key);
+    }
+    RETURN_NULL();
+}
+
+PHP_METHOD(ClickHouseStatement, next)
+{
+    if (zend_parse_parameters_none() == FAILURE) return;
+    clickhouse_statement_object *stmt = Z_CLICKHOUSE_STATEMENT_P(getThis());
+    if (Z_TYPE(stmt->rows) == IS_ARRAY) {
+        zend_hash_move_forward(Z_ARRVAL(stmt->rows));
+    }
+}
+
+PHP_METHOD(ClickHouseStatement, offsetExists)
+{
+    zval *offset;
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "z", &offset) == FAILURE) return;
+    clickhouse_statement_object *stmt = Z_CLICKHOUSE_STATEMENT_P(getThis());
+    if (Z_TYPE(stmt->rows) != IS_ARRAY) {
+        RETURN_FALSE;
+    }
+    HashTable *ht = Z_ARRVAL(stmt->rows);
+    if (Z_TYPE_P(offset) == IS_LONG) {
+        RETURN_BOOL(zend_hash_index_exists(ht, Z_LVAL_P(offset)));
+    }
+    if (Z_TYPE_P(offset) == IS_STRING) {
+        RETURN_BOOL(zend_hash_exists(ht, Z_STR_P(offset)));
+    }
+    RETURN_FALSE;
+}
+
+PHP_METHOD(ClickHouseStatement, offsetGet)
+{
+    zval *offset;
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "z", &offset) == FAILURE) return;
+    clickhouse_statement_object *stmt = Z_CLICKHOUSE_STATEMENT_P(getThis());
+    if (Z_TYPE(stmt->rows) != IS_ARRAY) {
+        RETURN_NULL();
+    }
+    HashTable *ht = Z_ARRVAL(stmt->rows);
+    zval *v = NULL;
+    if (Z_TYPE_P(offset) == IS_LONG) {
+        v = zend_hash_index_find(ht, Z_LVAL_P(offset));
+    } else if (Z_TYPE_P(offset) == IS_STRING) {
+        v = zend_hash_find(ht, Z_STR_P(offset));
+    }
+    if (!v) {
+        RETURN_NULL();
+    }
+    ZVAL_COPY(return_value, v);
+}
+
+PHP_METHOD(ClickHouseStatement, offsetSet)
+{
+    zend_throw_exception(clickhouse_exception_ce,
+        "ClickHouseStatement is read-only; offsetSet is not supported", 0);
+}
+
+PHP_METHOD(ClickHouseStatement, offsetUnset)
+{
+    zend_throw_exception(clickhouse_exception_ce,
+        "ClickHouseStatement is read-only; offsetUnset is not supported", 0);
+}
+
+PHP_METHOD(ClickHouseStatement, jsonSerialize)
+{
+    if (zend_parse_parameters_none() == FAILURE) return;
+    clickhouse_statement_object *stmt = Z_CLICKHOUSE_STATEMENT_P(getThis());
+    if (Z_TYPE(stmt->rows) == IS_ARRAY) {
+        ZVAL_COPY(return_value, &stmt->rows);
+    } else {
+        array_init(return_value);
+    }
+}
+
+PHP_METHOD(ClickHouseStatement, toArray)
+{
+    if (zend_parse_parameters_none() == FAILURE) return;
+    clickhouse_statement_object *stmt = Z_CLICKHOUSE_STATEMENT_P(getThis());
+    if (Z_TYPE(stmt->rows) == IS_ARRAY) {
+        ZVAL_COPY(return_value, &stmt->rows);
+    } else {
+        array_init(return_value);
+    }
+}
+
+PHP_METHOD(ClickHouseStatement, statistics)
+{
+    if (zend_parse_parameters_none() == FAILURE) return;
+    clickhouse_statement_object *stmt = Z_CLICKHOUSE_STATEMENT_P(getThis());
+    if (Z_TYPE(stmt->statistics) == IS_ARRAY) {
+        ZVAL_COPY(return_value, &stmt->statistics);
+    } else {
+        array_init(return_value);
+    }
+}
+
+PHP_METHOD(ClickHouseStatement, fetchOne)
+{
+    if (zend_parse_parameters_none() == FAILURE) return;
+    clickhouse_statement_object *stmt = Z_CLICKHOUSE_STATEMENT_P(getThis());
+    if (Z_TYPE(stmt->rows) != IS_ARRAY || zend_hash_num_elements(Z_ARRVAL(stmt->rows)) == 0) {
+        RETURN_NULL();
+    }
+    HashPosition pos;
+    zend_hash_internal_pointer_reset_ex(Z_ARRVAL(stmt->rows), &pos);
+    zval *first = zend_hash_get_current_data_ex(Z_ARRVAL(stmt->rows), &pos);
+    if (!first) {
+        RETURN_NULL();
+    }
+    /* If the row is itself an assoc array with a single column, return
+     * the scalar value (smi2 fetchOne semantics). Otherwise return the
+     * full row. */
+    if (Z_TYPE_P(first) == IS_ARRAY && zend_hash_num_elements(Z_ARRVAL_P(first)) == 1) {
+        zend_hash_internal_pointer_reset_ex(Z_ARRVAL_P(first), &pos);
+        zval *only = zend_hash_get_current_data_ex(Z_ARRVAL_P(first), &pos);
+        if (only) {
+            ZVAL_COPY(return_value, only);
+            return;
+        }
+    }
+    ZVAL_COPY(return_value, first);
+}
+
+PHP_METHOD(ClickHouseStatement, fetchKeyPair)
+{
+    if (zend_parse_parameters_none() == FAILURE) return;
+    clickhouse_statement_object *stmt = Z_CLICKHOUSE_STATEMENT_P(getThis());
+    array_init(return_value);
+    if (Z_TYPE(stmt->rows) != IS_ARRAY) {
+        return;
+    }
+    zval *row;
+    ZEND_HASH_FOREACH_VAL(Z_ARRVAL(stmt->rows), row) {
+        if (Z_TYPE_P(row) != IS_ARRAY || zend_hash_num_elements(Z_ARRVAL_P(row)) < 2) {
+            zend_throw_exception(clickhouse_exception_ce,
+                "fetchKeyPair requires each row to have at least 2 columns", 0);
+            zend_array_destroy(Z_ARR_P(return_value));
+            ZVAL_UNDEF(return_value);
+            return;
+        }
+        HashPosition pos;
+        zend_hash_internal_pointer_reset_ex(Z_ARRVAL_P(row), &pos);
+        zval *kv = zend_hash_get_current_data_ex(Z_ARRVAL_P(row), &pos);
+        zend_hash_move_forward_ex(Z_ARRVAL_P(row), &pos);
+        zval *vv = zend_hash_get_current_data_ex(Z_ARRVAL_P(row), &pos);
+        if (!kv || !vv) continue;
+
+        zval val_copy;
+        ZVAL_COPY(&val_copy, vv);
+        if (Z_TYPE_P(kv) == IS_LONG) {
+            zend_hash_index_update(Z_ARRVAL_P(return_value), Z_LVAL_P(kv), &val_copy);
+        } else {
+            zval k_copy;
+            ZVAL_COPY(&k_copy, kv);
+            convert_to_string(&k_copy);
+            zend_symtable_update(Z_ARRVAL_P(return_value), Z_STR(k_copy), &val_copy);
+            zval_ptr_dtor(&k_copy);
+        }
+    } ZEND_HASH_FOREACH_END();
+}
+
+PHP_METHOD(ClickHouseStatement, fetchColumn)
+{
+    if (zend_parse_parameters_none() == FAILURE) return;
+    clickhouse_statement_object *stmt = Z_CLICKHOUSE_STATEMENT_P(getThis());
+    array_init(return_value);
+    if (Z_TYPE(stmt->rows) != IS_ARRAY) {
+        return;
+    }
+    zval *row;
+    ZEND_HASH_FOREACH_VAL(Z_ARRVAL(stmt->rows), row) {
+        if (Z_TYPE_P(row) != IS_ARRAY) {
+            /* Already a flat list of scalars (e.g. FETCH_COLUMN result fed in). */
+            zval c;
+            ZVAL_COPY(&c, row);
+            add_next_index_zval(return_value, &c);
+            continue;
+        }
+        HashPosition pos;
+        zend_hash_internal_pointer_reset_ex(Z_ARRVAL_P(row), &pos);
+        zval *first = zend_hash_get_current_data_ex(Z_ARRVAL_P(row), &pos);
+        if (first) {
+            zval c;
+            ZVAL_COPY(&c, first);
+            add_next_index_zval(return_value, &c);
+        }
+    } ZEND_HASH_FOREACH_END();
 }
 /* }}} */
 

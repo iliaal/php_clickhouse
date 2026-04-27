@@ -14,6 +14,7 @@ ClickHouse offline surface: classes, constants, methods, exception path (no serv
 echo "ext=", extension_loaded("clickhouse") ? 1 : 0, "\n";
 
 foreach (["ClickHouse", "ClickHouseException", "ClickHouseRowIterator",
+          "ClickHouseStatement",
           "SeasClick", "SeasClickException"] as $cls) {
     echo "class.$cls=", class_exists($cls) ? 1 : 0, "\n";
 }
@@ -27,10 +28,11 @@ echo "FETCH_COLUMN=",     ClickHouse::FETCH_COLUMN, "\n";
  * stub. Mismatches here surface as 0= immediately. */
 $methods = [
     "__construct", "__destruct",
-    "select", "selectStream", "selectStreamCallback",
+    "select", "selectStream", "selectStatement", "selectStreamCallback",
     "insert", "insertAssoc", "writeStart", "write", "writeEnd",
     "execute", "ping",
-    "setSettings", "setProgressCallback", "setProfileCallback",
+    "setSettings", "setSetting", "setDatabase",
+    "setProgressCallback", "setProfileCallback",
     "resetConnection", "getServerInfo", "getCurrentEndpoint",
     "getStatistics",
     "isExists", "showDatabases", "showProcesslist", "getServerVersion",
@@ -82,6 +84,7 @@ ext=1
 class.ClickHouse=1
 class.ClickHouseException=1
 class.ClickHouseRowIterator=1
+class.ClickHouseStatement=1
 class.SeasClick=1
 class.SeasClickException=1
 FETCH_ONE=1
