@@ -1,0 +1,57 @@
+name: Release Linux & macOS binaries
+
+# Triggered when a GitHub Release is published. Builds .so binaries for
+# Linux glibc (x86_64 + arm64) and macOS (x86_64 + arm64) at PHP 8.4 + 8.5
+# (NTS only -- ZTS lives in the Windows lane), uploads each as a release
+# asset via php/pie-ext-binary-builder using PIE's pre-packaged-binary
+# naming convention. PIE's `pie install iliaal/php_clickhouse` then
+# resolves the prebuilt asset matching the host arch/os/libc/PHP-version
+# instead of building clickhouse-cpp from source (~3-5 min compile).
+#
+# Coverage matrix: 4 lanes x 2 PHP = 8 prebuilt assets per release.
+# Linux musl is deferred -- shivammathur/setup-php in Alpine containers
+# needs more setup; users on musl get source-build via PIE's
+# composer-default fallback meanwhile.
+#
+# This workflow + the existing release-windows.yml together produce
+# 8 Linux/macOS + 12 Windows = 20 prebuilt assets per release.
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build:
+    name: ${{ matrix.os }} php ${{ matrix.php }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        # ubuntu-latest (24.04 x86_64), ubuntu-24.04-arm (arm64),
+        # macos-13 (Intel x86_64), macos-14 (Apple Silicon arm64).
+        # Pinned over `*-latest` to avoid silent runner shifts.
+        os:
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+          - macos-13
+          - macos-14
+        php:
+          - '8.4'
+          - '8.5'
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+
+      - name: Build and upload prebuilt binary
+        uses: php/pie-ext-binary-builder@0.0.3
+        with:
+          release-tag: ${{ github.event.release.tag_name }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          configure-flags: '--enable-clickhouse'

@@ -24,3 +24,9 @@ extra_build_variants:
   - name: "TLS variant"
     configure: "--enable-clickhouse --enable-clickhouse-openssl"
     php_version: PHP-8.4
+
+# Toggle: ship pre-built Linux/macOS binaries via .github/workflows/release-linux.yml
+# (uses php/pie-ext-binary-builder). Linux glibc x86_64+arm64 and macOS x86_64+arm64,
+# NTS only, PHP 8.4+8.5. musl deferred. Windows binaries handled separately by
+# release-windows.yml.
+linux_prebuilt: true
