@@ -1,6 +1,6 @@
 name: Release Windows binaries
 
-# Triggered when a GitHub Release is created (manual or from a tag push
+# Triggered when a GitHub Release is published (manual or from a tag push
 # via /release-ext). Builds the extension on every supported PHP version
 # x architecture x thread-safety variant on Windows runners, then
 # uploads each .dll as a release asset following the PIE-compatible
@@ -13,7 +13,7 @@ name: Release Windows binaries
 
 on:
   release:
-    types: [created]
+    types: [published]
 
 jobs:
   matrix:
