@@ -1,0 +1,8 @@
+# /release-ext library-freshness gate. Schema: ~/.claude/commands/release-ext.md
+# detected from lib/clickhouse-cpp/clickhouse/version.h
+
+pinned: 2.6.1
+vendored_at: lib/clickhouse-cpp
+resolver: github
+repo: ClickHouse/clickhouse-cpp
+note: "2.6.1 + LOCAL_PATCHES.md (empty string_view memcpy UB); upstream PR ClickHouse/clickhouse-cpp#489"
