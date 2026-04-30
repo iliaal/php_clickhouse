@@ -37,7 +37,6 @@ extern "C" {
 #include "lib/clickhouse-cpp/clickhouse/columns/ip6.h"
 #include "lib/clickhouse-cpp/clickhouse/columns/lowcardinality.h"
 #include "lib/clickhouse-cpp/clickhouse/columns/map.h"
-#include <map>
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
@@ -625,28 +624,58 @@ static ColumnRef appendMapByValueType(HashTable *values_ht, TypeRef vtype, KFn k
         ZStrGuard sg(mv);
         return std::string(sg.val(), sg.len());
     };
+    /* Narrow-typed int extractors range-check before truncation. The
+     * non-Map insert path has had these via appendIntColumn since pass 1;
+     * the Map dispatch was using a single i64Val/u64Val for all widths
+     * which silently wrapped Map(K, Int8) value 1000 to int8_t -24. */
     auto i64Val = [](zval *mv) -> int64_t { return (int64_t)zval_get_long(mv); };
     auto u64Val = [](zval *mv) -> uint64_t { return (uint64_t)zval_get_long(mv); };
+    auto narrowI = [](zval *mv, zend_long lo, zend_long hi, const char *t) -> int64_t {
+        zend_long n = zval_get_long(mv);
+        if (n < lo || n > hi) {
+            throw std::runtime_error(std::string("Map value out of range for ") + t);
+        }
+        return (int64_t)n;
+    };
+    auto narrowU = [](zval *mv, zend_ulong hi, const char *t) -> uint64_t {
+        zend_long n = zval_get_long(mv);
+        if (n < 0 || (zend_ulong)n > hi) {
+            throw std::runtime_error(std::string("Map value out of range for ") + t);
+        }
+        return (uint64_t)n;
+    };
     auto f64Val = [](zval *mv) -> double { return zval_get_double(mv); };
 
     Type::Code vc = vtype->GetCode();
     switch (vc) {
         case Type::Code::String:
             return appendMapColumn<K, std::string, KCol, ColumnString>(values_ht, key_fn, strVal);
-        case Type::Code::Int8:
-            return appendMapColumn<K, int64_t,    KCol, ColumnInt8>(values_ht, key_fn, i64Val);
-        case Type::Code::Int16:
-            return appendMapColumn<K, int64_t,    KCol, ColumnInt16>(values_ht, key_fn, i64Val);
-        case Type::Code::Int32:
-            return appendMapColumn<K, int64_t,    KCol, ColumnInt32>(values_ht, key_fn, i64Val);
+        case Type::Code::Int8: {
+            auto v = [&](zval *mv) { return narrowI(mv, INT8_MIN, INT8_MAX, "Int8"); };
+            return appendMapColumn<K, int64_t,    KCol, ColumnInt8>(values_ht, key_fn, v);
+        }
+        case Type::Code::Int16: {
+            auto v = [&](zval *mv) { return narrowI(mv, INT16_MIN, INT16_MAX, "Int16"); };
+            return appendMapColumn<K, int64_t,    KCol, ColumnInt16>(values_ht, key_fn, v);
+        }
+        case Type::Code::Int32: {
+            auto v = [&](zval *mv) { return narrowI(mv, INT32_MIN, INT32_MAX, "Int32"); };
+            return appendMapColumn<K, int64_t,    KCol, ColumnInt32>(values_ht, key_fn, v);
+        }
         case Type::Code::Int64:
             return appendMapColumn<K, int64_t,    KCol, ColumnInt64>(values_ht, key_fn, i64Val);
-        case Type::Code::UInt8:
-            return appendMapColumn<K, uint64_t,   KCol, ColumnUInt8>(values_ht, key_fn, u64Val);
-        case Type::Code::UInt16:
-            return appendMapColumn<K, uint64_t,   KCol, ColumnUInt16>(values_ht, key_fn, u64Val);
-        case Type::Code::UInt32:
-            return appendMapColumn<K, uint64_t,   KCol, ColumnUInt32>(values_ht, key_fn, u64Val);
+        case Type::Code::UInt8: {
+            auto v = [&](zval *mv) { return narrowU(mv, UINT8_MAX, "UInt8"); };
+            return appendMapColumn<K, uint64_t,   KCol, ColumnUInt8>(values_ht, key_fn, v);
+        }
+        case Type::Code::UInt16: {
+            auto v = [&](zval *mv) { return narrowU(mv, UINT16_MAX, "UInt16"); };
+            return appendMapColumn<K, uint64_t,   KCol, ColumnUInt16>(values_ht, key_fn, v);
+        }
+        case Type::Code::UInt32: {
+            auto v = [&](zval *mv) { return narrowU(mv, UINT32_MAX, "UInt32"); };
+            return appendMapColumn<K, uint64_t,   KCol, ColumnUInt32>(values_ht, key_fn, v);
+        }
         case Type::Code::UInt64:
             return appendMapColumn<K, uint64_t,   KCol, ColumnUInt64>(values_ht, key_fn, u64Val);
         case Type::Code::Float32:
@@ -842,6 +871,13 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     case Type::Code::Int128:
     {
         auto value = std::make_shared<ColumnInt128>();
+        /* Int128 range is [-2^127, 2^127-1]. parse_uint128_dec accepts up
+         * to 2^128-1, so an unbounded magnitude in (2^127, 2^128-1] used
+         * to silently wrap to negative via the static_cast. Bound the
+         * magnitude before casting; the negative-INT128_MIN edge needs
+         * special handling because -INT128_MIN is undefined. */
+        const absl::uint128 abs_int128_min = absl::uint128(1) << 127;
+        const absl::uint128 int128_max     = abs_int128_min - 1;
         ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
             if (Z_TYPE_P(array_value) == IS_STRING) {
@@ -851,8 +887,23 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 bool neg = false;
                 if (len > 0 && (s[0] == '-' || s[0] == '+')) { neg = (s[0] == '-'); i = 1; }
                 absl::uint128 mag = parse_uint128_dec(s + i, len - i, "Int128");
-                Int128 v = static_cast<Int128>(mag);
-                value->Append(neg ? -v : v);
+                if (neg) {
+                    if (mag > abs_int128_min) {
+                        throw std::runtime_error("Int128 string is below -2^127");
+                    }
+                    if (mag == abs_int128_min) {
+                        /* INT128_MIN: -2^127. Constructing via -static_cast
+                         * <Int128>(2^127) would be UB on the negation. */
+                        value->Append(static_cast<Int128>(mag));
+                    } else {
+                        value->Append(-static_cast<Int128>(mag));
+                    }
+                } else {
+                    if (mag > int128_max) {
+                        throw std::runtime_error("Int128 string exceeds 2^127-1");
+                    }
+                    value->Append(static_cast<Int128>(mag));
+                }
             } else {
                 value->Append(Int128(zval_get_long(array_value)));
             }
@@ -1133,23 +1184,67 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
             };
         };
 
+        /* Narrow-key wrappers: same range-check the value side gained for
+         * narrow Map columns. Keys arrive as decimal strings; the parsed
+         * int64 must still fit the destination column width. */
+        auto narrowKeyI = [&](zend_string *zk, zend_ulong nk,
+                              int64_t lo, int64_t hi, const char *t) -> int64_t {
+            int64_t parsed = i64Key(zk, nk);
+            if (parsed < lo || parsed > hi) {
+                throw std::runtime_error(std::string("Map key out of range for ") + t);
+            }
+            return parsed;
+        };
+        auto narrowKeyU = [&](zend_string *zk, zend_ulong nk,
+                              uint64_t hi, const char *t) -> uint64_t {
+            uint64_t parsed = u64Key(zk, nk);
+            if (parsed > hi) {
+                throw std::runtime_error(std::string("Map key out of range for ") + t);
+            }
+            return parsed;
+        };
+
         switch (kc) {
             case Type::Code::String:
                 return appendMapByValueType<ColumnString,  std::string>(values_ht, v, strKey);
-            case Type::Code::Int8:
-                return appendMapByValueType<ColumnInt8,    int64_t>(values_ht, v, i64Key);
-            case Type::Code::Int16:
-                return appendMapByValueType<ColumnInt16,   int64_t>(values_ht, v, i64Key);
-            case Type::Code::Int32:
-                return appendMapByValueType<ColumnInt32,   int64_t>(values_ht, v, i64Key);
+            case Type::Code::Int8: {
+                auto kf = [&](zend_string *zk, zend_ulong nk) {
+                    return narrowKeyI(zk, nk, INT8_MIN, INT8_MAX, "Int8");
+                };
+                return appendMapByValueType<ColumnInt8,    int64_t>(values_ht, v, kf);
+            }
+            case Type::Code::Int16: {
+                auto kf = [&](zend_string *zk, zend_ulong nk) {
+                    return narrowKeyI(zk, nk, INT16_MIN, INT16_MAX, "Int16");
+                };
+                return appendMapByValueType<ColumnInt16,   int64_t>(values_ht, v, kf);
+            }
+            case Type::Code::Int32: {
+                auto kf = [&](zend_string *zk, zend_ulong nk) {
+                    return narrowKeyI(zk, nk, INT32_MIN, INT32_MAX, "Int32");
+                };
+                return appendMapByValueType<ColumnInt32,   int64_t>(values_ht, v, kf);
+            }
             case Type::Code::Int64:
                 return appendMapByValueType<ColumnInt64,   int64_t>(values_ht, v, i64Key);
-            case Type::Code::UInt8:
-                return appendMapByValueType<ColumnUInt8,   uint64_t>(values_ht, v, u64Key);
-            case Type::Code::UInt16:
-                return appendMapByValueType<ColumnUInt16,  uint64_t>(values_ht, v, u64Key);
-            case Type::Code::UInt32:
-                return appendMapByValueType<ColumnUInt32,  uint64_t>(values_ht, v, u64Key);
+            case Type::Code::UInt8: {
+                auto kf = [&](zend_string *zk, zend_ulong nk) {
+                    return narrowKeyU(zk, nk, UINT8_MAX, "UInt8");
+                };
+                return appendMapByValueType<ColumnUInt8,   uint64_t>(values_ht, v, kf);
+            }
+            case Type::Code::UInt16: {
+                auto kf = [&](zend_string *zk, zend_ulong nk) {
+                    return narrowKeyU(zk, nk, UINT16_MAX, "UInt16");
+                };
+                return appendMapByValueType<ColumnUInt16,  uint64_t>(values_ht, v, kf);
+            }
+            case Type::Code::UInt32: {
+                auto kf = [&](zend_string *zk, zend_ulong nk) {
+                    return narrowKeyU(zk, nk, UINT32_MAX, "UInt32");
+                };
+                return appendMapByValueType<ColumnUInt32,  uint64_t>(values_ht, v, kf);
+            }
             case Type::Code::UInt64:
                 return appendMapByValueType<ColumnUInt64,  uint64_t>(values_ht, v, u64Key);
             case Type::Code::Float32:
@@ -2050,6 +2145,17 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             }
         };
 
+        /* Format a Float key as a locale-independent decimal string. The
+         * naive snprintf("%.17g") honors LC_NUMERIC, so the same Float64
+         * map key would surface under a different PHP array key under
+         * setlocale(LC_NUMERIC, 'de_DE'). php_gcvt with explicit '.' is
+         * the same fix CR-303 applied at the SQL parameter boundary. */
+        auto fmtFloatKey = [](double dk, char *buf, size_t bufsz) -> int {
+            php_gcvt(dk, 17, '.', 'e', buf);
+            (void)bufsz;
+            return (int)strlen(buf);
+        };
+
         // Helper: add (string|long-as-string) keyed value into map_zv.
         // Handles all three key categories returned by decodeKey.
         auto addStrL = [&](int kkind, const std::string &sb, zend_long lk, double dk,
@@ -2060,7 +2166,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
                 add_index_stringl(map_zv, lk, vptr, vlen);
             } else {
                 char kbuf[64];
-                int klen = snprintf(kbuf, sizeof(kbuf), "%.17g", dk);
+                int klen = fmtFloatKey(dk, kbuf, sizeof(kbuf));
                 sc_add_assoc_stringl_ex(map_zv, kbuf, klen, vptr, vlen, 1);
             }
         };
@@ -2071,7 +2177,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
                 add_index_long(map_zv, lk, lv);
             } else {
                 char kbuf[64];
-                int klen = snprintf(kbuf, sizeof(kbuf), "%.17g", dk);
+                int klen = fmtFloatKey(dk, kbuf, sizeof(kbuf));
                 add_assoc_long_ex(map_zv, kbuf, klen, lv);
             }
         };
@@ -2082,7 +2188,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
                 add_index_double(map_zv, lk, dv);
             } else {
                 char kbuf[64];
-                int klen = snprintf(kbuf, sizeof(kbuf), "%.17g", dk);
+                int klen = fmtFloatKey(dk, kbuf, sizeof(kbuf));
                 add_assoc_double_ex(map_zv, kbuf, klen, dv);
             }
         };
