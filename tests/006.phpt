@@ -38,7 +38,7 @@ function testUInt($client, $deleteTable = false) {
     $client->writeEnd();
     
     $result = $client->select("SELECT {select} FROM {table} ORDER BY uint16_c, int8_c", [
-        'select' => 'int8_c, int16_c, uint8_c, uint16_c',
+        'select' => ['int8_c', 'int16_c', 'uint8_c', 'uint16_c'],
         'table' => 'test.int_test'
     ]);
     var_dump($result);

@@ -27,6 +27,10 @@ foreach ($cases as [$label, $input, $expected]) {
     $c = new ClickHouse(array_merge($cfg, ["compression" => $input]));
     $r = new ReflectionObject($c);
     $p = $r->getProperty("compression");
+    // PHP 7.4 enforces visibility on Reflection getValue() against
+    // protected properties; PHP 8.1+ implicitly makes Reflection
+    // accessors bypass the check.
+    $p->setAccessible(true);
     $got = $p->getValue($c);
     echo "compression=$label expected=$expected got=$got\n";
 }

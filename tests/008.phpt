@@ -38,7 +38,7 @@ function testUUID($client, $deleteTable = false) {
     $client->writeEnd();
     
     $result = $client->select("SELECT {select} FROM {table} ORDER BY uuid_c, uuid2_c", [
-        'select' => 'uuid_c, uuid2_c',
+        'select' => ['uuid_c', 'uuid2_c'],
         'table' => 'test.uuid_test'
     ]);
     var_dump($result);

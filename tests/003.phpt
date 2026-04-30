@@ -29,7 +29,7 @@ function testEnum($client, $deleteTable = false) {
     ]);
 
     $result = $client->select("SELECT {select} FROM {table}", [
-        'select' => 'enum8_c, enum16_c',
+        'select' => ['enum8_c', 'enum16_c'],
         'table' => 'test.enum_test'
     ]);
     var_dump($result);

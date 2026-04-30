@@ -1394,6 +1394,80 @@ struct TypedParam {
     std::optional<std::string> value;  // nullopt → server NULL
 };
 
+/*
+ * Validate a single client-side `{name}` placeholder token. Accepts a
+ * numeric literal (optional sign, digits, optional fractional part,
+ * optional exponent) or an identifier (`[A-Za-z_][A-Za-z0-9_]*`,
+ * optionally db-qualified by exactly one dot). Whitespace, commas, and
+ * other punctuation are rejected — list semantics live in the
+ * array-valued placeholder branch below. Returns the validated string
+ * by value or throws std::runtime_error with a contextual message.
+ */
+static std::string validatePlaceholderToken(const char *val, size_t vlen,
+                                            const std::string &name)
+{
+    auto throwInvalid = [&](const char *why) {
+        throw std::runtime_error(
+            "Placeholder value for {" + name + "} is invalid: " + why);
+    };
+    if (vlen == 0) throwInvalid("empty");
+
+    auto isAlpha = [](unsigned char c) {
+        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
+    };
+    auto isDigit = [](unsigned char c) { return c >= '0' && c <= '9'; };
+
+    size_t i = 0;
+    unsigned char c0 = (unsigned char)val[0];
+    if (isDigit(c0) || c0 == '+' || c0 == '-') {
+        if (c0 == '+' || c0 == '-') {
+            i++;
+            if (i >= vlen || !isDigit((unsigned char)val[i])) {
+                throwInvalid("sign without digits");
+            }
+        }
+        bool seen_digit = false;
+        while (i < vlen && isDigit((unsigned char)val[i])) { i++; seen_digit = true; }
+        if (i < vlen && val[i] == '.') {
+            i++;
+            while (i < vlen && isDigit((unsigned char)val[i])) { i++; seen_digit = true; }
+        }
+        if (i < vlen && (val[i] == 'e' || val[i] == 'E')) {
+            i++;
+            if (i < vlen && (val[i] == '+' || val[i] == '-')) i++;
+            if (i >= vlen || !isDigit((unsigned char)val[i])) {
+                throwInvalid("malformed exponent");
+            }
+            while (i < vlen && isDigit((unsigned char)val[i])) i++;
+        }
+        if (!seen_digit) throwInvalid("numeric token without digits");
+    } else if (isAlpha(c0)) {
+        i++;
+        bool dot_seen = false;
+        while (i < vlen) {
+            unsigned char c = (unsigned char)val[i];
+            if (isAlpha(c) || isDigit(c)) { i++; continue; }
+            if (c == '.' && !dot_seen) {
+                dot_seen = true; i++;
+                if (i >= vlen) throwInvalid("trailing dot");
+                if (!isAlpha((unsigned char)val[i])) {
+                    throwInvalid("segment after dot must start with a letter or underscore");
+                }
+                i++;
+                continue;
+            }
+            break;
+        }
+    } else {
+        throwInvalid("must start with a digit, sign, letter, or underscore");
+    }
+    if (i != vlen) {
+        throwInvalid("only one identifier or numeric literal per token; "
+                     "use array-valued placeholders for column lists");
+    }
+    return std::string(val, vlen);
+}
+
 static void applyPlaceholders(string &sql, HashTable *params_ht, std::vector<TypedParam> &out_params)
 {
     zval *pzval;
@@ -1430,90 +1504,55 @@ static void applyPlaceholders(string &sql, HashTable *params_ht, std::vector<Typ
         }
 
         /* Fall through: client-side {name} identifier substitution.
-         * Structural validation: each token is either a numeric literal
-         * (optional sign, digits, optional fractional part, optional
-         * exponent) or an identifier (`[A-Za-z_][A-Za-z0-9_]*` with at
-         * most one `.` separator for db-qualified names). Tokens may be
-         * joined by commas with optional whitespace ONLY around the
-         * commas — internal whitespace inside a token is rejected.
-         * The prior flat-whitelist form let "tbl ANY INNER JOIN secret
-         * USING tenant" land verbatim because it accepted spaces and
-         * letters globally; closing that requires per-token parsing. */
-        zend_string *coerced = zval_get_string(pzval);
-        const char *val = ZSTR_VAL(coerced);
-        size_t vlen = ZSTR_LEN(coerced);
-        auto throwInvalid = [&](const char *why) {
-            std::string err = "Placeholder value for {" + name + "} is invalid: ";
-            err += why;
-            zend_string_release(coerced);
-            throw std::runtime_error(err);
-        };
-        if (vlen == 0) throwInvalid("empty");
-
-        auto isAlpha = [](unsigned char c) {
-            return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
-        };
-        auto isDigit = [](unsigned char c) { return c >= '0' && c <= '9'; };
-
-        size_t i = 0;
-        while (i < vlen) {
-            unsigned char c = (unsigned char)val[i];
-            if (isDigit(c) || c == '+' || c == '-') {
-                /* Numeric token. */
-                if ((c == '+' || c == '-')) {
-                    i++;
-                    if (i >= vlen || !isDigit((unsigned char)val[i])) {
-                        throwInvalid("sign without digits");
-                    }
-                }
-                bool seen_digit = false;
-                while (i < vlen && isDigit((unsigned char)val[i])) { i++; seen_digit = true; }
-                if (i < vlen && val[i] == '.') {
-                    i++;
-                    while (i < vlen && isDigit((unsigned char)val[i])) { i++; seen_digit = true; }
-                }
-                if (i < vlen && (val[i] == 'e' || val[i] == 'E')) {
-                    i++;
-                    if (i < vlen && (val[i] == '+' || val[i] == '-')) i++;
-                    if (i >= vlen || !isDigit((unsigned char)val[i])) {
-                        throwInvalid("malformed exponent");
-                    }
-                    while (i < vlen && isDigit((unsigned char)val[i])) i++;
-                }
-                if (!seen_digit) throwInvalid("numeric token without digits");
-            } else if (isAlpha(c)) {
-                /* Identifier token, optionally db-qualified. */
-                i++;
-                bool dot_seen = false;
-                while (i < vlen) {
-                    c = (unsigned char)val[i];
-                    if (isAlpha(c) || isDigit(c)) { i++; continue; }
-                    if (c == '.' && !dot_seen) {
-                        dot_seen = true; i++;
-                        if (i >= vlen) throwInvalid("trailing dot");
-                        if (!isAlpha((unsigned char)val[i])) {
-                            throwInvalid("segment after dot must start with a letter or underscore");
-                        }
-                        i++;
-                        continue;
-                    }
-                    break;
-                }
-            } else {
-                throwInvalid("token must start with a digit, sign, letter, or underscore");
+         *
+         * Two value shapes are supported:
+         *   - String value: a single identifier (optionally db-qualified
+         *     by one dot) or a numeric literal. Whitespace, commas, and
+         *     punctuation are rejected. The single-token contract is
+         *     what the API documentation promises as a safe identifier
+         *     substitution.
+         *   - Array value: each element is validated as a single token
+         *     and the elements are joined with ", " for the SQL
+         *     replacement. Use this for legitimate column lists; a
+         *     scalar string with commas like "a, b" would otherwise
+         *     bypass the single-identifier guarantee (`FROM {tbl}` with
+         *     "a, b" turned into a cross join in scan.md's repro). */
+        std::string repl;
+        if (Z_TYPE_P(pzval) == IS_ARRAY) {
+            HashTable *aht = Z_ARRVAL_P(pzval);
+            if (zend_hash_num_elements(aht) == 0) {
+                throw std::runtime_error(
+                    "Placeholder value for {" + name + "} is invalid: empty array");
             }
-
-            /* Optional whitespace, then comma (which means another token follows). */
-            while (i < vlen && (val[i] == ' ' || val[i] == '\t')) i++;
-            if (i >= vlen) break;
-            if (val[i] != ',') throwInvalid("unexpected character after token");
-            i++;
-            while (i < vlen && (val[i] == ' ' || val[i] == '\t')) i++;
-            if (i >= vlen) throwInvalid("trailing comma");
+            zval *iv;
+            bool first = true;
+            ZEND_HASH_FOREACH_VAL(aht, iv) {
+                zend_string *coerced = zval_get_string(iv);
+                std::string tok;
+                try {
+                    tok = validatePlaceholderToken(
+                        ZSTR_VAL(coerced), ZSTR_LEN(coerced), name);
+                } catch (...) {
+                    zend_string_release(coerced);
+                    throw;
+                }
+                zend_string_release(coerced);
+                if (!first) repl += ", ";
+                first = false;
+                repl += tok;
+            } ZEND_HASH_FOREACH_END();
+        } else {
+            zend_string *coerced = zval_get_string(pzval);
+            try {
+                repl = validatePlaceholderToken(
+                    ZSTR_VAL(coerced), ZSTR_LEN(coerced), name);
+            } catch (...) {
+                zend_string_release(coerced);
+                throw;
+            }
+            zend_string_release(coerced);
         }
         std::string needle = "{" + name + "}";
-        std::string repl(val, vlen);
-        zend_string_release(coerced);
         size_t pos = sql.find(needle);
         if (pos == std::string::npos) {
             throw std::runtime_error(

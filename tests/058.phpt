@@ -26,8 +26,8 @@ $probes = [
     "backslash"      => "id\\x",
     "minus"          => "neg-name",
     "sql comment"    => "tbl --",
-    "tab is ok"      => "id,\tname",
-    "comma is ok"    => "id, name",
+    "tab"            => "id,\tname",
+    "comma list"     => "id, name",
     "dot is ok"      => "db.tbl",
 ];
 
@@ -60,6 +60,6 @@ single quote: REJECTED
 backslash: REJECTED
 minus: REJECTED
 sql comment: REJECTED
-tab is ok: ALLOWED (server-rejected)
-comma is ok: ALLOWED (server-rejected)
+tab: REJECTED
+comma list: REJECTED
 dot is ok: ALLOWED (server-rejected)

@@ -135,14 +135,30 @@ static inline std::shared_ptr<TCol> as_or_throw(const ColumnRef &c, const char *
  * literals (CR-508). Range-checking against the destination column's
  * width is still the caller's responsibility (appendIntColumn passes
  * MinV/MaxV, narrow-int Map dispatch wraps with its own checks).
+ *
+ * IS_NULL handling: rejected by default (storing 0 silently corrupts
+ * non-Nullable columns). The Nullable insert path bumps
+ * `g_allow_null_in_strict` via AllowNullGuard so its recursive child
+ * build can accept NULL cells (the null mask makes the placeholder
+ * value irrelevant).
  */
+static thread_local int g_allow_null_in_strict = 0;
+struct AllowNullGuard {
+    AllowNullGuard()  { ++g_allow_null_in_strict; }
+    ~AllowNullGuard() { --g_allow_null_in_strict; }
+    AllowNullGuard(const AllowNullGuard&) = delete;
+    AllowNullGuard& operator=(const AllowNullGuard&) = delete;
+};
 static zend_long strict_zval_long(zval *z, const char *type_label)
 {
     switch (Z_TYPE_P(z)) {
         case IS_LONG:  return Z_LVAL_P(z);
         case IS_TRUE:  return 1;
         case IS_FALSE: return 0;
-        case IS_NULL:  return 0;
+        case IS_NULL:
+            if (g_allow_null_in_strict > 0) return 0;
+            throw std::runtime_error(
+                std::string("null cannot be assigned to non-Nullable column ") + type_label);
         case IS_DOUBLE: {
             double d = Z_DVAL_P(z);
             if (std::isnan(d) || std::isinf(d)) {
@@ -190,7 +206,10 @@ static double strict_zval_double(zval *z, const char *type_label)
         case IS_LONG:  return (double)Z_LVAL_P(z);
         case IS_TRUE:  return 1.0;
         case IS_FALSE: return 0.0;
-        case IS_NULL:  return 0.0;
+        case IS_NULL:
+            if (g_allow_null_in_strict > 0) return 0.0;
+            throw std::runtime_error(
+                std::string("null cannot be assigned to non-Nullable column ") + type_label);
         case IS_DOUBLE: {
             double d = Z_DVAL_P(z);
             if (std::isnan(d) || std::isinf(d)) {
@@ -335,14 +354,34 @@ static std::pair<std::time_t, int64_t> to_time_t_with_frac(const std::string &st
     auto dot = str.find('.');
     std::time_t whole = to_time_t(dot == std::string::npos ? str : str.substr(0, dot), false);
     int64_t frac = 0;
-    if (dot != std::string::npos && precision > 0) {
+    if (dot != std::string::npos) {
+        if (precision == 0) {
+            /* DateTime64(0) has no fractional component; any text after
+             * the dot is invalid. The prior pass silently dropped the
+             * suffix at precision 0, which let "00:00:00.garbage" land
+             * as a clean DateTime64(0). */
+            throw std::runtime_error(
+                "Invalid DateTime64(0) string (fractional suffix on a "
+                "zero-precision column): " + str);
+        }
         const char *p = str.c_str() + dot + 1;
         const char *end = str.c_str() + str.size();
+        if (p >= end) {
+            /* Bare "12:34:56." with no digits after the dot. Previously
+             * accepted (consumed=0 took the no-op path). Reject. */
+            throw std::runtime_error(
+                "Invalid DateTime64 string (bare dot without fractional digits): " + str);
+        }
         size_t consumed = 0;
         while (p < end && consumed < precision && *p >= '0' && *p <= '9') {
             frac = frac * 10 + (*p - '0');
             ++p;
             ++consumed;
+        }
+        if (consumed == 0) {
+            /* The first character after the dot wasn't a digit. */
+            throw std::runtime_error(
+                "Invalid DateTime64 string (non-digit after dot): " + str);
         }
         // Pad missing digits up to precision so "12:34:56.5" with precision 3
         // contributes 500 (ms), not 5.
@@ -1205,6 +1244,12 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         }
         ZEND_HASH_FOREACH_END();
 
+        /* The null mask captures IS_NULL cells, so the recursive child
+         * build can accept NULL → typed-zero placeholder. Without the
+         * guard, strict_zval_long / strict_zval_double would now
+         * (post-CR-002) reject IS_NULL outright and break every
+         * Nullable insert. */
+        AllowNullGuard nulls_ok;
         ColumnRef child = insertColumn(type->As<NullableType>()->GetNestedType(), value_zval);
 
         return std::make_shared<ColumnNullable>(child, nulls);

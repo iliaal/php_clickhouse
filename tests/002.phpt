@@ -33,7 +33,7 @@ function testArray($client, $deleteTable = false) {
     ]);
 
     $result = $client->select("SELECT {select} FROM {table}", [
-        'select' => 'string_c, array_c, arraynull_c',
+        'select' => ['string_c', 'array_c', 'arraynull_c'],
         'table' => 'test.array_test'
     ]);
     var_dump($result);
