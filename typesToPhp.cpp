@@ -48,6 +48,39 @@ using namespace clickhouse;
 using namespace std;
 
 /*
+ * Format a 128-bit integer into a decimal string using a stack buffer.
+ * Avoids the heap allocation a stringstream incurs per cell on the read
+ * paths for Int128 / UInt128 / Decimal columns. Returns the number of
+ * bytes written into `out` (which must hold at least 41 bytes: sign +
+ * 39 digits + NUL margin).
+ */
+static size_t format_uint128_dec(absl::uint128 v, char *out)
+{
+    char tmp[40];
+    int len = 0;
+    do {
+        tmp[len++] = (char)('0' + (int)(v % 10));
+        v /= 10;
+    } while (v != 0);
+    for (int i = 0; i < len; ++i) {
+        out[i] = tmp[len - 1 - i];
+    }
+    return (size_t)len;
+}
+
+static size_t format_int128_dec(absl::int128 v, char *out)
+{
+    if (v >= 0) {
+        return format_uint128_dec(absl::uint128(v), out);
+    }
+    out[0] = '-';
+    /* Use unsigned negation to handle INT128_MIN (whose magnitude is
+     * representable in uint128 but not in int128). */
+    absl::uint128 mag = absl::uint128(0) - absl::uint128(v);
+    return 1 + format_uint128_dec(mag, out + 1);
+}
+
+/*
  * Parse "YYYY-MM-DD" or "YYYY-MM-DD HH:MM:SS" into a Unix epoch.
  *
  * Use timegm, not mktime: the read paths in convertToZval all format
@@ -1249,7 +1282,7 @@ struct ConvertDepthGuard {
     ~ConvertDepthGuard() { --convert_depth; }
 };
 
-void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column_name, int8_t is_array, long fetch_mode)
+void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string& column_name, int8_t is_array, long fetch_mode)
 {
     ConvertDepthGuard _depth_guard;
     switch (columnRef->Type()->GetCode())
@@ -1296,28 +1329,38 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
         break;
     case Type::Code::UUID:
     {
-        stringstream first;
-        stringstream second;
-        auto col = (*columnRef->As<ColumnUUID>())[row];
-        first<<std::setw(16)<<std::setfill('0')<<hex<<col.first;
-        second<<std::setw(16)<<std::setfill('0')<<hex<<col.second;
+        auto uuid_col = columnRef->As<ColumnUUID>();
+        if (!uuid_col) {
+            throw std::runtime_error("UUID read: column type mismatch");
+        }
+        auto col = (*uuid_col)[row];
+        char buf[33];
+        snprintf(buf, sizeof(buf), "%016llx%016llx",
+                 (unsigned long long)col.first,
+                 (unsigned long long)col.second);
         if (is_array)
         {
-            sc_add_next_index_stringl(arr, (char*)(first.str() + second.str()).c_str(), (first.str() + second.str()).length(), 1);
+            sc_add_next_index_stringl(arr, buf, 32, 1);
         }
         else
         {
-            SC_SINGLE_STRING((char*)(first.str() + second.str()).c_str(), (first.str() + second.str()).length());
+            SC_SINGLE_STRING(buf, 32);
         }
         break;
     }
     case Type::Code::Float32:
     {
-        auto col = (*columnRef->As<ColumnFloat32>())[row];
-        stringstream stream;
-        stream<<col;
-        double d;
-        stream>>d;
+        auto f32_col = columnRef->As<ColumnFloat32>();
+        if (!f32_col) {
+            throw std::runtime_error("Float32 read: column type mismatch");
+        }
+        /* Round-trip through %.6g (matching the prior `stringstream<<float`
+         * default precision) so 0.55f surfaces as 0.55 to PHP, not
+         * 0.5500000119. snprintf+strtod is heap-free vs the old stringstream
+         * pair. */
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%.6g", (double)(*f32_col)[row]);
+        double d = strtod(buf, nullptr);
         if (is_array)
         {
             add_next_index_double(arr, d);
@@ -1330,14 +1373,18 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
     }
     case Type::Code::Float64:
     {
-        auto col = (*columnRef->As<ColumnFloat64>())[row];
+        auto f64_col = columnRef->As<ColumnFloat64>();
+        if (!f64_col) {
+            throw std::runtime_error("Float64 read: column type mismatch");
+        }
+        double col = (double)(*f64_col)[row];
         if (is_array)
         {
-            add_next_index_double(arr, (double)col);
+            add_next_index_double(arr, col);
         }
         else
         {
-            SC_SINGLE_DOUBLE((double)col);
+            SC_SINGLE_DOUBLE(col);
         }
         break;
     }
@@ -1355,28 +1402,39 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
         auto dec_type = columnRef->Type()->As<DecimalType>();
         size_t scale = dec_type ? dec_type->GetScale() : 0;
         Int128 raw = col->At(row);
-        std::stringstream ss;
-        ss << raw;
-        std::string s = ss.str();
+        char buf[41];
+        size_t l = format_int128_dec(raw, buf);
         if (scale > 0) {
-            bool neg = !s.empty() && s[0] == '-';
-            std::string abs = neg ? s.substr(1) : s;
+            bool neg = (buf[0] == '-');
+            char *digits = neg ? buf + 1 : buf;
+            size_t dlen = neg ? l - 1 : l;
+            std::string abs(digits, dlen);
             if (abs.size() <= scale) {
                 abs.insert(0, scale + 1 - abs.size(), '0');
             }
             abs.insert(abs.size() - scale, ".");
-            s = neg ? ("-" + abs) : abs;
-        }
-        if (is_array) {
-            sc_add_next_index_stringl(arr, (char*)s.c_str(), s.length(), 1);
+            std::string s = neg ? ("-" + abs) : abs;
+            if (is_array) {
+                sc_add_next_index_stringl(arr, (char*)s.c_str(), s.length(), 1);
+            } else {
+                SC_SINGLE_STRING((char*)s.c_str(), s.length());
+            }
         } else {
-            SC_SINGLE_STRING((char*)s.c_str(), s.length());
+            if (is_array) {
+                sc_add_next_index_stringl(arr, buf, l, 1);
+            } else {
+                SC_SINGLE_STRING(buf, l);
+            }
         }
         break;
     }
     case Type::Code::String:
     {
-        auto col = (*columnRef->As<ColumnString>())[row];
+        auto s_col = columnRef->As<ColumnString>();
+        if (!s_col) {
+            throw std::runtime_error("String read: column type mismatch");
+        }
+        auto col = (*s_col)[row];
         if (is_array)
         {
             sc_add_next_index_stringl(arr, (char*)col.data(), col.length(), 1);
@@ -1393,7 +1451,11 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
         // buffer, including trailing NULs added by ClickHouse to pad short
         // values up to the column's declared width. Trim trailing NULs so the
         // PHP-side value matches the original input.
-        auto col = (*columnRef->As<ColumnFixedString>())[row];
+        auto fs_col = columnRef->As<ColumnFixedString>();
+        if (!fs_col) {
+            throw std::runtime_error("FixedString read: column type mismatch");
+        }
+        auto col = (*fs_col)[row];
         size_t len = col.length();
         while (len > 0 && col.data()[len - 1] == '\0') {
             --len;
@@ -1430,6 +1492,9 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
     case Type::Code::DateTime:
     {
         auto col = columnRef->As<ColumnDateTime>();
+        if (!col) {
+            throw std::runtime_error("DateTime read: column type mismatch");
+        }
         emitEpoch(arr, (std::time_t)col->At(row), "%Y-%m-%d %H:%M:%S",
                   column_name, is_array, fetch_mode, /*null_if_nonpositive=*/true);
         break;
@@ -1437,6 +1502,9 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
     case Type::Code::DateTime64:
     {
         auto col = columnRef->As<ColumnDateTime64>();
+        if (!col) {
+            throw std::runtime_error("DateTime64 read: column type mismatch");
+        }
         size_t precision = columnRef->Type()->As<DateTime64Type>()->GetPrecision();
         if (precision > 9) {
             throw std::runtime_error("DateTime64 precision out of spec range (0..9)");
@@ -1477,6 +1545,9 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
     case Type::Code::Date:
     {
         auto col = columnRef->As<ColumnDate>();
+        if (!col) {
+            throw std::runtime_error("Date read: column type mismatch");
+        }
         emitEpoch(arr, (std::time_t)col->At(row), "%Y-%m-%d",
                   column_name, is_array, fetch_mode, /*null_if_nonpositive=*/true);
         break;
@@ -1484,6 +1555,9 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
     case Type::Code::Date32:
     {
         auto col = columnRef->As<ColumnDate32>();
+        if (!col) {
+            throw std::runtime_error("Date32 read: column type mismatch");
+        }
         emitEpoch(arr, (std::time_t)col->At(row), "%Y-%m-%d",
                   column_name, is_array, fetch_mode, /*null_if_nonpositive=*/false);
         break;
@@ -1491,6 +1565,9 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
     case Type::Code::Time:
     {
         auto col = columnRef->As<ColumnTime>();
+        if (!col) {
+            throw std::runtime_error("Time read: column type mismatch");
+        }
         int32_t v = col->At(row);
         if (fetch_mode & SC_FETCH_DATE_AS_STRINGS) {
             int abs_v = v < 0 ? -v : v;
@@ -1516,6 +1593,9 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
     case Type::Code::Time64:
     {
         auto col = columnRef->As<ColumnTime64>();
+        if (!col) {
+            throw std::runtime_error("Time64 read: column type mismatch");
+        }
         size_t precision = columnRef->Type()->As<Time64Type>()->GetPrecision();
         if (precision > 9) {
             throw std::runtime_error("Time64 precision out of spec range (0..9)");
@@ -1559,34 +1639,39 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
     case Type::Code::Int128:
     {
         auto col = columnRef->As<ColumnInt128>();
-        Int128 v = col->At(row);
-        std::stringstream ss;
-        ss << v;
-        std::string s = ss.str();
+        if (!col) {
+            throw std::runtime_error("Int128 read: column type mismatch");
+        }
+        char buf[41];
+        size_t l = format_int128_dec(col->At(row), buf);
         if (is_array) {
-            sc_add_next_index_stringl(arr, (char*)s.c_str(), s.length(), 1);
+            sc_add_next_index_stringl(arr, buf, l, 1);
         } else {
-            SC_SINGLE_STRING((char*)s.c_str(), s.length());
+            SC_SINGLE_STRING(buf, l);
         }
         break;
     }
     case Type::Code::UInt128:
     {
         auto col = columnRef->As<ColumnUInt128>();
-        UInt128 v = col->At(row);
-        std::stringstream ss;
-        ss << v;
-        std::string s = ss.str();
+        if (!col) {
+            throw std::runtime_error("UInt128 read: column type mismatch");
+        }
+        char buf[40];
+        size_t l = format_uint128_dec(col->At(row), buf);
         if (is_array) {
-            sc_add_next_index_stringl(arr, (char*)s.c_str(), s.length(), 1);
+            sc_add_next_index_stringl(arr, buf, l, 1);
         } else {
-            SC_SINGLE_STRING((char*)s.c_str(), s.length());
+            SC_SINGLE_STRING(buf, l);
         }
         break;
     }
     case Type::Code::Array:
     {
         auto array = columnRef->As<ColumnArray>();
+        if (!array) {
+            throw std::runtime_error("Array read: column type mismatch");
+        }
         auto col = array->GetAsColumn(row);
         if (fetch_mode & SC_FETCH_ONE) {
             array_init(arr);
@@ -1617,26 +1702,34 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
     case Type::Code::Enum8:
     {
         auto array = columnRef->As<ColumnEnum8>();
+        if (!array) {
+            throw std::runtime_error("Enum8 read: column type mismatch");
+        }
+        std::string_view name = array->NameAt(row);
         if (is_array)
         {
-            sc_add_next_index_stringl(arr, (char*)array->NameAt(row).data(), array->NameAt(row).length(), 1);
+            sc_add_next_index_stringl(arr, (char*)name.data(), name.length(), 1);
         }
         else
         {
-            SC_SINGLE_STRING((char*)array->NameAt(row).data(), array->NameAt(row).length());
+            SC_SINGLE_STRING((char*)name.data(), name.length());
         }
         break;
     }
     case Type::Code::Enum16:
     {
         auto array = columnRef->As<ColumnEnum16>();
+        if (!array) {
+            throw std::runtime_error("Enum16 read: column type mismatch");
+        }
+        std::string_view name = array->NameAt(row);
         if (is_array)
         {
-            sc_add_next_index_stringl(arr, (char*)array->NameAt(row).data(), array->NameAt(row).length(), 1);
+            sc_add_next_index_stringl(arr, (char*)name.data(), name.length(), 1);
         }
         else
         {
-            SC_SINGLE_STRING((char*)array->NameAt(row).data(), array->NameAt(row).length());
+            SC_SINGLE_STRING((char*)name.data(), name.length());
         }
         break;
     }
@@ -1644,6 +1737,9 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
     case Type::Code::Nullable:
     {
         auto nullable = columnRef->As<ColumnNullable>();
+        if (!nullable) {
+            throw std::runtime_error("Nullable read: column type mismatch");
+        }
         if (nullable->IsNull(row))
         {
             if (is_array)
@@ -1669,6 +1765,9 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
     case Type::Code::Tuple:
     {
         auto tuple = columnRef->As<ColumnTuple>();
+        if (!tuple) {
+            throw std::runtime_error("Tuple read: column type mismatch");
+        }
         if (fetch_mode & SC_FETCH_ONE) {
             array_init(arr);
             for (size_t i = 0; i < tuple->TupleSize(); ++i)
@@ -1751,8 +1850,14 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
         Type::Code key_code = map_type->As<MapType>()->GetKeyType()->GetCode();
         Type::Code value_code = map_type->As<MapType>()->GetValueType()->GetCode();
         auto map_col = columnRef->As<ColumnMap>();
+        if (!map_col) {
+            throw std::runtime_error("Map read: column type mismatch");
+        }
         ColumnRef tuple_col = map_col->GetAsColumn(row);
         auto tup = tuple_col->As<ColumnTuple>();
+        if (!tup) {
+            throw std::runtime_error("Map read: inner tuple type mismatch");
+        }
         ColumnRef keys_any = (*tup)[0];
         ColumnRef values_any = (*tup)[1];
         size_t entry_count = keys_any->Size();

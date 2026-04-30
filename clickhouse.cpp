@@ -451,14 +451,15 @@ PHP_METHOD(ClickHouse, __construct)
     this_obj = getThis();
     if (php_array_get_value(_ht, "host", value))
     {
-        convert_to_string(value);
-        sc_zend_update_property_string(clickhouse_ce, this_obj, "host", sizeof("host") - 1, Z_STRVAL_P(value));
+        zend_string *coerced = zval_get_string(value);
+        sc_zend_update_property_stringl(clickhouse_ce, this_obj, "host", sizeof("host") - 1,
+                                        ZSTR_VAL(coerced), ZSTR_LEN(coerced));
+        zend_string_release(coerced);
     }
 
     if (php_array_get_value(_ht, "port", value))
     {
-        convert_to_long(value);
-        zend_long _p = Z_LVAL_P(value);
+        zend_long _p = zval_get_long(value);
         if (_p < 1 || _p > 65535) {
             sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
                 "port out of 1..65535 range", 0);
@@ -481,34 +482,29 @@ PHP_METHOD(ClickHouse, __construct)
                 return;
             }
         } else {
-            convert_to_boolean(value);
-            cv = Z_LVAL_P(value);
+            cv = zend_is_true(value) ? 1 : 0;
         }
         sc_zend_update_property_long(clickhouse_ce, this_obj, "compression", sizeof("compression") - 1, cv);
     }
 
     if (php_array_get_value(_ht, "retry_timeout", value))
     {
-        convert_to_long(value);
-        sc_zend_update_property_long(clickhouse_ce, this_obj, "retry_timeout", sizeof("retry_timeout") - 1, Z_LVAL_P(value));
+        sc_zend_update_property_long(clickhouse_ce, this_obj, "retry_timeout", sizeof("retry_timeout") - 1, zval_get_long(value));
     }
 
     if (php_array_get_value(_ht, "retry_count", value))
     {
-        convert_to_long(value);
-        sc_zend_update_property_long(clickhouse_ce, this_obj, "retry_count", sizeof("retry_count") - 1, Z_LVAL_P(value));
+        sc_zend_update_property_long(clickhouse_ce, this_obj, "retry_count", sizeof("retry_count") - 1, zval_get_long(value));
     }
 
     if (php_array_get_value(_ht, "connect_timeout", value))
     {
-        convert_to_long(value);
-        sc_zend_update_property_long(clickhouse_ce, this_obj, "connect_timeout", sizeof("connect_timeout") - 1, Z_LVAL_P(value));
+        sc_zend_update_property_long(clickhouse_ce, this_obj, "connect_timeout", sizeof("connect_timeout") - 1, zval_get_long(value));
     }
 
     if (php_array_get_value(_ht, "receive_timeout", value))
     {
-        convert_to_long(value);
-        sc_zend_update_property_long(clickhouse_ce, this_obj, "receive_timeout", sizeof("receive_timeout") - 1, Z_LVAL_P(value));
+        sc_zend_update_property_long(clickhouse_ce, this_obj, "receive_timeout", sizeof("receive_timeout") - 1, zval_get_long(value));
     }
 
     zval *host = sc_zend_read_property(clickhouse_ce, this_obj, "host", sizeof("host") - 1, 0);
@@ -532,61 +528,54 @@ PHP_METHOD(ClickHouse, __construct)
     else if (cv == 2) Options = Options.SetCompressionMethod(CompressionMethod::ZSTD);
 
     if (php_array_get_value(_ht, "send_timeout", value)) {
-        convert_to_long(value);
-        Options = Options.SetConnectionSendTimeout(std::chrono::seconds(Z_LVAL_P(value)));
+        Options = Options.SetConnectionSendTimeout(std::chrono::seconds(zval_get_long(value)));
     }
     /* Millisecond variants override the seconds-based keys. Useful when
      * sub-second precision matters (CI test guards, low-latency hops). */
     if (php_array_get_value(_ht, "connect_timeout_ms", value)) {
-        convert_to_long(value);
-        if (Z_LVAL_P(value) < 0) {
+        zend_long n = zval_get_long(value);
+        if (n < 0) {
             sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
                 "connect_timeout_ms must be >= 0", 0);
             return;
         }
-        Options = Options.SetConnectionConnectTimeout(std::chrono::milliseconds(Z_LVAL_P(value)));
+        Options = Options.SetConnectionConnectTimeout(std::chrono::milliseconds(n));
     }
     if (php_array_get_value(_ht, "receive_timeout_ms", value)) {
-        convert_to_long(value);
-        if (Z_LVAL_P(value) < 0) {
+        zend_long n = zval_get_long(value);
+        if (n < 0) {
             sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
                 "receive_timeout_ms must be >= 0", 0);
             return;
         }
-        Options = Options.SetConnectionRecvTimeout(std::chrono::milliseconds(Z_LVAL_P(value)));
+        Options = Options.SetConnectionRecvTimeout(std::chrono::milliseconds(n));
     }
     if (php_array_get_value(_ht, "send_timeout_ms", value)) {
-        convert_to_long(value);
-        if (Z_LVAL_P(value) < 0) {
+        zend_long n = zval_get_long(value);
+        if (n < 0) {
             sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
                 "send_timeout_ms must be >= 0", 0);
             return;
         }
-        Options = Options.SetConnectionSendTimeout(std::chrono::milliseconds(Z_LVAL_P(value)));
+        Options = Options.SetConnectionSendTimeout(std::chrono::milliseconds(n));
     }
     if (php_array_get_value(_ht, "tcp_nodelay", value)) {
-        convert_to_boolean(value);
-        Options = Options.TcpNoDelay(Z_LVAL_P(value) != 0);
+        Options = Options.TcpNoDelay(zend_is_true(value));
     }
     if (php_array_get_value(_ht, "tcp_keepalive", value)) {
-        convert_to_boolean(value);
-        Options = Options.TcpKeepAlive(Z_LVAL_P(value) != 0);
+        Options = Options.TcpKeepAlive(zend_is_true(value));
     }
     if (php_array_get_value(_ht, "ping_before_query", value)) {
-        convert_to_boolean(value);
-        Options = Options.SetPingBeforeQuery(Z_LVAL_P(value) != 0);
+        Options = Options.SetPingBeforeQuery(zend_is_true(value));
     }
     if (php_array_get_value(_ht, "tcp_keepalive_idle", value)) {
-        convert_to_long(value);
-        Options = Options.SetTcpKeepAliveIdle(std::chrono::seconds(Z_LVAL_P(value)));
+        Options = Options.SetTcpKeepAliveIdle(std::chrono::seconds(zval_get_long(value)));
     }
     if (php_array_get_value(_ht, "tcp_keepalive_intvl", value)) {
-        convert_to_long(value);
-        Options = Options.SetTcpKeepAliveInterval(std::chrono::seconds(Z_LVAL_P(value)));
+        Options = Options.SetTcpKeepAliveInterval(std::chrono::seconds(zval_get_long(value)));
     }
     if (php_array_get_value(_ht, "tcp_keepalive_cnt", value)) {
-        convert_to_long(value);
-        zend_long n = Z_LVAL_P(value);
+        zend_long n = zval_get_long(value);
         if (n < 0 || n > UINT_MAX) {
             sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
                 "tcp_keepalive_cnt out of range", 0);
@@ -595,8 +584,7 @@ PHP_METHOD(ClickHouse, __construct)
         Options = Options.SetTcpKeepAliveCount((unsigned int)n);
     }
     if (php_array_get_value(_ht, "max_compression_chunk_size", value)) {
-        convert_to_long(value);
-        zend_long n = Z_LVAL_P(value);
+        zend_long n = zval_get_long(value);
         if (n < 0 || n > UINT_MAX) {
             sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
                 "max_compression_chunk_size out of range", 0);
@@ -607,8 +595,7 @@ PHP_METHOD(ClickHouse, __construct)
 #ifdef WITH_OPENSSL
     bool want_ssl = false;
     if (php_array_get_value(_ht, "ssl", value)) {
-        convert_to_boolean(value);
-        want_ssl = (Z_LVAL_P(value) != 0);
+        want_ssl = zend_is_true(value);
     }
     if (want_ssl) {
         ClientOptions::SSLOptions ssl_opts;
@@ -617,31 +604,32 @@ PHP_METHOD(ClickHouse, __construct)
         // Caller can override via ssl_min_protocol_version.
         ssl_opts.SetMinProtocolVersion(0x0303);
         if (php_array_get_value(_ht, "ssl_min_protocol_version", value)) {
-            convert_to_string(value);
-            const char *s = Z_STRVAL_P(value);
+            zend_string *coerced = zval_get_string(value);
+            const char *s = ZSTR_VAL(coerced);
             int ver = 0;
             if (strcasecmp(s, "tls1.0") == 0)      ver = 0x0301;
             else if (strcasecmp(s, "tls1.1") == 0) ver = 0x0302;
             else if (strcasecmp(s, "tls1.2") == 0) ver = 0x0303;
             else if (strcasecmp(s, "tls1.3") == 0) ver = 0x0304;
             else {
+                zend_string_release(coerced);
                 sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
                     "ssl_min_protocol_version must be one of tls1.0, tls1.1, tls1.2, tls1.3", 0);
                 return;
             }
+            zend_string_release(coerced);
             ssl_opts.SetMinProtocolVersion(ver);
         }
         if (php_array_get_value(_ht, "ssl_skip_verify", value)) {
-            convert_to_boolean(value);
-            ssl_opts.SetSkipVerification(Z_LVAL_P(value) != 0);
+            ssl_opts.SetSkipVerification(zend_is_true(value));
         }
         if (php_array_get_value(_ht, "ssl_use_default_ca", value)) {
-            convert_to_boolean(value);
-            ssl_opts.SetUseDefaultCALocations(Z_LVAL_P(value) != 0);
+            ssl_opts.SetUseDefaultCALocations(zend_is_true(value));
         }
         if (php_array_get_value(_ht, "ssl_ca_directory", value)) {
-            convert_to_string(value);
-            ssl_opts.SetPathToCADirectory(std::string(Z_STRVAL_P(value), Z_STRLEN_P(value)));
+            zend_string *coerced = zval_get_string(value);
+            ssl_opts.SetPathToCADirectory(std::string(ZSTR_VAL(coerced), ZSTR_LEN(coerced)));
+            zend_string_release(coerced);
         }
         if (php_array_get_value(_ht, "ssl_ca_files", value)) {
             std::vector<std::string> files;
@@ -651,8 +639,9 @@ PHP_METHOD(ClickHouse, __construct)
                 HashTable *fh = Z_ARRVAL_P(value);
                 zval *fv;
                 ZEND_HASH_FOREACH_VAL(fh, fv) {
-                    convert_to_string(fv);
-                    files.emplace_back(Z_STRVAL_P(fv), Z_STRLEN_P(fv));
+                    zend_string *coerced = zval_get_string(fv);
+                    files.emplace_back(ZSTR_VAL(coerced), ZSTR_LEN(coerced));
+                    zend_string_release(coerced);
                 } ZEND_HASH_FOREACH_END();
             }
             ssl_opts.SetPathToCAFiles(files);
@@ -661,12 +650,11 @@ PHP_METHOD(ClickHouse, __construct)
     }
 #else
     if (php_array_get_value(_ht, "ssl", value)) {
-        convert_to_boolean(value);
-        if (Z_LVAL_P(value) != 0) {
+        if (zend_is_true(value)) {
             sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
                 "php_clickhouse was built without TLS support. Reconfigure with --enable-clickhouse-openssl",
                 0);
-            RETURN_FALSE;
+            return;
         }
     }
 #endif
@@ -681,12 +669,12 @@ PHP_METHOD(ClickHouse, __construct)
             zval *hz = sc_zend_hash_find(eh, (char*)"host", 4);
             zval *pz = sc_zend_hash_find(eh, (char*)"port", 4);
             if (!hz) continue;
-            convert_to_string(hz);
+            zend_string *host_s = zval_get_string(hz);
             Endpoint e;
-            e.host = std::string(Z_STRVAL_P(hz), Z_STRLEN_P(hz));
+            e.host = std::string(ZSTR_VAL(host_s), ZSTR_LEN(host_s));
+            zend_string_release(host_s);
             if (pz) {
-                convert_to_long(pz);
-                zend_long p = Z_LVAL_P(pz);
+                zend_long p = zval_get_long(pz);
                 if (p < 1 || p > 65535) {
                     sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
                         "Endpoint port out of 1..65535 range", 0);
@@ -701,22 +689,27 @@ PHP_METHOD(ClickHouse, __construct)
 
     if (php_array_get_value(_ht, "database", value))
     {
-        convert_to_string(value);
-        sc_zend_update_property_string(clickhouse_ce, this_obj, "database", sizeof("database") - 1, Z_STRVAL_P(value));
-        Options = Options.SetDefaultDatabase(std::string(Z_STRVAL_P(value), Z_STRLEN_P(value)));
+        zend_string *coerced = zval_get_string(value);
+        sc_zend_update_property_stringl(clickhouse_ce, this_obj, "database", sizeof("database") - 1,
+                                        ZSTR_VAL(coerced), ZSTR_LEN(coerced));
+        Options = Options.SetDefaultDatabase(std::string(ZSTR_VAL(coerced), ZSTR_LEN(coerced)));
+        zend_string_release(coerced);
     }
 
     if (php_array_get_value(_ht, "user", value))
     {
-        convert_to_string(value);
-        sc_zend_update_property_string(clickhouse_ce, this_obj, "user", sizeof("user") - 1, Z_STRVAL_P(value));
-        Options = Options.SetUser(std::string(Z_STRVAL_P(value), Z_STRLEN_P(value)));
+        zend_string *coerced = zval_get_string(value);
+        sc_zend_update_property_stringl(clickhouse_ce, this_obj, "user", sizeof("user") - 1,
+                                        ZSTR_VAL(coerced), ZSTR_LEN(coerced));
+        Options = Options.SetUser(std::string(ZSTR_VAL(coerced), ZSTR_LEN(coerced)));
+        zend_string_release(coerced);
     }
 
     if (php_array_get_value(_ht, "passwd", value))
     {
-        convert_to_string(value);
-        Options = Options.SetPassword(std::string(Z_STRVAL_P(value), Z_STRLEN_P(value)));
+        zend_string *coerced = zval_get_string(value);
+        Options = Options.SetPassword(std::string(ZSTR_VAL(coerced), ZSTR_LEN(coerced)));
+        zend_string_release(coerced);
     }
 
     try
@@ -840,6 +833,13 @@ static Client* getClient(clickhouse_object *obj)
  */
 static void throwClickHouseError(const std::exception &e, const std::string &query_id)
 {
+    /* Preserve a PHP exception that was already raised (e.g. from inside a
+     * user-supplied progress/profile/verbose callback that we re-raised as a
+     * sentinel C++ throw). Overwriting it would drop the user's stack and
+     * leave them with our generic "callback aborted" wrapper. */
+    if (EG(exception)) {
+        return;
+    }
     std::string msg = sanitizeError(e.what());
     zval ex;
     object_init_ex(&ex, clickhouse_exception_ce);
@@ -886,9 +886,12 @@ static std::string formatScalarParam(zval *v)
             int n = snprintf(buf, sizeof(buf), "%.17g", Z_DVAL_P(v));
             return std::string(buf, (n > 0 && (size_t)n < sizeof(buf)) ? (size_t)n : 0);
         }
-        default:
-            convert_to_string(v);
-            return std::string(Z_STRVAL_P(v), Z_STRLEN_P(v));
+        default: {
+            zend_string *coerced = zval_get_string(v);
+            std::string out(ZSTR_VAL(coerced), ZSTR_LEN(coerced));
+            zend_string_release(coerced);
+            return out;
+        }
     }
 }
 
@@ -954,19 +957,32 @@ static std::string formatParamValue(zval *v, const std::string &type, bool insid
  */
 static void applyMergedSettings(Query &q, clickhouse_object *obj, zval *per_call)
 {
-    std::unordered_map<std::string, std::string> merged = obj->settings;
-    if (per_call != NULL && Z_TYPE_P(per_call) == IS_ARRAY) {
-        HashTable *ht = Z_ARRVAL_P(per_call);
-        zval *vz;
-        zend_string *zk;
-        zend_ulong nk;
-        ZEND_HASH_FOREACH_KEY_VAL(ht, nk, zk, vz) {
-            (void)nk;
-            if (!zk) continue;
-            std::string sval = formatScalarParam(vz);
-            merged[std::string(ZSTR_VAL(zk), ZSTR_LEN(zk))] = sval;
-        } ZEND_HASH_FOREACH_END();
+    bool have_per_call = (per_call != NULL && Z_TYPE_P(per_call) == IS_ARRAY
+                          && zend_hash_num_elements(Z_ARRVAL_P(per_call)) > 0);
+
+    /* Common case: no per-call overrides. Iterate the global map directly
+     * instead of paying for a full unordered_map copy on every query. */
+    if (!have_per_call) {
+        for (const auto &kv : obj->settings) {
+            QuerySettingsField f;
+            f.value = kv.second;
+            f.flags = 0;
+            q.SetSetting(kv.first, f);
+        }
+        return;
     }
+
+    std::unordered_map<std::string, std::string> merged = obj->settings;
+    HashTable *ht = Z_ARRVAL_P(per_call);
+    zval *vz;
+    zend_string *zk;
+    zend_ulong nk;
+    ZEND_HASH_FOREACH_KEY_VAL(ht, nk, zk, vz) {
+        (void)nk;
+        if (!zk) continue;
+        std::string sval = formatScalarParam(vz);
+        merged[std::string(ZSTR_VAL(zk), ZSTR_LEN(zk))] = sval;
+    } ZEND_HASH_FOREACH_END();
     for (const auto &kv : merged) {
         QuerySettingsField f;
         f.value = kv.second;
@@ -1002,6 +1018,13 @@ static void attachProgressAndProfile(Query &q, clickhouse_object *obj)
             call_user_function(NULL, NULL, &obj->progress_callback, &retval, 1, args);
             zval_ptr_dtor(&args[0]);
             zval_ptr_dtor(&retval);
+            /* If the user callback raised, propagate to the packet loop
+             * so subsequent OnData/OnProgress callbacks don't run and the
+             * outer try-catch in do_select_into surfaces the user's
+             * exception (preserved by throwClickHouseError). */
+            if (EG(exception)) {
+                throw std::runtime_error("progress callback aborted query");
+            }
         }
     });
     q.OnProfile([obj](const Profile &pr) {
@@ -1029,6 +1052,9 @@ static void attachProgressAndProfile(Query &q, clickhouse_object *obj)
             call_user_function(NULL, NULL, &obj->profile_callback, &retval, 1, args);
             zval_ptr_dtor(&args[0]);
             zval_ptr_dtor(&retval);
+            if (EG(exception)) {
+                throw std::runtime_error("profile callback aborted query");
+            }
         }
     });
 }
@@ -1164,16 +1190,22 @@ void getInsertSql(string *sql, char *table_name, zval *columns)
 
     ZEND_HASH_FOREACH_VAL(columns_ht, pzval)
     {
-        convert_to_string(pzval);
-        validateIdentifier(Z_STRVAL_P(pzval), Z_STRLEN_P(pzval), "column name", false);
+        zend_string *coerced = zval_get_string(pzval);
+        try {
+            validateIdentifier(ZSTR_VAL(coerced), ZSTR_LEN(coerced), "column name", false);
+        } catch (...) {
+            zend_string_release(coerced);
+            throw;
+        }
         if (index >= (count - 1))
         {
-            fields_section << (string)Z_STRVAL_P(pzval);
+            fields_section << std::string(ZSTR_VAL(coerced), ZSTR_LEN(coerced));
         }
         else
         {
-            fields_section << (string)Z_STRVAL_P(pzval) << ",";
+            fields_section << std::string(ZSTR_VAL(coerced), ZSTR_LEN(coerced)) << ",";
         }
+        zend_string_release(coerced);
         index++;
     }
     ZEND_HASH_FOREACH_END();
@@ -1249,10 +1281,17 @@ static void applyPlaceholders(string &sql, HashTable *params_ht, std::vector<Typ
             continue;
         }
 
-        /* Fall through: client-side {name} identifier substitution. */
-        convert_to_string(pzval);
-        const char *val = Z_STRVAL_P(pzval);
-        size_t vlen = Z_STRLEN_P(pzval);
+        /* Fall through: client-side {name} identifier substitution.
+         * Whitelist is intentionally narrow and aligned with the docs
+         * ("use for table and column names"): letters, digits, `_`, `.`,
+         * `,`, whitespace, `-`. We deliberately exclude `*`, `(`, `)`
+         * because they let a caller smuggle a function call or subquery
+         * into positions that look identifier-shaped (e.g. ORDER BY).
+         * Callers that need expression fragments should pre-validate
+         * upstream rather than rely on this layer. */
+        zend_string *coerced = zval_get_string(pzval);
+        const char *val = ZSTR_VAL(coerced);
+        size_t vlen = ZSTR_LEN(coerced);
         for (size_t i = 0; i < vlen; ++i) {
             unsigned char c = (unsigned char)val[i];
             bool ok =
@@ -1260,20 +1299,21 @@ static void applyPlaceholders(string &sql, HashTable *params_ht, std::vector<Typ
                 (c >= 'a' && c <= 'z') ||
                 (c >= '0' && c <= '9') ||
                 c == '_' || c == '.' || c == ',' || c == ' ' ||
-                c == '\t' || c == '*' || c == '(' || c == ')' ||
-                c == '+' || c == '-';
+                c == '\t' || c == '-';
             if (!ok) {
-                throw std::runtime_error(
-                    "Placeholder value for {" + name + "} contains an unsafe character");
+                std::string err = "Placeholder value for {" + name + "} contains an unsafe character";
+                zend_string_release(coerced);
+                throw std::runtime_error(err);
             }
         }
         std::string needle = "{" + name + "}";
+        std::string repl(val, vlen);
+        zend_string_release(coerced);
         size_t pos = sql.find(needle);
         if (pos == std::string::npos) {
             throw std::runtime_error(
                 "Placeholder {" + name + "} does not appear in the SQL");
         }
-        std::string repl(val, vlen);
         while (pos != std::string::npos) {
             sql.replace(pos, needle.size(), repl);
             pos = sql.find(needle, pos + repl.size());
@@ -2268,8 +2308,7 @@ PHP_METHOD(ClickHouse, insertAssoc)
             array_init(&args[4]);
         }
         ZVAL_NULL(&retval);
-        int n = settings ? 5 : 5;
-        call_user_function(NULL, getThis(), &method, &retval, n, args);
+        call_user_function(NULL, getThis(), &method, &retval, 5, args);
         zval_ptr_dtor(&method);
         zval_ptr_dtor(&args[0]);
         zval_ptr_dtor(&args[1]);
@@ -2814,8 +2853,7 @@ PHP_METHOD(ClickHouse, isExists)
     if (Z_TYPE(row) == IS_ARRAY) {
         zval *cnt = zend_hash_str_find(Z_ARRVAL(row), "c", sizeof("c") - 1);
         if (cnt) {
-            convert_to_long(cnt);
-            exists = (Z_LVAL_P(cnt) > 0);
+            exists = (zval_get_long(cnt) > 0);
         }
     }
     zval_ptr_dtor(&row);
