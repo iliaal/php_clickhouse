@@ -43,6 +43,7 @@ if (PHP_CLICKHOUSE != "no") {
     }
 
     EXTENSION("clickhouse", "clickhouse.cpp typesToPhp.cpp", null, "/DZEND_ENABLE_STATIC_TSRMLS_CACHE=1");
+    ADD_EXTENSION_DEP("clickhouse", "json");
 
     ADD_SOURCES(ch_root + "\\clickhouse",            "block.cpp client.cpp query.cpp",                                                                                                                                                                                                                              "clickhouse");
     ADD_SOURCES(ch_root + "\\clickhouse\\base",      "compressed.cpp endpoints_iterator.cpp input.cpp output.cpp platform.cpp socket.cpp wire_format.cpp " + clickhouse_ssl_src,                                                                                                                                    "clickhouse");

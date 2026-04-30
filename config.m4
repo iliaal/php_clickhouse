@@ -100,6 +100,7 @@ if test "$PHP_CLICKHOUSE" != "no"; then
   PHP_ADD_INCLUDE($THIS_DIR/lib/clickhouse-cpp/contrib/zstd/zstd/common)
 
   PHP_NEW_EXTENSION(clickhouse, $clickhouse_source_file, $ext_shared,,-DZEND_ENABLE_STATIC_TSRMLS_CACHE=1)
+  PHP_ADD_EXTENSION_DEP(clickhouse, json)
   PHP_ADD_BUILD_DIR($ext_builddir/lib/clickhouse-cpp)
   PHP_ADD_BUILD_DIR($ext_builddir/lib/clickhouse-cpp/clickhouse)
   PHP_ADD_BUILD_DIR($ext_builddir/lib/clickhouse-cpp/clickhouse/base)
