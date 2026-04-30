@@ -86,6 +86,13 @@ struct clickhouse_object {
     Client *client;
     Block insert_block;
     bool has_insert_block;
+    /* Guards same-client reentry. clickhouse-cpp's Client uses a single
+     * socket and a single per-call packet loop; a userland callback that
+     * fires another query / insert on the same client mid-stream sends
+     * packets into a wire still owned by the outer call and crashes the
+     * worker on the next ReceiveData. Set true at the start of each
+     * client-touching method, cleared on exit. Reentry throws cleanly. */
+    bool query_active;
     ClientStats stats;
     std::unordered_map<std::string, std::string> settings;
     zval progress_callback;        // IS_UNDEF when unset
@@ -115,6 +122,7 @@ static zend_object *clickhouse_create_object(zend_class_entry *ce)
 
     obj->client = nullptr;
     obj->has_insert_block = false;
+    obj->query_active = false;
     obj->log_enabled = false;
     obj->verbose_to_stderr = false;
     new (&obj->insert_block) Block();
@@ -1220,6 +1228,35 @@ static void resetStats(clickhouse_object *obj)
 }
 
 /*
+ * RAII guard that asserts no other operation is currently active on
+ * this client. clickhouse-cpp's Client owns a single TCP socket and a
+ * single per-call packet loop; a userland callback (row, progress,
+ * profile, verbose) that fires another query / insert / ping on the
+ * SAME ClickHouse instance pushes packets onto a wire still owned by
+ * the outer call. The next ReceiveData walks invalidated state and
+ * SEGVs. Throw cleanly instead. A separate ClickHouse instance is
+ * fine — the guard is per-object.
+ */
+struct QueryActiveGuard {
+    clickhouse_object *obj;
+    bool armed;
+    explicit QueryActiveGuard(clickhouse_object *o) : obj(o), armed(false) {
+        if (obj->query_active) {
+            throw std::runtime_error(
+                "Reentrant operation: another query is already in progress "
+                "on this ClickHouse instance. Use a separate ClickHouse "
+                "instance from inside row / progress / profile / verbose "
+                "callbacks.");
+        }
+        obj->query_active = true;
+        armed = true;
+    }
+    ~QueryActiveGuard() { if (armed) obj->query_active = false; }
+    QueryActiveGuard(const QueryActiveGuard&) = delete;
+    QueryActiveGuard& operator=(const QueryActiveGuard&) = delete;
+};
+
+/*
  * Append a completed-query record to the per-client log if logging is
  * enabled. Pulls elapsed_ms / rows_read / bytes_read from the just-
  * populated stats. No-op when logging is off so the hot path stays
@@ -1393,13 +1430,12 @@ static void applyPlaceholders(string &sql, HashTable *params_ht, std::vector<Typ
         }
 
         /* Fall through: client-side {name} identifier substitution.
-         * Whitelist is intentionally narrow and aligned with the docs
-         * ("use for table and column names"): letters, digits, `_`, `.`,
-         * `,`, whitespace, `-`. We deliberately exclude `*`, `(`, `)`
-         * because they let a caller smuggle a function call or subquery
-         * into positions that look identifier-shaped (e.g. ORDER BY).
-         * Callers that need expression fragments should pre-validate
-         * upstream rather than rely on this layer. */
+         * Whitelist: letters, digits, `_`, `.`, `,`, whitespace.
+         * `*`, `(`, `)`, `+`, `=`, `;`, quotes, backslash, etc. excluded
+         * to keep callers from smuggling expressions through identifier
+         * positions. `-` was allowed in earlier rounds but enables `--`
+         * SQL line comments — `{tbl}` with value "tbl --" turned the
+         * trailing predicate into a comment (CR-002 repro). Drop `-`. */
         zend_string *coerced = zval_get_string(pzval);
         const char *val = ZSTR_VAL(coerced);
         size_t vlen = ZSTR_LEN(coerced);
@@ -1410,7 +1446,7 @@ static void applyPlaceholders(string &sql, HashTable *params_ht, std::vector<Typ
                 (c >= 'a' && c <= 'z') ||
                 (c >= '0' && c <= '9') ||
                 c == '_' || c == '.' || c == ',' || c == ' ' ||
-                c == '\t' || c == '-';
+                c == '\t';
             if (!ok) {
                 std::string err = "Placeholder value for {" + name + "} contains an unsafe character";
                 zend_string_release(coerced);
@@ -1446,6 +1482,7 @@ PHP_METHOD(ClickHouse, ping)
     try {
         clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
         Client *client = getClient(obj);
+        QueryActiveGuard guard(obj);
         client->Ping();
     } catch (const std::exception& e) {
         throwClickHouseError(e);
@@ -1470,6 +1507,7 @@ static void do_select_into(zval *out, zval *this_obj,
     try
     {
         Client *client = getClient(obj);
+        QueryActiveGuard guard(obj);
 
         if (obj->has_insert_block)
         {
@@ -1779,6 +1817,7 @@ static void do_insert_into(zval *this_obj, zend_string *table,
     try
     {
         Client *client = getClient(obj);
+        QueryActiveGuard guard(obj);
 
         if (obj->has_insert_block)
         {
@@ -1912,6 +1951,7 @@ PHP_METHOD(ClickHouse, writeStart)
     try
     {
         Client *client = getClient(obj);
+        QueryActiveGuard guard(obj);
 
         if (obj->has_insert_block)
         {
@@ -1969,6 +2009,7 @@ PHP_METHOD(ClickHouse, write)
 
         clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
         Client *client = getClient(obj);
+        QueryActiveGuard guard(obj);
 
         if (!obj->has_insert_block) {
             throw std::runtime_error("write() called without a matching writeStart()");
@@ -2017,6 +2058,7 @@ PHP_METHOD(ClickHouse, writeEnd)
     try
     {
         Client *client = getClient(obj);
+        QueryActiveGuard guard(obj);
         if (!obj->has_insert_block) {
             throw std::runtime_error("writeEnd() called without a matching writeStart()");
         }
@@ -2057,6 +2099,7 @@ static void do_execute_into(zval *this_obj,
     try
     {
         Client *client = getClient(obj);
+        QueryActiveGuard guard(obj);
 
         if (obj->has_insert_block)
         {
@@ -2225,6 +2268,7 @@ PHP_METHOD(ClickHouse, setDatabase)
         return;
     }
     try {
+        QueryActiveGuard guard(obj);
         obj->client->Execute(Query("USE " + std::string(ZSTR_VAL(db), ZSTR_LEN(db))));
     } catch (const std::exception &e) {
         throwClickHouseError(e);
@@ -2352,6 +2396,7 @@ PHP_METHOD(ClickHouse, resetConnection)
     try {
         clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
         Client *client = getClient(obj);
+        QueryActiveGuard guard(obj);
         client->ResetConnection();
         /* Drop any half-built insert state. After ResetConnection, the
          * server-side stream this Block was tied to no longer exists, so
@@ -2831,6 +2876,7 @@ PHP_METHOD(ClickHouse, selectStream)
 
     try {
         Client *client = getClient(obj);
+        QueryActiveGuard guard(obj);
 
         if (obj->has_insert_block) {
             throw std::runtime_error("The insert operation is now in progress");
@@ -2918,6 +2964,7 @@ PHP_METHOD(ClickHouse, selectStreamCallback)
 
     try {
         Client *client = getClient(obj);
+        QueryActiveGuard guard(obj);
 
         if (obj->has_insert_block) {
             throw std::runtime_error("The insert operation is now in progress");

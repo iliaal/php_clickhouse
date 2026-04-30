@@ -40,6 +40,8 @@ extern "C" {
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
+#include <cmath>
+#include <cerrno>
 
 #include "typesToPhp.hpp"
 
@@ -124,6 +126,104 @@ static inline std::shared_ptr<TCol> as_or_throw(const ColumnRef &c, const char *
 }
 
 /*
+ * Strict numeric coercion for INSERT cells. PHP's `zval_get_long` and
+ * `zval_get_double` happily produce 0 / 0.0 for non-numeric strings,
+ * arrays, objects, etc., which used to land "abc" as 0 in an Int32
+ * column with no diagnostic. The strict variants below reject every
+ * non-numeric input and require full string consumption, mirroring
+ * the strict parsers we already use for Map keys (CR-306) and hex
+ * literals (CR-508). Range-checking against the destination column's
+ * width is still the caller's responsibility (appendIntColumn passes
+ * MinV/MaxV, narrow-int Map dispatch wraps with its own checks).
+ */
+static zend_long strict_zval_long(zval *z, const char *type_label)
+{
+    switch (Z_TYPE_P(z)) {
+        case IS_LONG:  return Z_LVAL_P(z);
+        case IS_TRUE:  return 1;
+        case IS_FALSE: return 0;
+        case IS_NULL:  return 0;
+        case IS_DOUBLE: {
+            double d = Z_DVAL_P(z);
+            if (std::isnan(d) || std::isinf(d)) {
+                throw std::runtime_error(
+                    std::string("non-finite double cannot be assigned to ") + type_label);
+            }
+            double frac, intpart;
+            frac = std::modf(d, &intpart);
+            if (frac != 0.0) {
+                throw std::runtime_error(
+                    std::string("fractional double cannot be assigned to integer column ") + type_label);
+            }
+            if (d < (double)ZEND_LONG_MIN || d > (double)ZEND_LONG_MAX) {
+                throw std::runtime_error(
+                    std::string("double out of range for integer column ") + type_label);
+            }
+            return (zend_long)d;
+        }
+        case IS_STRING: {
+            const char *s = Z_STRVAL_P(z);
+            size_t slen = Z_STRLEN_P(z);
+            if (slen == 0) {
+                throw std::runtime_error(
+                    std::string("empty string cannot be assigned to ") + type_label);
+            }
+            char *endp = NULL;
+            errno = 0;
+            long long v = strtoll(s, &endp, 10);
+            if (errno == ERANGE || endp == s ||
+                (size_t)(endp - s) != slen) {
+                throw std::runtime_error(
+                    std::string("invalid integer string for ") + type_label);
+            }
+            return (zend_long)v;
+        }
+        default:
+            throw std::runtime_error(
+                std::string("array / object / resource cannot be assigned to integer column ") + type_label);
+    }
+}
+
+static double strict_zval_double(zval *z, const char *type_label)
+{
+    switch (Z_TYPE_P(z)) {
+        case IS_LONG:  return (double)Z_LVAL_P(z);
+        case IS_TRUE:  return 1.0;
+        case IS_FALSE: return 0.0;
+        case IS_NULL:  return 0.0;
+        case IS_DOUBLE: {
+            double d = Z_DVAL_P(z);
+            if (std::isnan(d) || std::isinf(d)) {
+                throw std::runtime_error(
+                    std::string("non-finite double cannot be assigned to ") + type_label);
+            }
+            return d;
+        }
+        case IS_STRING: {
+            const char *s = Z_STRVAL_P(z);
+            size_t slen = Z_STRLEN_P(z);
+            if (slen == 0) {
+                throw std::runtime_error(
+                    std::string("empty string cannot be assigned to ") + type_label);
+            }
+            char *endp = NULL;
+            errno = 0;
+            double v = strtod(s, &endp);
+            if (errno == ERANGE || endp == s ||
+                (size_t)(endp - s) != slen ||
+                std::isnan(v) || std::isinf(v)) {
+                throw std::runtime_error(
+                    std::string("invalid float string for ") + type_label);
+            }
+            return v;
+        }
+        default:
+            throw std::runtime_error(
+                std::string("array / object / resource cannot be assigned to float column ") + type_label);
+    }
+}
+
+/*
  * RAII guard that owns a zend_string* obtained from zval_get_string and
  * releases it in the destructor. Used at PHP-to-C boundaries where the
  * surrounding code can throw (validation, recursive insertColumn, etc.)
@@ -175,12 +275,52 @@ static std::time_t to_time_t(const std::string& str, bool is_date = true)
             std::string("Invalid ") + (is_date ? "Date" : "DateTime") +
             " string: " + str);
     }
+    /* std::get_time stops at the first non-matching character without
+     * raising failbit, so "2024-01-01abc" parses cleanly as 2024-01-01.
+     * Require EOF after the expected format so trailing garbage is
+     * rejected at the boundary. peek() returns EOF when the stream is
+     * fully consumed; anything else is an extra character we didn't
+     * sign up for. */
+    if (ss.peek() != std::char_traits<char>::eof()) {
+        throw std::runtime_error(
+            std::string("Invalid ") + (is_date ? "Date" : "DateTime") +
+            " string (trailing characters): " + str);
+    }
+    /* Capture the parsed components before timegm so we can detect the
+     * normalization that February 30 → March 2 silently performs. */
+    int p_year = t.tm_year, p_mon = t.tm_mon, p_mday = t.tm_mday,
+        p_hour = t.tm_hour, p_min = t.tm_min, p_sec = t.tm_sec;
 #ifdef _WIN32
     /* MSVC has no timegm(); _mkgmtime() is the documented equivalent. */
-    return _mkgmtime(&t);
+    std::time_t out = _mkgmtime(&t);
 #else
-    return timegm(&t);
+    std::time_t out = timegm(&t);
 #endif
+    if (out == (std::time_t)-1) {
+        throw std::runtime_error(
+            std::string("Invalid ") + (is_date ? "Date" : "DateTime") +
+            " string (out of range): " + str);
+    }
+    /* Round-trip-validate: convert back to UTC components and compare.
+     * This catches "2024-02-30" → 2024-03-01 normalization that timegm
+     * does silently. */
+    std::tm rt = {};
+#ifdef _WIN32
+    if (gmtime_s(&rt, &out) != 0) {
+#else
+    if (!gmtime_r(&out, &rt)) {
+#endif
+        throw std::runtime_error(
+            std::string("Invalid ") + (is_date ? "Date" : "DateTime") +
+            " string (gmtime failed): " + str);
+    }
+    if (rt.tm_year != p_year || rt.tm_mon != p_mon || rt.tm_mday != p_mday ||
+        rt.tm_hour != p_hour || rt.tm_min != p_min || rt.tm_sec != p_sec) {
+        throw std::runtime_error(
+            std::string("Invalid ") + (is_date ? "Date" : "DateTime") +
+            " string (normalized to a different value): " + str);
+    }
+    return out;
 }
 
 /*
@@ -206,7 +346,14 @@ static std::pair<std::time_t, int64_t> to_time_t_with_frac(const std::string &st
         }
         // Pad missing digits up to precision so "12:34:56.5" with precision 3
         // contributes 500 (ms), not 5.
-        for (; consumed < precision; ++consumed) frac *= 10;
+        for (size_t pad = consumed; pad < precision; ++pad) frac *= 10;
+        /* Reject trailing non-digit characters after the fractional part.
+         * Without this "2024-01-01 00:00:00.123abc" silently truncated to
+         * .123 and dropped the abc. */
+        if (p < end) {
+            throw std::runtime_error(
+                "Invalid DateTime64 string (trailing characters after fraction): " + str);
+        }
     } else {
         frac = 0;
     }
@@ -441,7 +588,7 @@ static ColumnRef appendIntColumn(HashTable *values_ht,
     auto value = std::make_shared<TCol>();
     zval *array_value;
     ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
-        zend_long n = zval_get_long(array_value);
+        zend_long n = strict_zval_long(array_value, type_label);
         if (n < MinV || n > MaxV) {
             throw std::runtime_error(
                 std::string("value out of range for ") + type_label);
@@ -454,9 +601,13 @@ static ColumnRef appendIntColumn(HashTable *values_ht,
 // Build an unsigned integer column with a hex-string fast path. UInt32
 // and UInt64 both accept "0x..." strings as a way to land values in the
 // upper half of the range that a PHP signed long can't represent.
+// `MaxV` bounds the destination column width: strtoul on 64-bit Linux
+// returns 64-bit values regardless of the target column, so without a
+// width check "0x100000000" silently truncated to UInt32 0.
 template <typename TCol, typename TStrtoul>
 static ColumnRef appendUIntColumnWithHex(HashTable *values_ht,
                                          TStrtoul strtoul_fn,
+                                         uint64_t MaxV,
                                          const char *type_label)
 {
     auto value = std::make_shared<TCol>();
@@ -480,12 +631,20 @@ static ColumnRef appendUIntColumnWithHex(HashTable *values_ht,
                 throw std::runtime_error(
                     std::string("invalid hex literal for ") + type_label);
             }
+            if ((uint64_t)n > MaxV) {
+                throw std::runtime_error(
+                    std::string("hex literal out of range for ") + type_label);
+            }
             value->Append((typename TCol::ValueType)n);
         } else {
-            zend_long n = zval_get_long(array_value);
+            zend_long n = strict_zval_long(array_value, type_label);
             if (n < 0) {
                 throw std::runtime_error(
                     std::string("negative value cannot fit in ") + type_label);
+            }
+            if ((uint64_t)n > MaxV) {
+                throw std::runtime_error(
+                    std::string("value out of range for ") + type_label);
             }
             value->Append((typename TCol::ValueType)n);
         }
@@ -561,12 +720,12 @@ static ColumnRef appendLowCardinalityColumn(HashTable *values_ht, std::shared_pt
 
 // Build a Float32/Float64 column from a PHP rows array.
 template <typename TCol>
-static ColumnRef appendFloatColumn(HashTable *values_ht)
+static ColumnRef appendFloatColumn(HashTable *values_ht, const char *type_label)
 {
     auto value = std::make_shared<TCol>();
     zval *array_value;
     ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
-        value->Append(zval_get_double(array_value));
+        value->Append((typename TCol::ValueType)strict_zval_double(array_value, type_label));
     } ZEND_HASH_FOREACH_END();
     return value;
 }
@@ -757,13 +916,13 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     switch (type->GetCode())
     {
     case Type::Code::UInt64:
-        return appendUIntColumnWithHex<ColumnUInt64>(values_ht, strtoull, "UInt64");
+        return appendUIntColumnWithHex<ColumnUInt64>(values_ht, strtoull, UINT64_MAX, "UInt64");
     case Type::Code::UInt8:
         return appendIntColumn<ColumnUInt8>(values_ht, 0, 0xFF, "UInt8");
     case Type::Code::UInt16:
         return appendIntColumn<ColumnUInt16>(values_ht, 0, 0xFFFF, "UInt16");
     case Type::Code::UInt32:
-        return appendUIntColumnWithHex<ColumnUInt32>(values_ht, strtoul, "UInt32");
+        return appendUIntColumnWithHex<ColumnUInt32>(values_ht, strtoul, UINT32_MAX, "UInt32");
     case Type::Code::Int8:
         return appendIntColumn<ColumnInt8>(values_ht, INT8_MIN, INT8_MAX, "Int8");
     case Type::Code::Int16:
@@ -785,9 +944,9 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     }
 
     case Type::Code::Float32:
-        return appendFloatColumn<ColumnFloat32>(values_ht);
+        return appendFloatColumn<ColumnFloat32>(values_ht, "Float32");
     case Type::Code::Float64:
-        return appendFloatColumn<ColumnFloat64>(values_ht);
+        return appendFloatColumn<ColumnFloat64>(values_ht, "Float64");
 
     case Type::Code::String:
     {
