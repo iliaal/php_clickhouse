@@ -353,7 +353,9 @@ PHP_MINIT_FUNCTION(clickhouse)
 #endif
 
     clickhouse_ce = register_class_ClickHouse();
+#if PHP_VERSION_ID >= 80100
     clickhouse_ce->ce_flags |= ZEND_ACC_NOT_SERIALIZABLE;
+#endif
     clickhouse_ce->create_object = clickhouse_create_object;
 #if PHP_VERSION_ID >= 80400
     clickhouse_ce->default_object_handlers = &clickhouse_object_handlers;
@@ -366,7 +368,9 @@ PHP_MINIT_FUNCTION(clickhouse)
     clickhouse_exception_ce = register_class_ClickHouseException(zend_ce_exception);
 
     clickhouse_iter_ce = register_class_ClickHouseRowIterator(zend_ce_iterator, zend_ce_countable);
+#if PHP_VERSION_ID >= 80100
     clickhouse_iter_ce->ce_flags |= ZEND_ACC_NOT_SERIALIZABLE;
+#endif
     clickhouse_iter_ce->create_object = clickhouse_iter_create_object;
 #if PHP_VERSION_ID >= 80400
     clickhouse_iter_ce->default_object_handlers = &clickhouse_iter_object_handlers;
@@ -377,7 +381,9 @@ PHP_MINIT_FUNCTION(clickhouse)
     clickhouse_iter_object_handlers.free_obj = clickhouse_iter_free_obj;
 
     clickhouse_statement_ce = register_class_ClickHouseStatement(zend_ce_iterator, zend_ce_countable, zend_ce_arrayaccess, php_json_serializable_ce);
+#if PHP_VERSION_ID >= 80100
     clickhouse_statement_ce->ce_flags |= ZEND_ACC_NOT_SERIALIZABLE;
+#endif
     clickhouse_statement_ce->create_object = clickhouse_statement_create_object;
 #if PHP_VERSION_ID >= 80400
     clickhouse_statement_ce->default_object_handlers = &clickhouse_statement_object_handlers;
