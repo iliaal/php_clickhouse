@@ -40,6 +40,7 @@ extern "C" {
 #include "lib/clickhouse-cpp/clickhouse/types/type_parser.h"
 #include "typesToPhp.hpp"
 #include <chrono>
+#include <deque>
 #include <optional>
 #include <sstream>
 #include <unordered_map>
@@ -93,7 +94,10 @@ struct clickhouse_object {
     zval verbose_callback;         // IS_UNDEF when off or stderr-mode
     bool verbose_to_stderr;        // true when setVerbose(true) was used
     bool log_enabled;
-    std::vector<QueryLog> query_log;
+    /* deque, not vector, so the cap-overflow path's pop-front is O(1).
+     * vector::erase(begin()) on a 1024-entry log shifted ~16 KB on
+     * every query past the cap. */
+    std::deque<QueryLog> query_log;
     zend_object std;
 };
 
@@ -117,7 +121,7 @@ static zend_object *clickhouse_create_object(zend_class_entry *ce)
     new (&obj->insert_block) Block();
     new (&obj->stats) ClientStats();
     new (&obj->settings) std::unordered_map<std::string, std::string>();
-    new (&obj->query_log) std::vector<QueryLog>();
+    new (&obj->query_log) std::deque<QueryLog>();
     ZVAL_UNDEF(&obj->progress_callback);
     ZVAL_UNDEF(&obj->profile_callback);
     ZVAL_UNDEF(&obj->verbose_callback);
@@ -160,7 +164,7 @@ static void clickhouse_free_obj(zend_object *object)
     obj->insert_block.~Block();
     obj->stats.~ClientStats();
     obj->settings.~unordered_map<std::string, std::string>();
-    obj->query_log.~vector<QueryLog>();
+    obj->query_log.~deque<QueryLog>();
 
     zend_object_std_dtor(&obj->std);
 }
@@ -458,10 +462,9 @@ PHP_METHOD(ClickHouse, __construct)
     this_obj = getThis();
     if (php_array_get_value(_ht, "host", value))
     {
-        zend_string *coerced = zval_get_string(value);
+        ZStrGuard sg(value);
         sc_zend_update_property_stringl(clickhouse_ce, this_obj, "host", sizeof("host") - 1,
-                                        ZSTR_VAL(coerced), ZSTR_LEN(coerced));
-        zend_string_release(coerced);
+                                        sg.val(), sg.len());
     }
 
     if (php_array_get_value(_ht, "port", value))
@@ -647,15 +650,16 @@ PHP_METHOD(ClickHouse, __construct)
                 {"tls1.0", 0x0301}, {"tls1.1", 0x0302},
                 {"tls1.2", 0x0303}, {"tls1.3", 0x0304},
             };
-            zend_string *coerced = zval_get_string(value);
             int ver = 0;
-            for (const auto &tv : tls_versions) {
-                if (strcasecmp(ZSTR_VAL(coerced), tv.name) == 0) {
-                    ver = tv.version;
-                    break;
+            {
+                ZStrGuard sg(value);
+                for (const auto &tv : tls_versions) {
+                    if (strcasecmp(sg.val(), tv.name) == 0) {
+                        ver = tv.version;
+                        break;
+                    }
                 }
             }
-            zend_string_release(coerced);
             if (ver == 0) {
                 sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
                     "ssl_min_protocol_version must be one of tls1.0, tls1.1, tls1.2, tls1.3", 0);
@@ -670,9 +674,8 @@ PHP_METHOD(ClickHouse, __construct)
             ssl_opts.SetUseDefaultCALocations(zend_is_true(value));
         }
         if (php_array_get_value(_ht, "ssl_ca_directory", value)) {
-            zend_string *coerced = zval_get_string(value);
-            ssl_opts.SetPathToCADirectory(std::string(ZSTR_VAL(coerced), ZSTR_LEN(coerced)));
-            zend_string_release(coerced);
+            ZStrGuard sg(value);
+            ssl_opts.SetPathToCADirectory(std::string(sg.val(), sg.len()));
         }
         if (php_array_get_value(_ht, "ssl_ca_files", value)) {
             std::vector<std::string> files;
@@ -682,9 +685,8 @@ PHP_METHOD(ClickHouse, __construct)
                 HashTable *fh = Z_ARRVAL_P(value);
                 zval *fv;
                 ZEND_HASH_FOREACH_VAL(fh, fv) {
-                    zend_string *coerced = zval_get_string(fv);
-                    files.emplace_back(ZSTR_VAL(coerced), ZSTR_LEN(coerced));
-                    zend_string_release(coerced);
+                    ZStrGuard sg(fv);
+                    files.emplace_back(sg.val(), sg.len());
                 } ZEND_HASH_FOREACH_END();
             }
             ssl_opts.SetPathToCAFiles(files);
@@ -712,10 +714,11 @@ PHP_METHOD(ClickHouse, __construct)
             zval *hz = sc_zend_hash_find(eh, (char*)"host", 4);
             zval *pz = sc_zend_hash_find(eh, (char*)"port", 4);
             if (!hz) continue;
-            zend_string *host_s = zval_get_string(hz);
             Endpoint e;
-            e.host = std::string(ZSTR_VAL(host_s), ZSTR_LEN(host_s));
-            zend_string_release(host_s);
+            {
+                ZStrGuard host_sg(hz);
+                e.host = std::string(host_sg.val(), host_sg.len());
+            }
             if (pz) {
                 zend_long p = zval_get_long(pz);
                 if (p < 1 || p > 65535) {
@@ -732,27 +735,24 @@ PHP_METHOD(ClickHouse, __construct)
 
     if (php_array_get_value(_ht, "database", value))
     {
-        zend_string *coerced = zval_get_string(value);
+        ZStrGuard sg(value);
         sc_zend_update_property_stringl(clickhouse_ce, this_obj, "database", sizeof("database") - 1,
-                                        ZSTR_VAL(coerced), ZSTR_LEN(coerced));
-        Options = Options.SetDefaultDatabase(std::string(ZSTR_VAL(coerced), ZSTR_LEN(coerced)));
-        zend_string_release(coerced);
+                                        sg.val(), sg.len());
+        Options = Options.SetDefaultDatabase(std::string(sg.val(), sg.len()));
     }
 
     if (php_array_get_value(_ht, "user", value))
     {
-        zend_string *coerced = zval_get_string(value);
+        ZStrGuard sg(value);
         sc_zend_update_property_stringl(clickhouse_ce, this_obj, "user", sizeof("user") - 1,
-                                        ZSTR_VAL(coerced), ZSTR_LEN(coerced));
-        Options = Options.SetUser(std::string(ZSTR_VAL(coerced), ZSTR_LEN(coerced)));
-        zend_string_release(coerced);
+                                        sg.val(), sg.len());
+        Options = Options.SetUser(std::string(sg.val(), sg.len()));
     }
 
     if (php_array_get_value(_ht, "passwd", value))
     {
-        zend_string *coerced = zval_get_string(value);
-        Options = Options.SetPassword(std::string(ZSTR_VAL(coerced), ZSTR_LEN(coerced)));
-        zend_string_release(coerced);
+        ZStrGuard sg(value);
+        Options = Options.SetPassword(std::string(sg.val(), sg.len()));
     }
 
     try
@@ -1235,9 +1235,7 @@ static void resetStats(clickhouse_object *obj)
 static void appendQueryLogCapped(clickhouse_object *obj, QueryLog &&ql)
 {
     if (obj->query_log.size() >= CLICKHOUSE_QUERY_LOG_MAX) {
-        /* Erase from the front. Cheap enough at this cap; if perf
-         * matters, replace with a deque or ring buffer later. */
-        obj->query_log.erase(obj->query_log.begin());
+        obj->query_log.pop_front();
     }
     obj->query_log.push_back(std::move(ql));
 }
@@ -1700,6 +1698,56 @@ PHP_METHOD(ClickHouse, selectStatement)
 }
 /* }}} */
 
+/*
+ * Build a column-major zval matrix [col][row] from a row-major PHP
+ * HashTable [row][col]. Used by insert() and write() to transpose the
+ * user's row-of-rows input into the per-column shape zvalToBlock wants.
+ *
+ * column_names != NULL: missing positional entries are looked up by
+ * name (insert() accepts {col=>val} rows). NULL: positional only.
+ *
+ * Sets *out to an IS_ARRAY zval the caller owns. On throw, *out is
+ * reset to IS_UNDEF and any partial state is freed.
+ */
+static void buildColumnMajorRows(HashTable *values_ht, size_t columns_count,
+                                 const std::vector<zend_string*> *column_names,
+                                 zval *out)
+{
+    array_init(out);
+    try {
+        zval inner;
+        for (size_t i = 0; i < columns_count; ++i) {
+            array_init(&inner);
+            zval *pzval, *fzval;
+            ZEND_HASH_FOREACH_VAL(values_ht, pzval) {
+                if (Z_TYPE_P(pzval) != IS_ARRAY) {
+                    zval_ptr_dtor(&inner);
+                    throw std::runtime_error(
+                        "The insert function needs to pass in a two-dimensional array");
+                }
+                fzval = sc_zend_hash_index_find(Z_ARRVAL_P(pzval), i);
+                if (!fzval && column_names) {
+                    zend_string *col = (*column_names)[i];
+                    fzval = sc_zend_hash_find(Z_ARRVAL_P(pzval),
+                                              ZSTR_VAL(col), ZSTR_LEN(col));
+                }
+                if (!fzval) {
+                    zval_ptr_dtor(&inner);
+                    throw std::runtime_error(
+                        "The number of parameters inserted per line is inconsistent");
+                }
+                sc_zval_add_ref(fzval);
+                add_next_index_zval(&inner, fzval);
+            } ZEND_HASH_FOREACH_END();
+            add_next_index_zval(out, &inner);
+        }
+    } catch (...) {
+        zval_ptr_dtor(out);
+        ZVAL_UNDEF(out);
+        throw;
+    }
+}
+
 /* {{{ proto array insert(string table, array columns, array values, string query_id, array settings)
  */
 /*
@@ -1719,10 +1767,8 @@ static void do_insert_into(zval *this_obj, zend_string *table,
     // Storage for return_should lives in the function frame so that an
     // exception thrown by BeginInsert / SendInsertBlock / EndInsert can
     // still reach a valid zval header to free its array_init'd HashTable.
-    zval _return_should_storage;
-    zval *return_should = NULL;
-    zval _return_tmp_storage;
-    zval *return_tmp_pending = NULL;
+    zval transposed;
+    ZVAL_UNDEF(&transposed);
 
     clickhouse_object *obj = Z_CLICKHOUSE_P(this_obj);
     try
@@ -1756,43 +1802,7 @@ static void do_insert_into(zval *this_obj, zend_string *table,
             } ZEND_HASH_FOREACH_END();
         }
 
-        return_should = &_return_should_storage;
-        ZVAL_UNDEF(return_should);
-        array_init(return_should);
-
-        zval *fzval;
-        zval *pzval;
-
-        for(size_t i = 0; i < columns_count; i++)
-        {
-            zend_string *col_name = column_names[i];
-            return_tmp_pending = &_return_tmp_storage;
-            ZVAL_UNDEF(return_tmp_pending);
-            array_init(return_tmp_pending);
-
-            ZEND_HASH_FOREACH_VAL(values_ht, pzval)
-            {
-                if (Z_TYPE_P(pzval) != IS_ARRAY)
-                {
-                    throw std::runtime_error("The insert function needs to pass in a two-dimensional array");
-                }
-                fzval = sc_zend_hash_index_find(Z_ARRVAL_P(pzval), i);
-                if (NULL == fzval)
-                {
-                    fzval = sc_zend_hash_find(Z_ARRVAL_P(pzval), ZSTR_VAL(col_name), ZSTR_LEN(col_name));
-                }
-                if (NULL == fzval)
-                {
-                    throw std::runtime_error("The number of parameters inserted per line is inconsistent");
-                }
-                sc_zval_add_ref(fzval);
-                add_next_index_zval(return_tmp_pending, fzval);
-            }
-            ZEND_HASH_FOREACH_END();
-
-            add_next_index_zval(return_should, return_tmp_pending);
-            return_tmp_pending = NULL;
-        }
+        buildColumnMajorRows(values_ht, columns_count, &column_names, &transposed);
 
         sql = getInsertSql(std::string_view(ZSTR_VAL(table), ZSTR_LEN(table)), columns);
 
@@ -1808,8 +1818,9 @@ static void do_insert_into(zval *this_obj, zend_string *table,
         try {
             Block blockInsert;
             size_t index = 0;
+            zval *pzval;
 
-            ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(return_should), pzval)
+            ZEND_HASH_FOREACH_VAL(Z_ARRVAL(transposed), pzval)
             {
                 zvalToBlock(blockInsert, blockQuery, index, pzval);
                 index++;
@@ -1833,16 +1844,14 @@ static void do_insert_into(zval *this_obj, zend_string *table,
             throw;
         }
         recordQuerySuccess(obj, sql, qid);
-        sc_zval_ptr_dtor(&return_should);
-        return_should = NULL;
+        zval_ptr_dtor(&transposed);
+        ZVAL_UNDEF(&transposed);
     }
     catch (const std::exception& e)
     {
-        if (return_tmp_pending) {
-            sc_zval_ptr_dtor(&return_tmp_pending);
-        }
-        if (return_should) {
-            sc_zval_ptr_dtor(&return_should);
+        if (Z_TYPE(transposed) != IS_UNDEF) {
+            zval_ptr_dtor(&transposed);
+            ZVAL_UNDEF(&transposed);
         }
         recordQueryError(obj, sql, qid, e);
         throwClickHouseError(e, qid);
@@ -1937,10 +1946,8 @@ PHP_METHOD(ClickHouse, write)
         Z_PARAM_ZVAL(values)
     ZEND_PARSE_PARAMETERS_END();
 
-    zval _return_should_storage;
-    zval *return_should = NULL;
-    zval _return_tmp_storage;
-    zval *return_tmp_pending = NULL;
+    zval transposed;
+    ZVAL_UNDEF(&transposed);
 
     try
     {
@@ -1952,39 +1959,8 @@ PHP_METHOD(ClickHouse, write)
             throw std::runtime_error("Empty or non-array first row passed to write()");
         }
         size_t columns_count = zend_hash_num_elements(Z_ARRVAL_P(first_data));
-        return_should = &_return_should_storage;
-        ZVAL_UNDEF(return_should);
-        array_init(return_should);
 
-        zval *fzval;
-        zval *pzval;
-
-        for(size_t i = 0; i < columns_count; i++)
-        {
-            return_tmp_pending = &_return_tmp_storage;
-            ZVAL_UNDEF(return_tmp_pending);
-            array_init(return_tmp_pending);
-
-            ZEND_HASH_FOREACH_VAL(values_ht, pzval)
-            {
-                if (Z_TYPE_P(pzval) != IS_ARRAY)
-                {
-                    throw std::runtime_error("The insert function needs to pass in a two-dimensional array");
-                }
-                fzval = sc_zend_hash_index_find(Z_ARRVAL_P(pzval), i);
-                if (NULL == fzval)
-                {
-                    throw std::runtime_error("The number of parameters inserted per line is inconsistent");
-                }
-                sc_zval_add_ref(fzval);
-                add_next_index_zval(return_tmp_pending, fzval);
-            }
-            ZEND_HASH_FOREACH_END();
-
-            add_next_index_zval(return_should, return_tmp_pending);
-            return_tmp_pending = NULL;
-        }
-
+        buildColumnMajorRows(values_ht, columns_count, NULL, &transposed);
 
         clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
         Client *client = getClient(obj);
@@ -1996,8 +1972,9 @@ PHP_METHOD(ClickHouse, write)
 
         Block blockInsert;
         size_t index = 0;
+        zval *pzval;
 
-        ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(return_should), pzval)
+        ZEND_HASH_FOREACH_VAL(Z_ARRVAL(transposed), pzval)
         {
             zvalToBlock(blockInsert, blockQuery, index, pzval);
             index++;
@@ -2005,16 +1982,14 @@ PHP_METHOD(ClickHouse, write)
         ZEND_HASH_FOREACH_END();
 
         client->SendInsertBlock(blockInsert);
-        sc_zval_ptr_dtor(&return_should);
-        return_should = NULL;
+        zval_ptr_dtor(&transposed);
+        ZVAL_UNDEF(&transposed);
     }
     catch (const std::exception& e)
     {
-        if (return_tmp_pending) {
-            sc_zval_ptr_dtor(&return_tmp_pending);
-        }
-        if (return_should) {
-            sc_zval_ptr_dtor(&return_should);
+        if (Z_TYPE(transposed) != IS_UNDEF) {
+            zval_ptr_dtor(&transposed);
+            ZVAL_UNDEF(&transposed);
         }
         /* SendInsertBlock failed mid-stream. The wire is broken; mark the
          * insert as no longer in progress so the user can resetConnection
@@ -3569,11 +3544,19 @@ PHP_METHOD(ClickHouseStatement, fetchKeyPair)
         if (Z_TYPE_P(kv) == IS_LONG) {
             zend_hash_index_update(Z_ARRVAL_P(return_value), Z_LVAL_P(kv), &val_copy);
         } else {
-            zval k_copy;
-            ZVAL_COPY(&k_copy, kv);
-            convert_to_string(&k_copy);
-            zend_symtable_update(Z_ARRVAL_P(return_value), Z_STR(k_copy), &val_copy);
-            zval_ptr_dtor(&k_copy);
+            /* zval_get_string is non-mutating and handles object __toString
+             * without leaking the pre-bumped val_copy if conversion raises.
+             * The prior pattern (ZVAL_COPY + convert_to_string) buffered
+             * EG(exception) and continued the loop, accumulating refcount
+             * leaks across rows. */
+            zend_string *coerced = zval_get_string(kv);
+            if (EG(exception)) {
+                zval_ptr_dtor(&val_copy);
+                if (coerced) zend_string_release(coerced);
+                return;
+            }
+            zend_symtable_update(Z_ARRVAL_P(return_value), coerced, &val_copy);
+            zend_string_release(coerced);
         }
     } ZEND_HASH_FOREACH_END();
 }
