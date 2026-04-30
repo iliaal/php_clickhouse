@@ -1674,25 +1674,19 @@ PHP_METHOD(ClickHouse, selectStatement)
 
 /* {{{ proto array insert(string table, array columns, array values, string query_id, array settings)
  */
-PHP_METHOD(ClickHouse, insert)
+/*
+ * Internal: run an INSERT against `table` with the column-name list
+ * `columns` and the row-major matrix `values`. On error throws a PHP
+ * exception via throwClickHouseError; callers should check EG(exception)
+ * on return. Used by both ClickHouse::insert and ClickHouse::insertAssoc
+ * (insertAssoc transposes the assoc-array input first, then calls here
+ * directly instead of going through call_user_function on "insert").
+ */
+static void do_insert_into(zval *this_obj, zend_string *table,
+                           zval *columns, zval *values,
+                           const std::string &qid, zval *settings)
 {
-    zend_string *table = NULL;
-    zval *columns;
-    zval *values;
-    zend_string *query_id = NULL;
-    zval *settings = NULL;
-
     string sql;
-
-    ZEND_PARSE_PARAMETERS_START(3, 5)
-        Z_PARAM_STR(table)
-        Z_PARAM_ZVAL(columns)
-        Z_PARAM_ZVAL(values)
-        Z_PARAM_OPTIONAL
-        Z_PARAM_STR(query_id)
-        Z_PARAM_ARRAY(settings)
-    ZEND_PARSE_PARAMETERS_END();
-    std::string qid = makeQid(query_id);
 
     // Storage for return_should lives in the function frame so that an
     // exception thrown by BeginInsert / SendInsertBlock / EndInsert can
@@ -1702,7 +1696,7 @@ PHP_METHOD(ClickHouse, insert)
     zval _return_tmp_storage;
     zval *return_tmp_pending = NULL;
 
-    clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
+    clickhouse_object *obj = Z_CLICKHOUSE_P(this_obj);
     try
     {
         Client *client = getClient(obj);
@@ -1824,6 +1818,29 @@ PHP_METHOD(ClickHouse, insert)
         }
         recordQueryError(obj, sql, qid, e);
         throwClickHouseError(e, qid);
+    }
+}
+
+PHP_METHOD(ClickHouse, insert)
+{
+    zend_string *table = NULL;
+    zval *columns;
+    zval *values;
+    zend_string *query_id = NULL;
+    zval *settings = NULL;
+
+    ZEND_PARSE_PARAMETERS_START(3, 5)
+        Z_PARAM_STR(table)
+        Z_PARAM_ZVAL(columns)
+        Z_PARAM_ZVAL(values)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_STR(query_id)
+        Z_PARAM_ARRAY(settings)
+    ZEND_PARSE_PARAMETERS_END();
+
+    do_insert_into(getThis(), table, columns, values, makeQid(query_id), settings);
+    if (EG(exception)) {
+        return;
     }
     RETURN_TRUE;
 }
@@ -2017,23 +2034,18 @@ PHP_METHOD(ClickHouse, writeEnd)
 
 /* {{{ proto bool execute(string sql, array params, string query_id, array settings)
  */
-PHP_METHOD(ClickHouse, execute)
+/*
+ * Internal: run a non-result-bearing statement (DDL, INSERT...SELECT,
+ * SET, etc.). On error throws a PHP exception via throwClickHouseError;
+ * callers should check EG(exception) on return. Used by ClickHouse::execute
+ * and the SQL-helper one-liners (truncateTable, dropPartition, ...) so
+ * those don't have to round-trip through call_user_function on "execute".
+ */
+static void do_execute_into(zval *this_obj,
+                            const char *sql, size_t l_sql,
+                            zval *params, const std::string &qid, zval *settings)
 {
-    zend_string *sql = NULL;
-    zval* params = NULL;
-    zend_string *query_id = NULL;
-    zval *settings = NULL;
-
-    ZEND_PARSE_PARAMETERS_START(1, 4)
-        Z_PARAM_STR(sql)
-        Z_PARAM_OPTIONAL
-        Z_PARAM_ZVAL(params)
-        Z_PARAM_STR(query_id)
-        Z_PARAM_ARRAY(settings)
-    ZEND_PARSE_PARAMETERS_END();
-    std::string qid = makeQid(query_id);
-
-    clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
+    clickhouse_object *obj = Z_CLICKHOUSE_P(this_obj);
     try
     {
         Client *client = getClient(obj);
@@ -2043,7 +2055,7 @@ PHP_METHOD(ClickHouse, execute)
             throw std::runtime_error("The insert operation is now in progress");
         }
 
-        string sql_s = std::string(ZSTR_VAL(sql), ZSTR_LEN(sql));
+        string sql_s = std::string(sql, l_sql);
         std::vector<TypedParam> typed_params;
 
         if (params != NULL && Z_TYPE_P(params) == IS_ARRAY)
@@ -2086,8 +2098,30 @@ PHP_METHOD(ClickHouse, execute)
     }
     catch (const std::exception& e)
     {
-        recordQueryError(obj, std::string(ZSTR_VAL(sql), ZSTR_LEN(sql)), qid, e);
+        recordQueryError(obj, std::string(sql, l_sql), qid, e);
         throwClickHouseError(e, qid);
+    }
+}
+
+PHP_METHOD(ClickHouse, execute)
+{
+    zend_string *sql = NULL;
+    zval* params = NULL;
+    zend_string *query_id = NULL;
+    zval *settings = NULL;
+
+    ZEND_PARSE_PARAMETERS_START(1, 4)
+        Z_PARAM_STR(sql)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ZVAL(params)
+        Z_PARAM_STR(query_id)
+        Z_PARAM_ARRAY(settings)
+    ZEND_PARSE_PARAMETERS_END();
+
+    do_execute_into(getThis(), ZSTR_VAL(sql), ZSTR_LEN(sql), params,
+                    makeQid(query_id), settings);
+    if (EG(exception)) {
+        return;
     }
     RETURN_TRUE;
 }
@@ -2461,38 +2495,17 @@ PHP_METHOD(ClickHouse, insertAssoc)
             add_next_index_zval(&values_zv, &row_out);
         } ZEND_HASH_FOREACH_END();
 
-        /* Forward to insert() by call_user_function so we get exactly
-         * the same code path (validation, settings merge, stats, etc.)
-         * and keep this wrapper a thin layer. */
-        zval method, args[5], retval;
-        ZVAL_STRING(&method, "insert");
-        ZVAL_STRINGL(&args[0], ZSTR_VAL(table), ZSTR_LEN(table));
-        ZVAL_COPY_VALUE(&args[1], &columns_zv);
-        ZVAL_COPY_VALUE(&args[2], &values_zv);
-        if (!qid.empty()) {
-            ZVAL_STRINGL(&args[3], qid.c_str(), qid.size());
-        } else {
-            ZVAL_EMPTY_STRING(&args[3]);
-        }
-        if (settings) {
-            ZVAL_COPY_VALUE(&args[4], settings);
-            Z_TRY_ADDREF_P(settings);
-        } else {
-            array_init(&args[4]);
-        }
-        ZVAL_NULL(&retval);
-        call_user_function(NULL, getThis(), &method, &retval, 5, args);
-        zval_ptr_dtor(&method);
-        zval_ptr_dtor(&args[0]);
-        zval_ptr_dtor(&args[1]);
-        zval_ptr_dtor(&args[2]);
-        zval_ptr_dtor(&args[3]);
-        zval_ptr_dtor(&args[4]);
+        /* Dispatch directly into the shared insert helper. The previous
+         * version went through call_user_function("insert", ...) which
+         * added a full PHP method-dispatch frame on every assoc insert
+         * and exposed the helper to user-defined subclass overrides
+         * of insert(). */
+        do_insert_into(getThis(), table, &columns_zv, &values_zv, qid, settings);
+        zval_ptr_dtor(&columns_zv);
+        zval_ptr_dtor(&values_zv);
         if (EG(exception)) {
-            zval_ptr_dtor(&retval);
             return;
         }
-        zval_ptr_dtor(&retval);
     } catch (const std::exception &e) {
         throwClickHouseError(e, qid);
         return;
@@ -2503,40 +2516,25 @@ PHP_METHOD(ClickHouse, insertAssoc)
 
 /*
  * SQL-helper one-liners. Each builds a small SELECT and reuses the
- * select() machinery via call_user_function so settings, progress,
- * and stats also apply to these.
+ * select() machinery directly through do_select_into / do_execute_into
+ * so settings, progress, stats, and the verbose trace surface apply
+ * exactly the same as on the user-visible select() / execute(). The
+ * old call_user_function indirection added a full PHP method-dispatch
+ * frame per helper call (and exposed the helpers to user-defined
+ * subclass overrides of select/execute, which wasn't intended).
  */
 static void runHelperSelect(zval *return_value, zval *this_obj, const std::string &sql, zend_long fetch_mode)
 {
-    zval method, args[3], retval;
-    ZVAL_STRING(&method, "select");
-    ZVAL_STRINGL(&args[0], sql.c_str(), sql.size());
-    array_init(&args[1]);
-    ZVAL_LONG(&args[2], fetch_mode);
-    ZVAL_NULL(&retval);
-    call_user_function(NULL, this_obj, &method, &retval, 3, args);
-    zval_ptr_dtor(&method);
-    zval_ptr_dtor(&args[0]);
-    zval_ptr_dtor(&args[1]);
-    if (EG(exception)) {
-        zval_ptr_dtor(&retval);
-        return;
-    }
-    ZVAL_COPY_VALUE(return_value, &retval);
+    do_select_into(return_value, this_obj, sql.c_str(), sql.size(),
+                   /*params=*/NULL, fetch_mode, /*qid=*/std::string(),
+                   /*settings=*/NULL);
 }
 
 static bool runHelperExec(zval *this_obj, const std::string &sql)
 {
-    zval method, args[1], retval;
-    ZVAL_STRING(&method, "execute");
-    ZVAL_STRINGL(&args[0], sql.c_str(), sql.size());
-    ZVAL_NULL(&retval);
-    call_user_function(NULL, this_obj, &method, &retval, 1, args);
-    zval_ptr_dtor(&method);
-    zval_ptr_dtor(&args[0]);
-    bool ok = !EG(exception) && Z_TYPE(retval) == IS_TRUE;
-    zval_ptr_dtor(&retval);
-    return ok;
+    do_execute_into(this_obj, sql.c_str(), sql.size(),
+                    /*params=*/NULL, /*qid=*/std::string(), /*settings=*/NULL);
+    return !EG(exception);
 }
 
 static std::string currentDatabase(zval *this_obj)
