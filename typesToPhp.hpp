@@ -15,16 +15,17 @@
   | Author: Ilia Alshanetsky <ilia@ilia.ws>                              |
   +----------------------------------------------------------------------+
 */
-using namespace clickhouse;
-using namespace std;
+#include <string>
 
-ColumnRef createColumn(TypeRef type);
+clickhouse::ColumnRef createColumn(clickhouse::TypeRef type);
 
-ColumnRef insertColumn(TypeRef type, zval *value_zval);
+clickhouse::ColumnRef insertColumn(clickhouse::TypeRef type, zval *value_zval);
 
-void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column_name, int8_t is_array, long fetch_mode);
+void convertToZval(zval *arr, const clickhouse::ColumnRef& columnRef, int row,
+                   const std::string& column_name, int8_t is_array, long fetch_mode);
 
-void zvalToBlock(Block& blockDes, Block& blockSrc, zend_ulong num_key, zval *value_zval);
+void zvalToBlock(clickhouse::Block& blockDes, clickhouse::Block& blockSrc,
+                 zend_ulong num_key, zval *value_zval);
 
 /*
  * Local variables:
