@@ -2140,6 +2140,10 @@ PHP_METHOD(ClickHouse, setSettings)
         Z_PARAM_ARRAY(arr)
     ZEND_PARSE_PARAMETERS_END();
     clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
+    /* Build into a temporary first so a malformed key doesn't leave the
+     * caller's settings half-replaced. The validator matches setSetting's
+     * (numeric keys rejected, empty strings rejected) so a setting array
+     * accepted by one entry point is also accepted by the other. */
     std::unordered_map<std::string, std::string> m;
     HashTable *ht = Z_ARRVAL_P(arr);
     zval *vz;
@@ -2147,7 +2151,16 @@ PHP_METHOD(ClickHouse, setSettings)
     zend_ulong nk;
     ZEND_HASH_FOREACH_KEY_VAL(ht, nk, zk, vz) {
         (void)nk;
-        if (!zk) continue;
+        if (!zk) {
+            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                "setting keys must be strings", 0);
+            return;
+        }
+        if (ZSTR_LEN(zk) == 0) {
+            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                "setting key must not be empty", 0);
+            return;
+        }
         m[std::string(ZSTR_VAL(zk), ZSTR_LEN(zk))] = formatScalarParam(vz);
     } ZEND_HASH_FOREACH_END();
     obj->settings = std::move(m);
@@ -2169,7 +2182,8 @@ PHP_METHOD(ClickHouse, setSetting)
         Z_PARAM_ZVAL(value)
     ZEND_PARSE_PARAMETERS_END();
     if (ZSTR_LEN(key) == 0) {
-        throwClickHouseError(std::runtime_error("setting key must not be empty"));
+        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+            "setting key must not be empty", 0);
         return;
     }
     clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
@@ -2304,13 +2318,15 @@ PHP_METHOD(ClickHouse, setVerbose)
 
     if (Z_TYPE_P(sink) == IS_TRUE) {
         obj->verbose_to_stderr = true;
-    } else if (Z_TYPE_P(sink) == IS_FALSE) {
-        /* already cleared above */
+    } else if (Z_TYPE_P(sink) == IS_FALSE || Z_TYPE_P(sink) == IS_NULL) {
+        /* false / null: already cleared above. Treat null the same as
+         * false to match setProgressCallback / setProfileCallback, both
+         * of which accept null as "remove the callback". */
     } else if (zend_is_callable(sink, 0, NULL)) {
         ZVAL_COPY(&obj->verbose_callback, sink);
     } else {
         sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
-            "setVerbose expects bool or callable", 0);
+            "setVerbose expects bool, null, or callable", 0);
         return;
     }
     RETURN_ZVAL(getThis(), 1, 0);
