@@ -740,30 +740,9 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     case Type::Code::UUID:
     {
         auto value = std::make_shared<ColumnUUID>();
-
         ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
-            if (Z_TYPE_P(array_value) == IS_NULL)
-            {
-                value->Append(UUID{0, 0});
-            }
-            else
-            {
-                ZStrGuard sg(array_value);
-                std::string value_string(sg.val(), sg.len());
-
-                value_string.erase(std::remove(value_string.begin(), value_string.end(), '-'), value_string.end());
-                if (value_string.length() != 32)
-                {
-                    throw std::runtime_error("UUID format error");
-                }
-
-                std::string first = value_string.substr(0, 16);
-                std::string second = value_string.substr(16, 16);
-                uint64_t i_first = std::stoull(first, nullptr, 16);
-                uint64_t i_second = std::stoull(second, nullptr, 16);
-                value->Append(UUID{i_first, i_second});
-            }
+            value->Append(phpToUUID(array_value));
         }
         ZEND_HASH_FOREACH_END();
         return value;
@@ -1965,6 +1944,74 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         SC_MAKE_STD_ZVAL(map_zv);
         array_init(map_zv);
 
+        /* Pre-cast the key and value columns once per row instead of per
+         * entry. The keys_any / values_any column slices don't change
+         * across the entry loop; only the row index inside them does.
+         * Doing as_or_throw inside decodeKey would re-run a
+         * dynamic_pointer_cast for every map entry. For Map(Int64, V)
+         * with 100 entries × 1M rows that was 100M unnecessary casts.
+         * Only one of these typed pointers is populated for any given
+         * cell; the others stay null. */
+        std::shared_ptr<ColumnString>  k_str_col;
+        std::shared_ptr<ColumnInt64>   k_i64_col;
+        std::shared_ptr<ColumnUInt64>  k_u64_col;
+        std::shared_ptr<ColumnInt32>   k_i32_col;
+        std::shared_ptr<ColumnUInt32>  k_u32_col;
+        std::shared_ptr<ColumnInt16>   k_i16_col;
+        std::shared_ptr<ColumnUInt16>  k_u16_col;
+        std::shared_ptr<ColumnInt8>    k_i8_col;
+        std::shared_ptr<ColumnUInt8>   k_u8_col;
+        std::shared_ptr<ColumnFloat32> k_f32_col;
+        std::shared_ptr<ColumnFloat64> k_f64_col;
+        std::shared_ptr<ColumnUUID>    k_uuid_col;
+        switch (key_code) {
+            case Type::Code::String:  k_str_col  = as_or_throw<ColumnString>(keys_any, "Map key String"); break;
+            case Type::Code::Int64:   k_i64_col  = as_or_throw<ColumnInt64>(keys_any, "Map key Int64"); break;
+            case Type::Code::UInt64:  k_u64_col  = as_or_throw<ColumnUInt64>(keys_any, "Map key UInt64"); break;
+            case Type::Code::Int32:   k_i32_col  = as_or_throw<ColumnInt32>(keys_any, "Map key Int32"); break;
+            case Type::Code::UInt32:  k_u32_col  = as_or_throw<ColumnUInt32>(keys_any, "Map key UInt32"); break;
+            case Type::Code::Int16:   k_i16_col  = as_or_throw<ColumnInt16>(keys_any, "Map key Int16"); break;
+            case Type::Code::UInt16:  k_u16_col  = as_or_throw<ColumnUInt16>(keys_any, "Map key UInt16"); break;
+            case Type::Code::Int8:    k_i8_col   = as_or_throw<ColumnInt8>(keys_any, "Map key Int8"); break;
+            case Type::Code::UInt8:   k_u8_col   = as_or_throw<ColumnUInt8>(keys_any, "Map key UInt8"); break;
+            case Type::Code::Float32: k_f32_col  = as_or_throw<ColumnFloat32>(keys_any, "Map key Float32"); break;
+            case Type::Code::Float64: k_f64_col  = as_or_throw<ColumnFloat64>(keys_any, "Map key Float64"); break;
+            case Type::Code::UUID:    k_uuid_col = as_or_throw<ColumnUUID>(keys_any, "Map key UUID"); break;
+            default:
+                throw std::runtime_error("Map read: unsupported key type " + key_type_ref->GetName());
+        }
+
+        // Same hoist for value column: one cast per Map cell, not per
+        // entry. Only the pointer matching value_code is populated.
+        std::shared_ptr<ColumnString>  v_str_col;
+        std::shared_ptr<ColumnInt64>   v_i64_col;
+        std::shared_ptr<ColumnUInt64>  v_u64_col;
+        std::shared_ptr<ColumnInt32>   v_i32_col;
+        std::shared_ptr<ColumnUInt32>  v_u32_col;
+        std::shared_ptr<ColumnInt16>   v_i16_col;
+        std::shared_ptr<ColumnUInt16>  v_u16_col;
+        std::shared_ptr<ColumnInt8>    v_i8_col;
+        std::shared_ptr<ColumnUInt8>   v_u8_col;
+        std::shared_ptr<ColumnFloat32> v_f32_col;
+        std::shared_ptr<ColumnFloat64> v_f64_col;
+        std::shared_ptr<ColumnUUID>    v_uuid_col;
+        switch (value_code) {
+            case Type::Code::String:  v_str_col  = as_or_throw<ColumnString>(values_any, "Map value String"); break;
+            case Type::Code::Int64:   v_i64_col  = as_or_throw<ColumnInt64>(values_any, "Map value Int64"); break;
+            case Type::Code::UInt64:  v_u64_col  = as_or_throw<ColumnUInt64>(values_any, "Map value UInt64"); break;
+            case Type::Code::Int32:   v_i32_col  = as_or_throw<ColumnInt32>(values_any, "Map value Int32"); break;
+            case Type::Code::UInt32:  v_u32_col  = as_or_throw<ColumnUInt32>(values_any, "Map value UInt32"); break;
+            case Type::Code::Int16:   v_i16_col  = as_or_throw<ColumnInt16>(values_any, "Map value Int16"); break;
+            case Type::Code::UInt16:  v_u16_col  = as_or_throw<ColumnUInt16>(values_any, "Map value UInt16"); break;
+            case Type::Code::Int8:    v_i8_col   = as_or_throw<ColumnInt8>(values_any, "Map value Int8"); break;
+            case Type::Code::UInt8:   v_u8_col   = as_or_throw<ColumnUInt8>(values_any, "Map value UInt8"); break;
+            case Type::Code::Float32: v_f32_col  = as_or_throw<ColumnFloat32>(values_any, "Map value Float32"); break;
+            case Type::Code::Float64: v_f64_col  = as_or_throw<ColumnFloat64>(values_any, "Map value Float64"); break;
+            case Type::Code::UUID:    v_uuid_col = as_or_throw<ColumnUUID>(values_any, "Map value UUID"); break;
+            default:
+                throw std::runtime_error("Map read: unsupported value type " + value_type_ref->GetName());
+        }
+
         // Decode a key column at row i into one of three forms: string,
         // long integer, or double. PHP arrays only key by string or
         // long; doubles get formatted to a canonical string key.
@@ -1972,22 +2019,22 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             // Returns 0 = string, 1 = long, 2 = double-as-string.
             switch (key_code) {
                 case Type::Code::String: {
-                    std::string_view kv = (*as_or_throw<ColumnString>(keys_any, "Map key String"))[i];
+                    std::string_view kv = (*k_str_col)[i];
                     str_buf.assign(kv.data(), kv.length());
                     return 0;
                 }
-                case Type::Code::Int64:  long_out = (zend_long)as_or_throw<ColumnInt64>(keys_any, "Map key Int64")->At(i);   return 1;
-                case Type::Code::UInt64: long_out = (zend_long)as_or_throw<ColumnUInt64>(keys_any, "Map key UInt64")->At(i); return 1;
-                case Type::Code::Int32:  long_out = (zend_long)as_or_throw<ColumnInt32>(keys_any, "Map key Int32")->At(i);   return 1;
-                case Type::Code::UInt32: long_out = (zend_long)as_or_throw<ColumnUInt32>(keys_any, "Map key UInt32")->At(i); return 1;
-                case Type::Code::Int16:  long_out = (zend_long)as_or_throw<ColumnInt16>(keys_any, "Map key Int16")->At(i);   return 1;
-                case Type::Code::UInt16: long_out = (zend_long)as_or_throw<ColumnUInt16>(keys_any, "Map key UInt16")->At(i); return 1;
-                case Type::Code::Int8:   long_out = (zend_long)as_or_throw<ColumnInt8>(keys_any, "Map key Int8")->At(i);     return 1;
-                case Type::Code::UInt8:  long_out = (zend_long)as_or_throw<ColumnUInt8>(keys_any, "Map key UInt8")->At(i);   return 1;
-                case Type::Code::Float32: dbl_out = (double)as_or_throw<ColumnFloat32>(keys_any, "Map key Float32")->At(i);  return 2;
-                case Type::Code::Float64: dbl_out = (double)as_or_throw<ColumnFloat64>(keys_any, "Map key Float64")->At(i);  return 2;
+                case Type::Code::Int64:   long_out = (zend_long)k_i64_col->At(i);  return 1;
+                case Type::Code::UInt64:  long_out = (zend_long)k_u64_col->At(i);  return 1;
+                case Type::Code::Int32:   long_out = (zend_long)k_i32_col->At(i);  return 1;
+                case Type::Code::UInt32:  long_out = (zend_long)k_u32_col->At(i);  return 1;
+                case Type::Code::Int16:   long_out = (zend_long)k_i16_col->At(i);  return 1;
+                case Type::Code::UInt16:  long_out = (zend_long)k_u16_col->At(i);  return 1;
+                case Type::Code::Int8:    long_out = (zend_long)k_i8_col->At(i);   return 1;
+                case Type::Code::UInt8:   long_out = (zend_long)k_u8_col->At(i);   return 1;
+                case Type::Code::Float32: dbl_out  = (double)k_f32_col->At(i);     return 2;
+                case Type::Code::Float64: dbl_out  = (double)k_f64_col->At(i);     return 2;
                 case Type::Code::UUID: {
-                    UUID u = as_or_throw<ColumnUUID>(keys_any, "Map key UUID")->At(i);
+                    UUID u = k_uuid_col->At(i);
                     char buf[64];
                     snprintf(buf, sizeof(buf), "%08x-%04x-%04x-%04x-%012llx",
                              (uint32_t)(u.first >> 32),
@@ -2048,7 +2095,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
 
             // Decode value, dispatch by value type.
             if (value_code == Type::Code::String) {
-                std::string_view vv = (*as_or_throw<ColumnString>(values_any, "Map value String"))[i];
+                std::string_view vv = (*v_str_col)[i];
                 addStrL(kkind, str_key_buf, long_key, dbl_key, vv.data(), vv.length());
             } else if (value_code == Type::Code::Int64 || value_code == Type::Code::UInt64
                     || value_code == Type::Code::Int32 || value_code == Type::Code::UInt32
@@ -2056,24 +2103,24 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
                     || value_code == Type::Code::Int8  || value_code == Type::Code::UInt8) {
                 zend_long lv = 0;
                 switch (value_code) {
-                    case Type::Code::Int64:  lv = (zend_long)as_or_throw<ColumnInt64>(values_any, "Map value Int64")->At(i); break;
-                    case Type::Code::UInt64: lv = (zend_long)as_or_throw<ColumnUInt64>(values_any, "Map value UInt64")->At(i); break;
-                    case Type::Code::Int32:  lv = (zend_long)as_or_throw<ColumnInt32>(values_any, "Map value Int32")->At(i); break;
-                    case Type::Code::UInt32: lv = (zend_long)as_or_throw<ColumnUInt32>(values_any, "Map value UInt32")->At(i); break;
-                    case Type::Code::Int16:  lv = (zend_long)as_or_throw<ColumnInt16>(values_any, "Map value Int16")->At(i); break;
-                    case Type::Code::UInt16: lv = (zend_long)as_or_throw<ColumnUInt16>(values_any, "Map value UInt16")->At(i); break;
-                    case Type::Code::Int8:   lv = (zend_long)as_or_throw<ColumnInt8>(values_any, "Map value Int8")->At(i); break;
-                    case Type::Code::UInt8:  lv = (zend_long)as_or_throw<ColumnUInt8>(values_any, "Map value UInt8")->At(i); break;
+                    case Type::Code::Int64:  lv = (zend_long)v_i64_col->At(i); break;
+                    case Type::Code::UInt64: lv = (zend_long)v_u64_col->At(i); break;
+                    case Type::Code::Int32:  lv = (zend_long)v_i32_col->At(i); break;
+                    case Type::Code::UInt32: lv = (zend_long)v_u32_col->At(i); break;
+                    case Type::Code::Int16:  lv = (zend_long)v_i16_col->At(i); break;
+                    case Type::Code::UInt16: lv = (zend_long)v_u16_col->At(i); break;
+                    case Type::Code::Int8:   lv = (zend_long)v_i8_col->At(i);  break;
+                    case Type::Code::UInt8:  lv = (zend_long)v_u8_col->At(i);  break;
                     default: break;
                 }
                 addLong(kkind, str_key_buf, long_key, dbl_key, lv);
             } else if (value_code == Type::Code::Float64 || value_code == Type::Code::Float32) {
                 double dv = (value_code == Type::Code::Float64)
-                    ? (double)as_or_throw<ColumnFloat64>(values_any, "Map value Float64")->At(i)
-                    : (double)as_or_throw<ColumnFloat32>(values_any, "Map value Float32")->At(i);
+                    ? (double)v_f64_col->At(i)
+                    : (double)v_f32_col->At(i);
                 addDbl(kkind, str_key_buf, long_key, dbl_key, dv);
             } else if (value_code == Type::Code::UUID) {
-                UUID u = as_or_throw<ColumnUUID>(values_any, "Map value UUID")->At(i);
+                UUID u = v_uuid_col->At(i);
                 char buf[64];
                 int blen = snprintf(buf, sizeof(buf), "%08x-%04x-%04x-%04x-%012llx",
                          (uint32_t)(u.first >> 32),
