@@ -293,10 +293,14 @@ jobs:
           # set so the runtime ABI lines up. Disable `function` (PHP's own
           # build does) and `vptr` (the vptr check needs
           # __ubsan_vptr_type_cache, which the dlopen'd extension can't
-          # resolve against the host PHP's runtime).
+          # resolve against the host PHP's runtime). Also disable
+          # `pointer-overflow`: vendored LZ4 evaluates `dictionary + dictSize`
+          # which is `NULL + 0` when no compression dictionary is set. This
+          # is technically UB per C, harmless in practice, and a known
+          # false positive that every LZ4 + UBSan integration suppresses.
           CC=clang CXX=clang++ \
-          CFLAGS="-fsanitize=address,undefined -fno-sanitize=function,vptr -shared-libasan -DZEND_TRACK_ARENA_ALLOC" \
-          CXXFLAGS="-fsanitize=address,undefined -fno-sanitize=function,vptr -shared-libasan -DZEND_TRACK_ARENA_ALLOC" \
+          CFLAGS="-fsanitize=address,undefined -fno-sanitize=function,vptr,pointer-overflow -shared-libasan -DZEND_TRACK_ARENA_ALLOC" \
+          CXXFLAGS="-fsanitize=address,undefined -fno-sanitize=function,vptr,pointer-overflow -shared-libasan -DZEND_TRACK_ARENA_ALLOC" \
           LDFLAGS="-fsanitize=address,undefined -shared-libasan" \
           ./configure --enable-clickhouse --with-php-config=/tmp/php-asan/bin/php-config
           make -j$(nproc)
