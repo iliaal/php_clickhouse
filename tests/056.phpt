@@ -50,13 +50,25 @@ $c->select("SELECT 1");
 $c->setVerbose(false);
 echo "stderr_mode_ok=yes\n";
 
-// Reject non-bool, non-callable.
+// Reject non-bool, non-null, non-callable.
 try {
     $c->setVerbose(42);
     echo "int_arg: NO EXCEPTION (BUG)\n";
 } catch (ClickHouseException $e) {
     echo "int_arg rejected: ", $e->getMessage(), "\n";
 }
+
+// null is accepted as a synonym for false, matching the ?callable
+// signature of setProgressCallback / setProfileCallback. The previous
+// version threw on null, which surprised callers using the obvious
+// "remove the sink" idiom.
+$tally = [];
+$c->setVerbose(function(string $event, array $ctx) use (&$tally) {
+    $tally[$event] = 1;
+});
+$c->setVerbose(null);
+$c->select("SELECT 1");
+echo "after_null_disable_total=", count($tally), "\n";
 ?>
 --EXPECTF--
 bool(true)
@@ -71,4 +83,5 @@ server_exception=yes
 after_disable_total=0
 bool(true)
 %Astderr_mode_ok=yes
-int_arg rejected: setVerbose expects bool or callable
+int_arg rejected: setVerbose expects bool, null, or callable
+after_null_disable_total=0
