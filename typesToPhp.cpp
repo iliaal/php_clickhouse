@@ -215,8 +215,30 @@ static std::pair<std::time_t, int64_t> to_time_t_with_frac(const std::string &st
     return {whole, frac};
 }
 
+/* Cap recursion through nested column types (Tuple/Array/Map/Nullable/
+ * LowCardinality) so a server-supplied schema like Tuple(Tuple(Tuple(...)))
+ * cannot stack-overflow the worker. Used by both the read path
+ * (convertToZval) and the write path (createColumn / insertColumn);
+ * BeginInsert returns a server-built block schema, so an adversarial or
+ * MITM'd server can craft a deeply-nested type just like on the read side.
+ *
+ * thread_local because clickhouse-cpp may dispatch from worker threads. */
+static thread_local int convert_depth = 0;
+static const int MAX_CONVERT_DEPTH = 32;
+
+struct ConvertDepthGuard {
+    ConvertDepthGuard() {
+        if (++convert_depth > MAX_CONVERT_DEPTH) {
+            --convert_depth;
+            throw std::runtime_error("ClickHouse column nested-type depth exceeds limit");
+        }
+    }
+    ~ConvertDepthGuard() { --convert_depth; }
+};
+
 ColumnRef createColumn(TypeRef type)
 {
+    ConvertDepthGuard _depth_guard;
     switch (type->GetCode())
     {
     case Type::Code::UInt64:
@@ -692,6 +714,7 @@ static std::vector<std::vector<std::tuple<double, double>>> phpToPolygon(zval *z
 
 ColumnRef insertColumn(TypeRef type, zval *value_zval)
 {
+    ConvertDepthGuard _depth_guard;  // shared with createColumn / convertToZval
     zval *array_value;
     HashTable *values_ht = Z_ARRVAL_P(value_zval);
 
@@ -1072,15 +1095,21 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
             }
             return std::string(ZSTR_VAL(zk), ZSTR_LEN(zk));
         };
+        /* PHP zend_string is length-prefixed and may contain embedded
+         * NUL bytes. Comparing endp against ZSTR_LEN is the right
+         * "fully consumed" check; checking *endp == '\0' would let
+         * "123\x00garbage" silently parse as 123 because endp would
+         * land on the NUL. */
         auto i64Key = [](zend_string *zk, zend_ulong nk) -> int64_t {
             if (!zk) return (int64_t)nk;
             const char *s = ZSTR_VAL(zk);
             char *endp = NULL;
             errno = 0;
             long long v = strtoll(s, &endp, 10);
-            if (errno == ERANGE || endp == s || (endp && *endp != '\0')) {
+            if (errno == ERANGE || endp == s || (size_t)(endp - s) != ZSTR_LEN(zk)) {
                 throw std::runtime_error(
-                    std::string("Map integer key is not a valid number: ") + s);
+                    std::string("Map integer key is not a valid number: ") +
+                    std::string(s, ZSTR_LEN(zk)));
             }
             return (int64_t)v;
         };
@@ -1090,9 +1119,10 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
             char *endp = NULL;
             errno = 0;
             unsigned long long v = strtoull(s, &endp, 10);
-            if (errno == ERANGE || endp == s || (endp && *endp != '\0')) {
+            if (errno == ERANGE || endp == s || (size_t)(endp - s) != ZSTR_LEN(zk)) {
                 throw std::runtime_error(
-                    std::string("Map unsigned key is not a valid number: ") + s);
+                    std::string("Map unsigned key is not a valid number: ") +
+                    std::string(s, ZSTR_LEN(zk)));
             }
             return (uint64_t)v;
         };
@@ -1102,9 +1132,10 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
             char *endp = NULL;
             errno = 0;
             double v = strtod(s, &endp);
-            if (errno == ERANGE || endp == s || (endp && *endp != '\0')) {
+            if (errno == ERANGE || endp == s || (size_t)(endp - s) != ZSTR_LEN(zk)) {
                 throw std::runtime_error(
-                    std::string("Map float key is not a valid number: ") + s);
+                    std::string("Map float key is not a valid number: ") +
+                    std::string(s, ZSTR_LEN(zk)));
             }
             return v;
         };
@@ -1332,25 +1363,9 @@ static void emitNestedZval(zval *arr, zval *built, const string& column_name, in
     }
 }
 
-/* Cap recursion through nested types (Tuple/Array/Map/Nullable/LowCardinality)
- * so a server-supplied schema like Tuple(Tuple(Tuple(...))) cannot stack-overflow
- * the worker. Thread-local because clickhouse-cpp may dispatch from worker threads. */
-static thread_local int convert_depth = 0;
-static const int MAX_CONVERT_DEPTH = 32;
-
-struct ConvertDepthGuard {
-    ConvertDepthGuard() {
-        if (++convert_depth > MAX_CONVERT_DEPTH) {
-            --convert_depth;
-            throw std::runtime_error("ClickHouse column nested-type depth exceeds limit");
-        }
-    }
-    ~ConvertDepthGuard() { --convert_depth; }
-};
-
 void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string& column_name, int8_t is_array, long fetch_mode)
 {
-    ConvertDepthGuard _depth_guard;
+    ConvertDepthGuard _depth_guard;  // shared with createColumn / insertColumn
     switch (columnRef->Type()->GetCode())
     {
     case Type::Code::UInt64:
