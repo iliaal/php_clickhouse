@@ -17,6 +17,21 @@
 */
 #include <string>
 
+/*
+ * RAII wrapper for the zend_string returned by zval_get_string. Used at
+ * PHP-to-C boundaries where the surrounding code can throw without
+ * forcing every site to write try { ... } catch { release; throw; }.
+ */
+struct ZStrGuard {
+    zend_string *s;
+    explicit ZStrGuard(zval *zv) : s(zval_get_string(zv)) {}
+    ~ZStrGuard() { if (s) zend_string_release(s); }
+    ZStrGuard(const ZStrGuard&) = delete;
+    ZStrGuard& operator=(const ZStrGuard&) = delete;
+    const char *val() const { return ZSTR_VAL(s); }
+    size_t      len() const { return ZSTR_LEN(s); }
+};
+
 clickhouse::ColumnRef createColumn(clickhouse::TypeRef type);
 
 clickhouse::ColumnRef insertColumn(clickhouse::TypeRef type, zval *value_zval);
