@@ -42,7 +42,6 @@ extern "C" {
 #include <chrono>
 #include <deque>
 #include <optional>
-#include <sstream>
 #include <unordered_map>
 
 using namespace clickhouse;
@@ -452,7 +451,7 @@ PHP_METHOD(ClickHouse, __construct)
     zval *connectParams;
 
     ZEND_PARSE_PARAMETERS_START(1, 1)
-        Z_PARAM_ZVAL(connectParams)
+        Z_PARAM_ARRAY(connectParams)
     ZEND_PARSE_PARAMETERS_END();
 
     HashTable *_ht = Z_ARRVAL_P(connectParams);
@@ -1648,7 +1647,7 @@ PHP_METHOD(ClickHouse, select)
     ZEND_PARSE_PARAMETERS_START(1, 5)
         Z_PARAM_STR(sql)
         Z_PARAM_OPTIONAL
-        Z_PARAM_ZVAL(params)
+        Z_PARAM_ARRAY(params)
         Z_PARAM_LONG(fetch_mode)
         Z_PARAM_STR(query_id)
         Z_PARAM_ARRAY(settings)
@@ -1677,7 +1676,7 @@ PHP_METHOD(ClickHouse, selectStatement)
     ZEND_PARSE_PARAMETERS_START(1, 4)
         Z_PARAM_STR(sql)
         Z_PARAM_OPTIONAL
-        Z_PARAM_ZVAL(params)
+        Z_PARAM_ARRAY(params)
         Z_PARAM_STR(query_id)
         Z_PARAM_ARRAY(settings)
     ZEND_PARSE_PARAMETERS_END();
@@ -1868,8 +1867,8 @@ PHP_METHOD(ClickHouse, insert)
 
     ZEND_PARSE_PARAMETERS_START(3, 5)
         Z_PARAM_STR(table)
-        Z_PARAM_ZVAL(columns)
-        Z_PARAM_ZVAL(values)
+        Z_PARAM_ARRAY(columns)
+        Z_PARAM_ARRAY(values)
         Z_PARAM_OPTIONAL
         Z_PARAM_STR(query_id)
         Z_PARAM_ARRAY(settings)
@@ -1896,7 +1895,7 @@ PHP_METHOD(ClickHouse, writeStart)
 
     ZEND_PARSE_PARAMETERS_START(2, 4)
         Z_PARAM_STR(table)
-        Z_PARAM_ZVAL(columns)
+        Z_PARAM_ARRAY(columns)
         Z_PARAM_OPTIONAL
         Z_PARAM_STR(query_id)
         Z_PARAM_ARRAY(settings)
@@ -1943,7 +1942,7 @@ PHP_METHOD(ClickHouse, write)
     zval *values;
 
     ZEND_PARSE_PARAMETERS_START(1, 1)
-        Z_PARAM_ZVAL(values)
+        Z_PARAM_ARRAY(values)
     ZEND_PARSE_PARAMETERS_END();
 
     zval transposed;
@@ -2116,7 +2115,7 @@ PHP_METHOD(ClickHouse, execute)
     ZEND_PARSE_PARAMETERS_START(1, 4)
         Z_PARAM_STR(sql)
         Z_PARAM_OPTIONAL
-        Z_PARAM_ZVAL(params)
+        Z_PARAM_ARRAY(params)
         Z_PARAM_STR(query_id)
         Z_PARAM_ARRAY(settings)
     ZEND_PARSE_PARAMETERS_END();
@@ -2443,7 +2442,7 @@ PHP_METHOD(ClickHouse, insertAssoc)
 
     ZEND_PARSE_PARAMETERS_START(2, 4)
         Z_PARAM_STR(table)
-        Z_PARAM_ZVAL(rows)
+        Z_PARAM_ARRAY(rows)
         Z_PARAM_OPTIONAL
         Z_PARAM_STR(query_id)
         Z_PARAM_ARRAY(settings)
@@ -2451,9 +2450,6 @@ PHP_METHOD(ClickHouse, insertAssoc)
     std::string qid = makeQid(query_id);
 
     try {
-        if (Z_TYPE_P(rows) != IS_ARRAY) {
-            throw std::runtime_error("insertAssoc: rows must be an array");
-        }
         HashTable *rows_ht = Z_ARRVAL_P(rows);
         if (zend_hash_num_elements(rows_ht) == 0) {
             throw std::runtime_error("insertAssoc: rows is empty");
@@ -2966,6 +2962,15 @@ PHP_METHOD(ClickHouse, selectStreamCallback)
                 call_user_function(NULL, NULL, cb, &retval, 1, args);
                 zval_ptr_dtor(&args[0]);
                 zval_ptr_dtor(&retval);
+                /* Match the progress / profile / verbose pattern: a throwing
+                 * row callback aborts the packet loop instead of silently
+                 * over-processing remaining rows and recording the query
+                 * as successful. The user's PHP exception is preserved in
+                 * EG(exception); the surrounding catch translates the C++
+                 * throw to recordQueryError + throwClickHouseError. */
+                if (EG(exception)) {
+                    throw std::runtime_error("row callback aborted query");
+                }
             }
         });
 
