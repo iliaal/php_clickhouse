@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.8.0] - 2026-04-27
+## [0.8.0] - 2026-04-30
 
 Architecture refactor that moves per-Client state from file-scope
 `std::map` banks onto the `zend_object` itself. The change unblocks
@@ -112,6 +112,16 @@ and geo-type round-trips, and `query_id` echo through
 - CI matrix gains a `linux-zts` job (PHP 8.4 ZTS built from source)
   and a `windows` job (build-only).
 
+### Security & Hardening
+
+- Multi-round security and correctness sweep across the input boundary,
+  Map / Int128 / hex parsers, recursion paths, and locale-sensitive
+  serialization. Wrong-type input now surfaces as `TypeError` instead
+  of corrupting memory; adversarial server schemas can no longer
+  stack-overflow the worker; narrow-int and 128-bit columns reject
+  out-of-range values up front; embedded NUL bytes no longer slip past
+  parsers; and Float / typed-parameter formatting is locale-independent.
+
 ### Fixed
 
 - IPv4 / IPv6 read paths no longer crash. Vendored clickhouse-cpp
@@ -127,6 +137,43 @@ and geo-type round-trips, and `query_id` echo through
   `free_obj` handler, which fires unconditionally. Previously the
   userspace `__destruct` didn't run on fatal errors, leaking the
   underlying `Client*` and any half-open insert stream.
+- `selectStreamCallback` row-callback exceptions abort the stream and
+  surface immediately instead of sitting buffered in `EG(exception)`
+  while the stream consumes remaining rows and `recordQuerySuccess`
+  runs. Mirrors the progress / profile / verbose callback pattern.
+- Boolean config keys (`compression`, `tcp_nodelay`, `tcp_keepalive`,
+  `ssl`, etc.) read the coerced value correctly. The prior path read
+  the lval slot after `convert_to_boolean` flipped the type tag,
+  picking up stale union storage (a freed string pointer for
+  `IS_STRING` input, dval bits for `IS_DOUBLE`); `compression => "true"`
+  silently became compression mode 0.
+- Negative seconds-based timeouts and TCP-keepalive counters reject
+  up front instead of wrapping to giant unsigned through
+  `SetSendRetries` / `SetTcpKeepAlive*`.
+- `setSettings()` rejects integer keys and empty-string keys
+  consistently with `setSetting()`. The bulk form used to silently
+  drop integer entries and store unusable empty keys.
+- `setVerbose(null)` accepts null as a synonym for `false`, matching
+  the other `?callable` setters.
+- Streaming-callback OnData, `fetchKeyPair`, and `ClickHouseStatement`
+  iterator paths plug zend_string refcount and HashTable leaks on
+  `convertToZval` throw and on object-key coercion.
+
+### Changed
+
+- `composer.json` declares `ext-json`; `config.m4` and `config.w32`
+  declare `PHP_ADD_EXTENSION_DEP(clickhouse, json)`. Loading against
+  a json-less PHP fails at install / dlopen with a clear message
+  instead of `undefined symbol: php_json_serializable_ce`.
+- `composer.json` `require.php` floor bumped to `>=7.4`. PHP 7.1–7.3
+  were never CI-tested; the prior floor was aspirational.
+- Linux glibc `x86_64` + `arm64` and macOS `x86_64` + `arm64` pre-built
+  binaries now ship via `php/pie-ext-binary-builder` on tag push
+  (`release-linux.yml`). NTS only, PHP 8.4 + 8.5. Windows binaries
+  continue via `release-windows.yml`.
+- CI gains gating ASAN (PHP 8.4), PIE install smoke (PHP 8.4 base
+  build, no TLS), `composer.json` validation, and parallel Windows
+  builds across `nts`/`ts` × `x86`/`x64`.
 
 ### Known limitations
 
@@ -453,7 +500,8 @@ own way.
   emits a clear "unsupported" warning. Full Windows build of the
   vendored zstd + absl + lz4 + cityhash is a separate project.
 
-[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.7.0...HEAD
+[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.8.0...HEAD
+[0.8.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.8.0
 [0.7.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.7.0
 [0.6.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.6.0
 [0.5.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.5.0
