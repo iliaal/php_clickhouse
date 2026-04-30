@@ -28,6 +28,7 @@ extern "C" {
 #include "Zend/zend_interfaces.h"
 #include "Zend/zend_smart_str.h"
 #include "ext/json/php_json.h"
+#include "main/snprintf.h"  // php_gcvt: locale-independent double formatter
 #include "php7_wrapper.h"
 }
 
@@ -171,6 +172,11 @@ static void clickhouse_free_obj(zend_object *object)
  */
 struct clickhouse_iter_object {
     std::vector<Block> blocks;
+    /* Column names cached once on the first OnData callback. Result-set
+     * schemas are stable across all blocks in a single query, so caching
+     * once in the iterator avoids ~10M std::string heap allocs from
+     * GetColumnName(col) on every current() call for million-row scans. */
+    std::vector<std::string> column_names;
     size_t block_idx;
     size_t row_idx;
     uint64_t cumulative_row_idx;
@@ -198,6 +204,7 @@ static zend_object *clickhouse_iter_create_object(zend_class_entry *ce)
     iter->total_rows = 0;
     iter->fetch_mode = 0;
     new (&iter->blocks) std::vector<Block>();
+    new (&iter->column_names) std::vector<std::string>();
 
     zend_object_std_init(&iter->std, ce);
     object_properties_init(&iter->std, ce);
@@ -209,6 +216,7 @@ static void clickhouse_iter_free_obj(zend_object *object)
 {
     clickhouse_iter_object *iter = clickhouse_iter_from_obj(object);
     iter->blocks.~vector<Block>();
+    iter->column_names.~vector<std::string>();
     zend_object_std_dtor(&iter->std);
 }
 
@@ -928,9 +936,18 @@ static std::string formatScalarParam(zval *v)
             return std::string(buf, (n > 0 && (size_t)n < sizeof(buf)) ? (size_t)n : 0);
         }
         case IS_DOUBLE: {
+            /* snprintf("%g") honors LC_NUMERIC, so a PHP user calling
+             * setlocale(LC_NUMERIC, 'de_DE') would emit "1,5" on the
+             * wire and the ClickHouse server would reject the typed
+             * parameter or setting value. php_gcvt takes the decimal
+             * separator and exponent char explicitly and is locale-
+             * independent, which is what we need at the SQL boundary.
+             * 17 significant digits is the IEEE 754 round-trip bound
+             * for double, matching the prior %.17g behavior. Buffer
+             * needs ~25 bytes worst case; 64 leaves comfortable margin. */
             char buf[64];
-            int n = snprintf(buf, sizeof(buf), "%.17g", Z_DVAL_P(v));
-            return std::string(buf, (n > 0 && (size_t)n < sizeof(buf)) ? (size_t)n : 0);
+            php_gcvt(Z_DVAL_P(v), 17, '.', 'e', buf);
+            return std::string(buf);
         }
         default: {
             zend_string *coerced = zval_get_string(v);
@@ -1161,6 +1178,17 @@ static void emitVerbose(clickhouse_object *obj, const char *event, zval *ctx)
         zval_ptr_dtor(&args[0]);
         zval_ptr_dtor(&args[1]);
         zval_ptr_dtor(&retval);
+        /* If the user callback raised, propagate to the packet loop so
+         * subsequent OnData / event emissions don't run, mirroring the
+         * progress / profile callback re-raise pattern. Without this,
+         * the user's PHP exception buffers in EG(exception) and bleeds
+         * onto the next unrelated query. Cleanup of payload / ctx
+         * happens after this block; do that first then throw. */
+        if (EG(exception)) {
+            zval_ptr_dtor(&payload);
+            if (ctx) zval_ptr_dtor(ctx);
+            throw std::runtime_error("verbose callback aborted query");
+        }
     }
     zval_ptr_dtor(&payload);
     if (ctx) zval_ptr_dtor(ctx);
@@ -2848,6 +2876,17 @@ PHP_METHOD(ClickHouse, selectStream)
         query.OnData([iter](const Block &block) {
             if (block.GetRowCount() == 0 || block.GetColumnCount() == 0) return;
             iter->total_rows += block.GetRowCount();
+            /* Cache column names on the first non-empty block. The schema
+             * is identical across all blocks in a single result, so we
+             * pay one std::string copy per column, once, instead of one
+             * per (row, column) on every current() call. */
+            if (iter->column_names.empty()) {
+                const size_t nc = block.GetColumnCount();
+                iter->column_names.reserve(nc);
+                for (size_t c = 0; c < nc; ++c) {
+                    iter->column_names.emplace_back(block.GetColumnName(c));
+                }
+            }
             iter->blocks.push_back(block);
         });
 
@@ -2923,11 +2962,28 @@ PHP_METHOD(ClickHouse, selectStreamCallback)
 
         query.OnData([cb](const Block &block) {
             if (block.GetRowCount() == 0 || block.GetColumnCount() == 0) return;
+            /* Hoist column names out of the row loop. clickhouse-cpp returns
+             * a fresh std::string per GetColumnName call but the names are
+             * stable across all rows of a block. */
+            const size_t col_count = block.GetColumnCount();
+            std::vector<std::string> col_names;
+            col_names.reserve(col_count);
+            for (size_t c = 0; c < col_count; ++c) {
+                col_names.emplace_back(block.GetColumnName(c));
+            }
             for (size_t row = 0; row < block.GetRowCount(); ++row) {
                 zval row_zv;
                 array_init(&row_zv);
-                for (size_t col = 0; col < block.GetColumnCount(); ++col) {
-                    convertToZval(&row_zv, block[col], row, block.GetColumnName(col), 0, 0);
+                /* Mirrors do_select_into's exception-safety pattern: a
+                 * convertToZval throw mid-row would otherwise leak the
+                 * partially-built row_zv HashTable. */
+                try {
+                    for (size_t col = 0; col < col_count; ++col) {
+                        convertToZval(&row_zv, block[col], row, col_names[col], 0, 0);
+                    }
+                } catch (...) {
+                    zval_ptr_dtor(&row_zv);
+                    throw;
                 }
                 zval args[1], retval;
                 ZVAL_NULL(&retval);
@@ -2988,10 +3044,16 @@ PHP_METHOD(ClickHouseRowIterator, current)
     array_init(return_value);
     /* convertToZval throws on unsupported / malformed server-side types.
      * The Zend dispatcher is C; let the exception cross it would be UB. */
+    static const std::string empty_name;
     try {
-        for (size_t col = 0; col < block.GetColumnCount(); ++col) {
-            convertToZval(return_value, block[col], iter->row_idx,
-                          block.GetColumnName(col), 0, 0);
+        const size_t col_count = block.GetColumnCount();
+        for (size_t col = 0; col < col_count; ++col) {
+            /* Use the iter-cached names rather than block.GetColumnName(col)
+             * which would heap-alloc a fresh std::string per cell. */
+            const std::string &name = (col < iter->column_names.size())
+                ? iter->column_names[col]
+                : empty_name;
+            convertToZval(return_value, block[col], iter->row_idx, name, 0, 0);
         }
     } catch (const std::exception &e) {
         zval_ptr_dtor(return_value);
