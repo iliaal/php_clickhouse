@@ -65,6 +65,7 @@ modules/
 
 # local AI tooling: per-developer scaffolding, not checked in
 .claude/
+.codex/
 AGENTS.md
 CLAUDE.md
 
