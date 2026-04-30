@@ -39,7 +39,6 @@ extern "C" {
 #include "lib/clickhouse-cpp/clickhouse/types/type_parser.h"
 #include "typesToPhp.hpp"
 #include <chrono>
-#include <map>
 #include <optional>
 #include <sstream>
 #include <unordered_map>
@@ -440,10 +439,9 @@ PHP_METHOD(ClickHouse, __construct)
 {
     zval *connectParams;
 
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "z", &connectParams) == FAILURE)
-    {
-        return;
-    }
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_ZVAL(connectParams)
+    ZEND_PARSE_PARAMETERS_END();
 
     HashTable *_ht = Z_ARRVAL_P(connectParams);
     zval *value;
@@ -564,33 +562,22 @@ PHP_METHOD(ClickHouse, __construct)
     }
     /* Millisecond variants override the seconds-based keys. Useful when
      * sub-second precision matters (CI test guards, low-latency hops). */
-    if (php_array_get_value(_ht, "connect_timeout_ms", value)) {
-        zend_long n = zval_get_long(value);
+    auto apply_timeout_ms = [&](const char *key,
+                                 ClientOptions& (ClientOptions::*setter)(const std::chrono::milliseconds&)) -> bool {
+        zval *v = sc_zend_hash_find(_ht, (char*)key, strlen(key));
+        if (!v || ZVAL_IS_NULL(v)) return true;
+        zend_long n = zval_get_long(v);
         if (n < 0) {
-            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
-                "connect_timeout_ms must be >= 0", 0);
-            return;
+            std::string msg = std::string(key) + " must be >= 0";
+            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, msg.c_str(), 0);
+            return false;
         }
-        Options = Options.SetConnectionConnectTimeout(std::chrono::milliseconds(n));
-    }
-    if (php_array_get_value(_ht, "receive_timeout_ms", value)) {
-        zend_long n = zval_get_long(value);
-        if (n < 0) {
-            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
-                "receive_timeout_ms must be >= 0", 0);
-            return;
-        }
-        Options = Options.SetConnectionRecvTimeout(std::chrono::milliseconds(n));
-    }
-    if (php_array_get_value(_ht, "send_timeout_ms", value)) {
-        zend_long n = zval_get_long(value);
-        if (n < 0) {
-            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
-                "send_timeout_ms must be >= 0", 0);
-            return;
-        }
-        Options = Options.SetConnectionSendTimeout(std::chrono::milliseconds(n));
-    }
+        Options = (Options.*setter)(std::chrono::milliseconds(n));
+        return true;
+    };
+    if (!apply_timeout_ms("connect_timeout_ms", &ClientOptions::SetConnectionConnectTimeout)) return;
+    if (!apply_timeout_ms("receive_timeout_ms", &ClientOptions::SetConnectionRecvTimeout))    return;
+    if (!apply_timeout_ms("send_timeout_ms",    &ClientOptions::SetConnectionSendTimeout))   return;
     if (php_array_get_value(_ht, "tcp_nodelay", value)) {
         Options = Options.TcpNoDelay(zend_is_true(value));
     }
@@ -648,20 +635,24 @@ PHP_METHOD(ClickHouse, __construct)
         // Caller can override via ssl_min_protocol_version.
         ssl_opts.SetMinProtocolVersion(0x0303);
         if (php_array_get_value(_ht, "ssl_min_protocol_version", value)) {
+            static const struct { const char *name; int version; } tls_versions[] = {
+                {"tls1.0", 0x0301}, {"tls1.1", 0x0302},
+                {"tls1.2", 0x0303}, {"tls1.3", 0x0304},
+            };
             zend_string *coerced = zval_get_string(value);
-            const char *s = ZSTR_VAL(coerced);
             int ver = 0;
-            if (strcasecmp(s, "tls1.0") == 0)      ver = 0x0301;
-            else if (strcasecmp(s, "tls1.1") == 0) ver = 0x0302;
-            else if (strcasecmp(s, "tls1.2") == 0) ver = 0x0303;
-            else if (strcasecmp(s, "tls1.3") == 0) ver = 0x0304;
-            else {
-                zend_string_release(coerced);
+            for (const auto &tv : tls_versions) {
+                if (strcasecmp(ZSTR_VAL(coerced), tv.name) == 0) {
+                    ver = tv.version;
+                    break;
+                }
+            }
+            zend_string_release(coerced);
+            if (ver == 0) {
                 sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
                     "ssl_min_protocol_version must be one of tls1.0, tls1.1, tls1.2, tls1.3", 0);
                 return;
             }
-            zend_string_release(coerced);
             ssl_opts.SetMinProtocolVersion(ver);
         }
         if (php_array_get_value(_ht, "ssl_skip_verify", value)) {
@@ -815,6 +806,13 @@ static void validateIdentifier(const char *s, size_t len, const char *what, bool
     }
 }
 
+// Convert an optional zend_string * (often the query_id PHP_METHOD
+// arg) into a std::string, treating NULL and empty as "no qid".
+static inline std::string makeQid(zend_string *s)
+{
+    return (s && ZSTR_LEN(s) > 0) ? std::string(ZSTR_VAL(s), ZSTR_LEN(s)) : std::string();
+}
+
 // Max bytes of an exception message that crosses into userland. Bigger
 // than 1024 because real ClickHouse errors with stack hints can run
 // long, smaller than the few KB that would let a verbose dump leak.
@@ -946,10 +944,19 @@ static std::string formatScalarParam(zval *v)
 static bool typeNeedsQuoting(const std::string &t)
 {
     /* Inner type for an Array(T) typed param. Numeric and bool parse
-     * raw; everything else needs single-quotes around each element. */
-    static const char *bare[] = {"Int", "UInt", "Float", "Decimal", "Bool"};
-    for (const char *p : bare) {
-        if (t.compare(0, strlen(p), p) == 0) return false;
+     * raw; everything else needs single-quotes around each element.
+     * Lengths are baked in so we don't strlen each compile-time literal
+     * on every dispatch. */
+    struct BareType { const char *prefix; size_t len; };
+    static constexpr BareType bare[] = {
+        {"Int",     3},
+        {"UInt",    4},
+        {"Float",   5},
+        {"Decimal", 7},
+        {"Bool",    4},
+    };
+    for (const auto &b : bare) {
+        if (t.compare(0, b.len, b.prefix) == 0) return false;
     }
     return true;
 }
@@ -1160,11 +1167,11 @@ static void emitVerbose(clickhouse_object *obj, const char *event, zval *ctx)
 }
 
 /*
- * Wire the protocol-level lifecycle hooks onto a Query when verbose is
- * active. Adds OnException + a wrapping OnData that emits a data_block
- * event without disturbing existing OnData consumers (they're attached
- * elsewhere in select()/execute()/insert()). Idempotent if verbose is
- * off: returns immediately so the hot path stays cheap.
+ * Attach the OnException hook so a server_exception verbose event fires
+ * with the server's code/name/message. The data_block events come from
+ * the OnData closures in do_select_into / selectStreamCallback so they
+ * have access to the per-call block_index counter. Idempotent if
+ * verbose is off so the hot path stays cheap.
  */
 static void attachVerbose(Query &q, clickhouse_object *obj)
 {
@@ -1207,6 +1214,20 @@ static void appendQueryLogCapped(clickhouse_object *obj, QueryLog &&ql)
     obj->query_log.push_back(std::move(ql));
 }
 
+/* Build the QueryLog row shared by success and error paths. Caller fills
+ * error_code / error_message for the error variant. */
+static QueryLog buildQueryLog(const clickhouse_object *obj,
+                              const std::string &sql, const std::string &qid)
+{
+    QueryLog ql;
+    ql.sql = sql;
+    ql.query_id = qid;
+    ql.elapsed_ms = obj->stats.elapsed_ms;
+    ql.rows_read = obj->stats.rows_read;
+    ql.bytes_read = obj->stats.bytes_read;
+    return ql;
+}
+
 static void recordQuerySuccess(clickhouse_object *obj, const std::string &sql, const std::string &qid)
 {
     if (!obj->log_enabled) return;
@@ -1214,13 +1235,7 @@ static void recordQuerySuccess(clickhouse_object *obj, const std::string &sql, c
      * may already be inside a catch-block (recording the previous error); a
      * second uncaught exception would call std::terminate. */
     try {
-        QueryLog ql;
-        ql.sql = sql;
-        ql.query_id = qid;
-        ql.elapsed_ms = obj->stats.elapsed_ms;
-        ql.rows_read = obj->stats.rows_read;
-        ql.bytes_read = obj->stats.bytes_read;
-        appendQueryLogCapped(obj, std::move(ql));
+        appendQueryLogCapped(obj, buildQueryLog(obj, sql, qid));
     } catch (...) { /* swallow; logging is best-effort */ }
 }
 
@@ -1228,12 +1243,7 @@ static void recordQueryError(clickhouse_object *obj, const std::string &sql, con
 {
     if (!obj->log_enabled) return;
     try {
-        QueryLog ql;
-        ql.sql = sql;
-        ql.query_id = qid;
-        ql.elapsed_ms = obj->stats.elapsed_ms;
-        ql.rows_read = obj->stats.rows_read;
-        ql.bytes_read = obj->stats.bytes_read;
+        QueryLog ql = buildQueryLog(obj, sql, qid);
         if (auto se = dynamic_cast<const clickhouse::ServerException*>(&e)) {
             ql.error_code = se->GetException().code;
         } else {
@@ -1294,11 +1304,13 @@ static std::string getInsertSql(std::string_view table_name, const zval *columns
  * Two syntaxes are supported and routed differently:
  *
  *   {name}        client-side identifier substitution. Value must
- *                 consist of identifier characters / digits / dots /
- *                 commas / parentheses / asterisks / plus-minus /
- *                 whitespace. Used for table and column names plus
- *                 simple numeric expressions; rejects every character
- *                 a SQL injection needs.
+ *                 consist of letters, digits, `_`, `.`, `,`, whitespace,
+ *                 or `-`. Used for table and column names plus simple
+ *                 dotted/comma-joined identifier lists; rejects every
+ *                 character a SQL injection needs (and the parens /
+ *                 asterisks / plus a function call or subquery would
+ *                 use). Callers that need expression fragments should
+ *                 pre-validate upstream.
  *
  *   {name:Type}   server-side parameter (ClickHouse native). The SQL
  *                 text is left untouched (the server parses {name:Type}
@@ -1607,11 +1619,15 @@ PHP_METHOD(ClickHouse, select)
     zend_string *query_id = NULL;
     zval *settings = NULL;
 
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "S|zlSa", &sql, &params, &fetch_mode, &query_id, &settings) == FAILURE)
-    {
-        return;
-    }
-    std::string qid = (query_id && ZSTR_LEN(query_id) > 0) ? std::string(ZSTR_VAL(query_id), ZSTR_LEN(query_id)) : std::string();
+    ZEND_PARSE_PARAMETERS_START(1, 5)
+        Z_PARAM_STR(sql)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ZVAL(params)
+        Z_PARAM_LONG(fetch_mode)
+        Z_PARAM_STR(query_id)
+        Z_PARAM_ARRAY(settings)
+    ZEND_PARSE_PARAMETERS_END();
+    std::string qid = makeQid(query_id);
     do_select_into(return_value, getThis(), ZSTR_VAL(sql), ZSTR_LEN(sql), params, fetch_mode, qid, settings);
 }
 /* }}} */
@@ -1632,10 +1648,14 @@ PHP_METHOD(ClickHouse, selectStatement)
     zend_string *query_id = NULL;
     zval *settings = NULL;
 
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "S|zSa", &sql, &params, &query_id, &settings) == FAILURE) {
-        return;
-    }
-    std::string qid = (query_id && ZSTR_LEN(query_id) > 0) ? std::string(ZSTR_VAL(query_id), ZSTR_LEN(query_id)) : std::string();
+    ZEND_PARSE_PARAMETERS_START(1, 4)
+        Z_PARAM_STR(sql)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ZVAL(params)
+        Z_PARAM_STR(query_id)
+        Z_PARAM_ARRAY(settings)
+    ZEND_PARSE_PARAMETERS_END();
+    std::string qid = makeQid(query_id);
 
     object_init_ex(return_value, clickhouse_statement_ce);
     clickhouse_statement_object *stmt = Z_CLICKHOUSE_STATEMENT_P(return_value);
@@ -1664,11 +1684,15 @@ PHP_METHOD(ClickHouse, insert)
 
     string sql;
 
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "Szz|Sa", &table, &columns, &values, &query_id, &settings) == FAILURE)
-    {
-        return;
-    }
-    std::string qid = (query_id && ZSTR_LEN(query_id) > 0) ? std::string(ZSTR_VAL(query_id), ZSTR_LEN(query_id)) : std::string();
+    ZEND_PARSE_PARAMETERS_START(3, 5)
+        Z_PARAM_STR(table)
+        Z_PARAM_ZVAL(columns)
+        Z_PARAM_ZVAL(values)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_STR(query_id)
+        Z_PARAM_ARRAY(settings)
+    ZEND_PARSE_PARAMETERS_END();
+    std::string qid = makeQid(query_id);
 
     // Storage for return_should lives in the function frame so that an
     // exception thrown by BeginInsert / SendInsertBlock / EndInsert can
@@ -1816,11 +1840,14 @@ PHP_METHOD(ClickHouse, writeStart)
 
     string sql;
 
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "Sz|Sa", &table, &columns, &query_id, &settings) == FAILURE)
-    {
-        return;
-    }
-    std::string qid = (query_id && ZSTR_LEN(query_id) > 0) ? std::string(ZSTR_VAL(query_id), ZSTR_LEN(query_id)) : std::string();
+    ZEND_PARSE_PARAMETERS_START(2, 4)
+        Z_PARAM_STR(table)
+        Z_PARAM_ZVAL(columns)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_STR(query_id)
+        Z_PARAM_ARRAY(settings)
+    ZEND_PARSE_PARAMETERS_END();
+    std::string qid = makeQid(query_id);
 
     clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
     try
@@ -1861,10 +1888,9 @@ PHP_METHOD(ClickHouse, write)
 {
     zval *values;
 
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "z", &values) == FAILURE)
-    {
-        return;
-    }
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_ZVAL(values)
+    ZEND_PARSE_PARAMETERS_END();
 
     zval _return_should_storage;
     zval *return_should = NULL;
@@ -1998,11 +2024,14 @@ PHP_METHOD(ClickHouse, execute)
     zend_string *query_id = NULL;
     zval *settings = NULL;
 
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "S|zSa", &sql, &params, &query_id, &settings) == FAILURE)
-    {
-        return;
-    }
-    std::string qid = (query_id && ZSTR_LEN(query_id) > 0) ? std::string(ZSTR_VAL(query_id), ZSTR_LEN(query_id)) : std::string();
+    ZEND_PARSE_PARAMETERS_START(1, 4)
+        Z_PARAM_STR(sql)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ZVAL(params)
+        Z_PARAM_STR(query_id)
+        Z_PARAM_ARRAY(settings)
+    ZEND_PARSE_PARAMETERS_END();
+    std::string qid = makeQid(query_id);
 
     clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
     try
@@ -2073,9 +2102,9 @@ PHP_METHOD(ClickHouse, execute)
 PHP_METHOD(ClickHouse, setSettings)
 {
     zval *arr;
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "a", &arr) == FAILURE) {
-        return;
-    }
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_ARRAY(arr)
+    ZEND_PARSE_PARAMETERS_END();
     clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
     std::unordered_map<std::string, std::string> m;
     HashTable *ht = Z_ARRVAL_P(arr);
@@ -2101,9 +2130,10 @@ PHP_METHOD(ClickHouse, setSetting)
 {
     zend_string *key = NULL;
     zval *value = NULL;
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "Sz", &key, &value) == FAILURE) {
-        return;
-    }
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+        Z_PARAM_STR(key)
+        Z_PARAM_ZVAL(value)
+    ZEND_PARSE_PARAMETERS_END();
     if (ZSTR_LEN(key) == 0) {
         throwClickHouseError(std::runtime_error("setting key must not be empty"));
         return;
@@ -2124,9 +2154,9 @@ PHP_METHOD(ClickHouse, setSetting)
 PHP_METHOD(ClickHouse, setDatabase)
 {
     zend_string *db = NULL;
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "S", &db) == FAILURE) {
-        return;
-    }
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(db)
+    ZEND_PARSE_PARAMETERS_END();
     try {
         validateIdentifier(ZSTR_VAL(db), ZSTR_LEN(db), "database name", false);
     } catch (const std::exception &e) {
@@ -2182,9 +2212,9 @@ static bool setCallbackField(zval *target, zval *cb, const char *err_name)
 PHP_METHOD(ClickHouse, setProgressCallback)
 {
     zval *cb;
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "z", &cb) == FAILURE) {
-        return;
-    }
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_ZVAL(cb)
+    ZEND_PARSE_PARAMETERS_END();
     clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
     if (!setCallbackField(&obj->progress_callback, cb, "setProgressCallback")) {
         return;
@@ -2203,9 +2233,9 @@ PHP_METHOD(ClickHouse, setProgressCallback)
 PHP_METHOD(ClickHouse, setProfileCallback)
 {
     zval *cb;
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "z", &cb) == FAILURE) {
-        return;
-    }
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_ZVAL(cb)
+    ZEND_PARSE_PARAMETERS_END();
     clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
     if (!setCallbackField(&obj->profile_callback, cb, "setProfileCallback")) {
         return;
@@ -2226,9 +2256,9 @@ PHP_METHOD(ClickHouse, setProfileCallback)
 PHP_METHOD(ClickHouse, setVerbose)
 {
     zval *sink;
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "z", &sink) == FAILURE) {
-        return;
-    }
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_ZVAL(sink)
+    ZEND_PARSE_PARAMETERS_END();
     clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
 
     /* Reset prior state. */
@@ -2358,10 +2388,14 @@ PHP_METHOD(ClickHouse, insertAssoc)
     zend_string *query_id = NULL;
     zval *settings = NULL;
 
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "Sz|Sa", &table, &rows, &query_id, &settings) == FAILURE) {
-        return;
-    }
-    std::string qid = (query_id && ZSTR_LEN(query_id) > 0) ? std::string(ZSTR_VAL(query_id), ZSTR_LEN(query_id)) : std::string();
+    ZEND_PARSE_PARAMETERS_START(2, 4)
+        Z_PARAM_STR(table)
+        Z_PARAM_ZVAL(rows)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_STR(query_id)
+        Z_PARAM_ARRAY(settings)
+    ZEND_PARSE_PARAMETERS_END();
+    std::string qid = makeQid(query_id);
 
     try {
         if (Z_TYPE_P(rows) != IS_ARRAY) {
@@ -2547,9 +2581,10 @@ static void runHelperSelectFirstRow(zval *return_value, zval *this_obj, const st
 PHP_METHOD(ClickHouse, databaseSize)
 {
     zend_string *db = NULL;
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "|S!", &db) == FAILURE) {
-        return;
-    }
+    ZEND_PARSE_PARAMETERS_START(0, 1)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_STR_OR_NULL(db)
+    ZEND_PARSE_PARAMETERS_END();
     std::string dbname = (db && ZSTR_LEN(db) > 0) ? std::string(ZSTR_VAL(db), ZSTR_LEN(db)) : currentDatabase(getThis());
     try {
         validateIdentifier(dbname.c_str(), dbname.size(), "database name", false);
@@ -2569,9 +2604,10 @@ PHP_METHOD(ClickHouse, databaseSize)
 PHP_METHOD(ClickHouse, tablesSize)
 {
     zend_string *db = NULL;
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "|S!", &db) == FAILURE) {
-        return;
-    }
+    ZEND_PARSE_PARAMETERS_START(0, 1)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_STR_OR_NULL(db)
+    ZEND_PARSE_PARAMETERS_END();
     std::string dbname = (db && ZSTR_LEN(db) > 0) ? std::string(ZSTR_VAL(db), ZSTR_LEN(db)) : currentDatabase(getThis());
     try {
         validateIdentifier(dbname.c_str(), dbname.size(), "database name", false);
@@ -2593,9 +2629,9 @@ PHP_METHOD(ClickHouse, tablesSize)
 PHP_METHOD(ClickHouse, partitions)
 {
     zend_string *table = NULL;
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "S", &table) == FAILURE) {
-        return;
-    }
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(table)
+    ZEND_PARSE_PARAMETERS_END();
     std::string tname(ZSTR_VAL(table), ZSTR_LEN(table));
     std::string dbname = currentDatabase(getThis());
     /* Allow `db.table` in the argument; split on the dot. */
@@ -2627,9 +2663,11 @@ PHP_METHOD(ClickHouse, partitions)
 PHP_METHOD(ClickHouse, showTables)
 {
     zend_string *db = NULL, *like = NULL;
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "|S!S!", &db, &like) == FAILURE) {
-        return;
-    }
+    ZEND_PARSE_PARAMETERS_START(0, 2)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_STR_OR_NULL(db)
+        Z_PARAM_STR_OR_NULL(like)
+    ZEND_PARSE_PARAMETERS_END();
     std::string dbname = (db && ZSTR_LEN(db) > 0) ? std::string(ZSTR_VAL(db), ZSTR_LEN(db)) : currentDatabase(getThis());
     try {
         validateIdentifier(dbname.c_str(), dbname.size(), "database name", false);
@@ -2667,9 +2705,9 @@ PHP_METHOD(ClickHouse, showTables)
 PHP_METHOD(ClickHouse, showCreateTable)
 {
     zend_string *table = NULL;
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "S", &table) == FAILURE) {
-        return;
-    }
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(table)
+    ZEND_PARSE_PARAMETERS_END();
     std::string tname(ZSTR_VAL(table), ZSTR_LEN(table));
     try {
         validateIdentifier(tname.c_str(), tname.size(), "table name", true);
@@ -2701,9 +2739,10 @@ PHP_METHOD(ClickHouse, getServerUptime)
 PHP_METHOD(ClickHouse, enableLogQueries)
 {
     zend_bool enabled = 1;
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "|b", &enabled) == FAILURE) {
-        return;
-    }
+    ZEND_PARSE_PARAMETERS_START(0, 1)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_BOOL(enabled)
+    ZEND_PARSE_PARAMETERS_END();
     clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
     obj->log_enabled = (enabled != 0);
     RETURN_TRUE;
@@ -2758,10 +2797,14 @@ PHP_METHOD(ClickHouse, selectStream)
     zend_string *query_id = NULL;
     zval *settings = NULL;
 
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "S|aSa", &sql, &params, &query_id, &settings) == FAILURE) {
-        return;
-    }
-    std::string qid = (query_id && ZSTR_LEN(query_id) > 0) ? std::string(ZSTR_VAL(query_id), ZSTR_LEN(query_id)) : std::string();
+    ZEND_PARSE_PARAMETERS_START(1, 4)
+        Z_PARAM_STR(sql)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ARRAY(params)
+        Z_PARAM_STR(query_id)
+        Z_PARAM_ARRAY(settings)
+    ZEND_PARSE_PARAMETERS_END();
+    std::string qid = makeQid(query_id);
     clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
 
     object_init_ex(return_value, clickhouse_iter_ce);
@@ -2825,9 +2868,14 @@ PHP_METHOD(ClickHouse, selectStreamCallback)
     zend_string *query_id = NULL;
     zval *settings = NULL;
 
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "Sz|aSa", &sql, &cb, &params, &query_id, &settings) == FAILURE) {
-        return;
-    }
+    ZEND_PARSE_PARAMETERS_START(2, 5)
+        Z_PARAM_STR(sql)
+        Z_PARAM_ZVAL(cb)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ARRAY(params)
+        Z_PARAM_STR(query_id)
+        Z_PARAM_ARRAY(settings)
+    ZEND_PARSE_PARAMETERS_END();
 
     if (!zend_is_callable(cb, 0, NULL)) {
         sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
@@ -2835,7 +2883,7 @@ PHP_METHOD(ClickHouse, selectStreamCallback)
         return;
     }
 
-    std::string qid = (query_id && ZSTR_LEN(query_id) > 0) ? std::string(ZSTR_VAL(query_id), ZSTR_LEN(query_id)) : std::string();
+    std::string qid = makeQid(query_id);
     clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
 
     try {
@@ -2972,9 +3020,10 @@ PHP_METHOD(ClickHouseRowIterator, count)
 PHP_METHOD(ClickHouse, isExists)
 {
     zend_string *db = NULL, *table = NULL;
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "SS", &db, &table) == FAILURE) {
-        return;
-    }
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+        Z_PARAM_STR(db)
+        Z_PARAM_STR(table)
+    ZEND_PARSE_PARAMETERS_END();
     try {
         validateIdentifier(ZSTR_VAL(db), ZSTR_LEN(db), "database name", false);
         validateIdentifier(ZSTR_VAL(table), ZSTR_LEN(table), "table name", false);
@@ -3067,9 +3116,9 @@ PHP_METHOD(ClickHouse, getServerVersion)
 PHP_METHOD(ClickHouse, tableSize)
 {
     zend_string *table = NULL;
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "S", &table) == FAILURE) {
-        return;
-    }
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(table)
+    ZEND_PARSE_PARAMETERS_END();
     std::string tname(ZSTR_VAL(table), ZSTR_LEN(table));
     std::string dbname = currentDatabase(getThis());
     auto dot = tname.find('.');
@@ -3098,9 +3147,9 @@ PHP_METHOD(ClickHouse, tableSize)
 PHP_METHOD(ClickHouse, truncateTable)
 {
     zend_string *table = NULL;
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "S", &table) == FAILURE) {
-        return;
-    }
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(table)
+    ZEND_PARSE_PARAMETERS_END();
     try {
         validateIdentifier(ZSTR_VAL(table), ZSTR_LEN(table), "table name", true);
     } catch (const std::exception &e) {
@@ -3123,9 +3172,10 @@ PHP_METHOD(ClickHouse, truncateTable)
 PHP_METHOD(ClickHouse, dropPartition)
 {
     zend_string *table = NULL, *part = NULL;
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "SS", &table, &part) == FAILURE) {
-        return;
-    }
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+        Z_PARAM_STR(table)
+        Z_PARAM_STR(part)
+    ZEND_PARSE_PARAMETERS_END();
     try {
         validateIdentifier(ZSTR_VAL(table), ZSTR_LEN(table), "table name", true);
     } catch (const std::exception &e) {
@@ -3299,7 +3349,9 @@ PHP_METHOD(ClickHouseStatement, next)
 PHP_METHOD(ClickHouseStatement, offsetExists)
 {
     zval *offset;
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "z", &offset) == FAILURE) return;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_ZVAL(offset)
+    ZEND_PARSE_PARAMETERS_END();
     clickhouse_statement_object *stmt = Z_CLICKHOUSE_STATEMENT_P(getThis());
     if (Z_TYPE(stmt->rows) != IS_ARRAY) {
         RETURN_FALSE;
@@ -3317,7 +3369,9 @@ PHP_METHOD(ClickHouseStatement, offsetExists)
 PHP_METHOD(ClickHouseStatement, offsetGet)
 {
     zval *offset;
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "z", &offset) == FAILURE) return;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_ZVAL(offset)
+    ZEND_PARSE_PARAMETERS_END();
     clickhouse_statement_object *stmt = Z_CLICKHOUSE_STATEMENT_P(getThis());
     if (Z_TYPE(stmt->rows) != IS_ARRAY) {
         RETURN_NULL();
@@ -3347,10 +3401,12 @@ PHP_METHOD(ClickHouseStatement, offsetUnset)
         "ClickHouseStatement is read-only; offsetUnset is not supported", 0);
 }
 
-PHP_METHOD(ClickHouseStatement, jsonSerialize)
+/* jsonSerialize and toArray return the same value: a copy of the
+ * stored rows array, or an empty array when the statement has none.
+ * Shared body keeps the two PHP-visible methods in lockstep. */
+static void statement_emit_rows(zval *return_value, zval *this_obj)
 {
-    if (zend_parse_parameters_none() == FAILURE) return;
-    clickhouse_statement_object *stmt = Z_CLICKHOUSE_STATEMENT_P(getThis());
+    clickhouse_statement_object *stmt = Z_CLICKHOUSE_STATEMENT_P(this_obj);
     if (Z_TYPE(stmt->rows) == IS_ARRAY) {
         ZVAL_COPY(return_value, &stmt->rows);
     } else {
@@ -3358,15 +3414,16 @@ PHP_METHOD(ClickHouseStatement, jsonSerialize)
     }
 }
 
+PHP_METHOD(ClickHouseStatement, jsonSerialize)
+{
+    if (zend_parse_parameters_none() == FAILURE) return;
+    statement_emit_rows(return_value, getThis());
+}
+
 PHP_METHOD(ClickHouseStatement, toArray)
 {
     if (zend_parse_parameters_none() == FAILURE) return;
-    clickhouse_statement_object *stmt = Z_CLICKHOUSE_STATEMENT_P(getThis());
-    if (Z_TYPE(stmt->rows) == IS_ARRAY) {
-        ZVAL_COPY(return_value, &stmt->rows);
-    } else {
-        array_init(return_value);
-    }
+    statement_emit_rows(return_value, getThis());
 }
 
 PHP_METHOD(ClickHouseStatement, statistics)

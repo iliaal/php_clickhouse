@@ -82,6 +82,20 @@ static inline int sc_zend_hash_get_current_data(HashTable *ht, void **v)
 
 #define php_array_get_value(ht, str, v) ((v = sc_zend_hash_find(ht, (char *)str, sizeof(str)-1)) && !ZVAL_IS_NULL(v))
 
+/* FAST_ZPP _OR_NULL convenience macros are PHP 8.0+. Shim for 7.4 with
+ * the older Z_PARAM_*_EX(dest, check_null, separate) form. */
+#if PHP_VERSION_ID < 80000
+#  ifndef Z_PARAM_STR_OR_NULL
+#    define Z_PARAM_STR_OR_NULL(dest)   Z_PARAM_STR_EX(dest, 1, 0)
+#  endif
+#  ifndef Z_PARAM_ARRAY_OR_NULL
+#    define Z_PARAM_ARRAY_OR_NULL(dest) Z_PARAM_ARRAY_EX(dest, 1, 0)
+#  endif
+#  ifndef Z_PARAM_ZVAL_OR_NULL
+#    define Z_PARAM_ZVAL_OR_NULL(dest)  Z_PARAM_ZVAL_EX(dest, 1, 0)
+#  endif
+#endif
+
 /*
  * gen_stub.php on PHP master emits typed-parameter, typed-return-value, and
  * typed-class-constant macros that don't exist on older PHP. Shim them to

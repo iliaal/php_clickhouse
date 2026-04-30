@@ -81,6 +81,32 @@ static size_t format_int128_dec(absl::int128 v, char *out)
 }
 
 /*
+ * Parse a decimal-digit string into a 128-bit unsigned. Both ColumnInt128
+ * and ColumnUInt128 inserts share the body; the signed wrapper composes
+ * with negate handled by the caller. Throws on overflow / non-digit.
+ *
+ * `out_label` is the type name for the error message ("Int128" / "UInt128").
+ */
+static absl::uint128 parse_uint128_dec(const char *s, size_t len, const char *out_label)
+{
+    if (len == 0 || len > 39) {
+        throw std::runtime_error(std::string(out_label) + " string is empty or too long");
+    }
+    absl::uint128 v = 0;
+    for (size_t i = 0; i < len; ++i) {
+        if (s[i] < '0' || s[i] > '9') {
+            throw std::runtime_error(std::string(out_label) + " string contains non-digit characters");
+        }
+        absl::uint128 next = v * 10 + absl::uint128((unsigned)(s[i] - '0'));
+        if (next < v) {
+            throw std::runtime_error(std::string(out_label) + " string overflows the 128-bit range");
+        }
+        v = next;
+    }
+    return v;
+}
+
+/*
  * dynamic_pointer_cast helper that throws a contextual error when the
  * cast returns null, instead of leaving the caller to deref nullptr.
  * The clickhouse-cpp Block schema metadata is server-supplied; a
@@ -439,6 +465,72 @@ static ColumnRef appendUIntColumnWithHex(HashTable *values_ht,
     return value;
 }
 
+// Build an Enum8 / Enum16 column from a PHP rows array. PHP integers
+// land in the unchecked numeric overload (the row's null mask handles
+// Nullable(Enum*); ColumnEnum*::Append(name) throws on ""), strings go
+// through the name-validating overload.
+template <typename TCol, typename TInt>
+static ColumnRef appendEnumColumn(TypeRef type, HashTable *values_ht)
+{
+    auto value = std::make_shared<TCol>(type);
+    zval *array_value;
+    ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
+        if (Z_TYPE_P(array_value) == IS_NULL) {
+            value->Append((TInt)0);
+        } else if (Z_TYPE_P(array_value) == IS_LONG) {
+            value->Append((TInt)zval_get_long(array_value));
+        } else {
+            ZStrGuard sg(array_value);
+            value->Append(std::string(sg.val(), sg.len()));
+        }
+    } ZEND_HASH_FOREACH_END();
+    return value;
+}
+
+// Build a ColumnDate / ColumnDate32 / ColumnDateTime column from a PHP
+// rows array. Each row is either an int (epoch seconds) or a "YYYY-MM-DD"
+// (or "YYYY-MM-DD HH:MM:SS" for is_date=false) string. The string path
+// goes through to_time_t which throws on parse failure.
+template <typename TCol>
+static ColumnRef appendDateColumn(HashTable *values_ht, bool is_date)
+{
+    auto value = std::make_shared<TCol>();
+    zval *array_value;
+    ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
+        if (Z_TYPE_P(array_value) == IS_STRING &&
+            memchr(Z_STRVAL_P(array_value), '-', Z_STRLEN_P(array_value)) != NULL) {
+            value->Append((std::time_t)to_time_t(
+                std::string(Z_STRVAL_P(array_value), Z_STRLEN_P(array_value)),
+                is_date));
+        } else {
+            value->Append((std::time_t)zval_get_long(array_value));
+        }
+    } ZEND_HASH_FOREACH_END();
+    return value;
+}
+
+// Build a LowCardinality(String) / LowCardinality(FixedString) column,
+// optionally wrapped in Nullable. The four code paths used to be
+// near-identical 12-line ZEND_HASH_FOREACH blocks; the template
+// parameterizes on the column type and a compile-time `nullable` flag
+// that decides whether IS_NULL maps to std::nullopt.
+template <typename TCol, bool nullable>
+static ColumnRef appendLowCardinalityColumn(HashTable *values_ht, std::shared_ptr<TCol> value)
+{
+    zval *array_value;
+    ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
+        if constexpr (nullable) {
+            if (Z_TYPE_P(array_value) == IS_NULL) {
+                value->Append(std::nullopt);
+                continue;
+            }
+        }
+        ZStrGuard sg(array_value);
+        value->Append(std::string_view(sg.val(), sg.len()));
+    } ZEND_HASH_FOREACH_END();
+    return value;
+}
+
 // Build a Float32/Float64 column from a PHP rows array.
 template <typename TCol>
 static ColumnRef appendFloatColumn(HashTable *values_ht)
@@ -687,21 +779,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     }
 
     case Type::Code::DateTime:
-    {
-        auto value = std::make_shared<ColumnDateTime>();
-
-        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
-        {
-            if (Z_TYPE_P(array_value) == IS_STRING && memchr(Z_STRVAL_P(array_value), '-', Z_STRLEN_P(array_value)) != NULL) {
-                value->Append((long)to_time_t(std::string(Z_STRVAL_P(array_value), Z_STRLEN_P(array_value)), false));
-            } else {
-                value->Append(zval_get_long(array_value));
-            }
-        }
-        ZEND_HASH_FOREACH_END();
-
-        return value;
-    }
+        return appendDateColumn<ColumnDateTime>(values_ht, /*is_date=*/false);
     case Type::Code::DateTime64:
     {
         size_t precision = type->As<DateTime64Type>()->GetPrecision();
@@ -729,35 +807,9 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         return value;
     }
     case Type::Code::Date:
-    {
-        auto value = std::make_shared<ColumnDate>();
-
-        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
-        {
-            if (Z_TYPE_P(array_value) == IS_STRING && memchr(Z_STRVAL_P(array_value), '-', Z_STRLEN_P(array_value)) != NULL) {
-                value->Append((long)to_time_t(std::string(Z_STRVAL_P(array_value), Z_STRLEN_P(array_value))));
-            } else {
-                value->Append((std::time_t)zval_get_long(array_value));
-            }
-        }
-        ZEND_HASH_FOREACH_END();
-
-        return value;
-    }
+        return appendDateColumn<ColumnDate>(values_ht, /*is_date=*/true);
     case Type::Code::Date32:
-    {
-        auto value = std::make_shared<ColumnDate32>();
-        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
-        {
-            if (Z_TYPE_P(array_value) == IS_STRING && memchr(Z_STRVAL_P(array_value), '-', Z_STRLEN_P(array_value)) != NULL) {
-                value->Append((std::time_t)to_time_t(std::string(Z_STRVAL_P(array_value), Z_STRLEN_P(array_value))));
-            } else {
-                value->Append((std::time_t)zval_get_long(array_value));
-            }
-        }
-        ZEND_HASH_FOREACH_END();
-        return value;
-    }
+        return appendDateColumn<ColumnDate32>(values_ht, /*is_date=*/true);
     case Type::Code::Time:
     {
         auto value = std::make_shared<ColumnTime>();
@@ -788,8 +840,6 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     case Type::Code::Int128:
     {
         auto value = std::make_shared<ColumnInt128>();
-        // Int128 range: -2^127 .. 2^127-1. The signed magnitude fits in 39
-        // decimal digits (2^127 = 170141183460469231731687303715884105728).
         ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
             if (Z_TYPE_P(array_value) == IS_STRING) {
@@ -798,21 +848,8 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 size_t i = 0;
                 bool neg = false;
                 if (len > 0 && (s[0] == '-' || s[0] == '+')) { neg = (s[0] == '-'); i = 1; }
-                size_t digits = len - i;
-                if (digits == 0 || digits > 39) {
-                    throw std::runtime_error("Int128 string is empty or too long");
-                }
-                Int128 v = 0;
-                for (; i < len; ++i) {
-                    if (s[i] < '0' || s[i] > '9') {
-                        throw std::runtime_error("Int128 string contains non-digit characters");
-                    }
-                    Int128 next = v * 10 + (s[i] - '0');
-                    if (next < v) {
-                        throw std::runtime_error("Int128 string overflows the 128-bit range");
-                    }
-                    v = next;
-                }
+                absl::uint128 mag = parse_uint128_dec(s + i, len - i, "Int128");
+                Int128 v = static_cast<Int128>(mag);
                 value->Append(neg ? -v : v);
             } else {
                 value->Append(Int128(zval_get_long(array_value)));
@@ -832,22 +869,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 size_t len = Z_STRLEN_P(array_value);
                 size_t i = 0;
                 if (len > 0 && s[0] == '+') { i = 1; }
-                size_t digits = len - i;
-                if (digits == 0 || digits > 39) {
-                    throw std::runtime_error("UInt128 string is empty or too long");
-                }
-                UInt128 v = 0;
-                for (; i < len; ++i) {
-                    if (s[i] < '0' || s[i] > '9') {
-                        throw std::runtime_error("UInt128 string contains non-digit characters");
-                    }
-                    UInt128 next = v * 10 + (s[i] - '0');
-                    if (next < v) {
-                        throw std::runtime_error("UInt128 string overflows the 128-bit range");
-                    }
-                    v = next;
-                }
-                value->Append(v);
+                value->Append(parse_uint128_dec(s + i, len - i, "UInt128"));
             } else {
                 zend_long n = zval_get_long(array_value);
                 if (n < 0) {
@@ -904,57 +926,9 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     }
 
     case Type::Code::Enum8:
-    {
-        auto value = std::make_shared<ColumnEnum8>(type);
-
-        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
-        {
-            // PHP NULLs reach here when the column is Nullable(Enum8); the row's
-            // null mask makes the data slot meaningless, but ColumnEnum8::Append
-            // validates names through std::map::at and throws on "". Append the
-            // unchecked int8 overload (default checkValue=false) instead.
-            if (Z_TYPE_P(array_value) == IS_NULL)
-            {
-                value->Append((int8_t)0);
-            }
-            else if (Z_TYPE_P(array_value) == IS_LONG)
-            {
-                value->Append((int8_t)zval_get_long(array_value));
-            }
-            else
-            {
-                ZStrGuard sg(array_value);
-                value->Append(std::string(sg.val(), sg.len()));
-            }
-        }
-        ZEND_HASH_FOREACH_END();
-
-        return value;
-    }
+        return appendEnumColumn<ColumnEnum8, int8_t>(type, values_ht);
     case Type::Code::Enum16:
-    {
-        auto value = std::make_shared<ColumnEnum16>(type);
-
-        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
-        {
-            if (Z_TYPE_P(array_value) == IS_NULL)
-            {
-                value->Append((int16_t)0);
-            }
-            else if (Z_TYPE_P(array_value) == IS_LONG)
-            {
-                value->Append((int16_t)zval_get_long(array_value));
-            }
-            else
-            {
-                ZStrGuard sg(array_value);
-                value->Append(std::string(sg.val(), sg.len()));
-            }
-        }
-        ZEND_HASH_FOREACH_END();
-
-        return value;
-    }
+        return appendEnumColumn<ColumnEnum16, int16_t>(type, values_ht);
 
     case Type::Code::Nullable:
     {
@@ -1064,52 +1038,20 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
 
         if (inner->GetCode() == Type::Code::String) {
             if (is_nullable) {
-                auto value = std::make_shared<ColumnLowCardinalityT<ColumnNullableT<ColumnString>>>();
-                ZEND_HASH_FOREACH_VAL(values_ht, array_value)
-                {
-                    if (Z_TYPE_P(array_value) == IS_NULL) {
-                        value->Append(std::nullopt);
-                    } else {
-                        ZStrGuard sg(array_value);
-                        value->Append(std::string_view(sg.val(), sg.len()));
-                    }
-                }
-                ZEND_HASH_FOREACH_END();
-                return value;
+                return appendLowCardinalityColumn<ColumnLowCardinalityT<ColumnNullableT<ColumnString>>, /*nullable=*/true>(
+                    values_ht, std::make_shared<ColumnLowCardinalityT<ColumnNullableT<ColumnString>>>());
             }
-            auto value = std::make_shared<ColumnLowCardinalityT<ColumnString>>();
-            ZEND_HASH_FOREACH_VAL(values_ht, array_value)
-            {
-                ZStrGuard sg(array_value);
-                value->Append(std::string_view(sg.val(), sg.len()));
-            }
-            ZEND_HASH_FOREACH_END();
-            return value;
+            return appendLowCardinalityColumn<ColumnLowCardinalityT<ColumnString>, /*nullable=*/false>(
+                values_ht, std::make_shared<ColumnLowCardinalityT<ColumnString>>());
         }
         if (inner->GetCode() == Type::Code::FixedString) {
             int width = parseFixedStringWidth(inner);
             if (is_nullable) {
-                auto value = std::make_shared<ColumnLowCardinalityT<ColumnNullableT<ColumnFixedString>>>(width);
-                ZEND_HASH_FOREACH_VAL(values_ht, array_value)
-                {
-                    if (Z_TYPE_P(array_value) == IS_NULL) {
-                        value->Append(std::nullopt);
-                    } else {
-                        ZStrGuard sg(array_value);
-                        value->Append(std::string_view(sg.val(), sg.len()));
-                    }
-                }
-                ZEND_HASH_FOREACH_END();
-                return value;
+                return appendLowCardinalityColumn<ColumnLowCardinalityT<ColumnNullableT<ColumnFixedString>>, /*nullable=*/true>(
+                    values_ht, std::make_shared<ColumnLowCardinalityT<ColumnNullableT<ColumnFixedString>>>(width));
             }
-            auto value = std::make_shared<ColumnLowCardinalityT<ColumnFixedString>>(width);
-            ZEND_HASH_FOREACH_VAL(values_ht, array_value)
-            {
-                ZStrGuard sg(array_value);
-                value->Append(std::string_view(sg.val(), sg.len()));
-            }
-            ZEND_HASH_FOREACH_END();
-            return value;
+            return appendLowCardinalityColumn<ColumnLowCardinalityT<ColumnFixedString>, /*nullable=*/false>(
+                values_ht, std::make_shared<ColumnLowCardinalityT<ColumnFixedString>>(width));
         }
         throw std::runtime_error("LowCardinality only supported over String / FixedString (Nullable allowed)");
     }
@@ -1336,7 +1278,7 @@ static inline void emitIntColumn(zval *arr, const ColumnRef& columnRef, int row,
     }
     auto col = (*col_ptr)[row];
     if (is_array) {
-        add_next_index_long(arr, (long)col);
+        add_next_index_long(arr, (zend_long)col);
     } else {
         SC_SINGLE_LONG();
     }
@@ -1431,11 +1373,11 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         std::string s = col_ip->AsString(row);
         if (is_array)
         {
-            sc_add_next_index_stringl(arr, (char*)s.data(), s.size(), 1);
+            sc_add_next_index_stringl(arr, s.data(), s.size(), 1);
         }
         else
         {
-            SC_SINGLE_STRING((char*)s.data(), s.size());
+            SC_SINGLE_STRING(s.data(), s.size());
         }
         break;
     }
@@ -1522,33 +1464,39 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             throw std::runtime_error("Decimal read: column downcast failed");
         }
         // Format with the scale point so a value inserted as "12.34" reads
-        // back as "12.34", not the unscaled storage integer 1234.
+        // back as "12.34", not the unscaled storage integer 1234. The
+        // decimal point and any leading-zero padding are inserted in
+        // place in the stack buffer so no std::string allocations fire
+        // per cell. Worst case: 1 byte sign + 39 digits + 1 '.' = 41.
         auto dec_type = columnRef->Type()->As<DecimalType>();
         size_t scale = dec_type ? dec_type->GetScale() : 0;
         Int128 raw = col->At(row);
-        char buf[41];
+        char buf[64];
         size_t l = format_int128_dec(raw, buf);
         if (scale > 0) {
             bool neg = (buf[0] == '-');
-            char *digits = neg ? buf + 1 : buf;
-            size_t dlen = neg ? l - 1 : l;
-            std::string abs(digits, dlen);
-            if (abs.size() <= scale) {
-                abs.insert(0, scale + 1 - abs.size(), '0');
+            size_t sign_off = neg ? 1 : 0;
+            size_t dlen = l - sign_off;
+            // If dlen <= scale we need to pad: insert (scale+1 - dlen)
+            // zeros after the sign, so "5" with scale 3 → "0.005"
+            // (sign_off + 5 chars: 0 . 0 0 5).
+            if (dlen <= scale) {
+                size_t pad = scale + 1 - dlen;
+                memmove(buf + sign_off + pad, buf + sign_off, dlen);
+                memset(buf + sign_off, '0', pad);
+                l += pad;
+                dlen += pad;
             }
-            abs.insert(abs.size() - scale, ".");
-            std::string s = neg ? ("-" + abs) : abs;
-            if (is_array) {
-                sc_add_next_index_stringl(arr, (char*)s.c_str(), s.length(), 1);
-            } else {
-                SC_SINGLE_STRING((char*)s.c_str(), s.length());
-            }
+            // Insert '.' before the last `scale` digits.
+            size_t dot_pos = sign_off + dlen - scale;
+            memmove(buf + dot_pos + 1, buf + dot_pos, scale);
+            buf[dot_pos] = '.';
+            ++l;
+        }
+        if (is_array) {
+            sc_add_next_index_stringl(arr, buf, l, 1);
         } else {
-            if (is_array) {
-                sc_add_next_index_stringl(arr, buf, l, 1);
-            } else {
-                SC_SINGLE_STRING(buf, l);
-            }
+            SC_SINGLE_STRING(buf, l);
         }
         break;
     }
@@ -1561,11 +1509,11 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         auto col = (*s_col)[row];
         if (is_array)
         {
-            sc_add_next_index_stringl(arr, (char*)col.data(), col.length(), 1);
+            sc_add_next_index_stringl(arr, col.data(), col.length(), 1);
         }
         else
         {
-            SC_SINGLE_STRING((char*)col.data(), col.length());
+            SC_SINGLE_STRING(col.data(), col.length());
         }
         break;
     }
@@ -1586,11 +1534,11 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         }
         if (is_array)
         {
-            sc_add_next_index_stringl(arr, (char*)col.data(), len, 1);
+            sc_add_next_index_stringl(arr, col.data(), len, 1);
         }
         else
         {
-            SC_SINGLE_STRING((char*)col.data(), len);
+            SC_SINGLE_STRING(col.data(), len);
         }
         break;
     }
@@ -1604,11 +1552,11 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         std::string s = col_ip->AsString(row);
         if (is_array)
         {
-            sc_add_next_index_stringl(arr, (char*)s.data(), s.size(), 1);
+            sc_add_next_index_stringl(arr, s.data(), s.size(), 1);
         }
         else
         {
-            SC_SINGLE_STRING((char*)s.data(), s.size());
+            SC_SINGLE_STRING(s.data(), s.size());
         }
         break;
     }
@@ -1657,9 +1605,9 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             }
         } else {
             if (is_array) {
-                add_next_index_long(arr, (long)raw);
+                add_next_index_long(arr, (zend_long)raw);
             } else if (fetch_mode & SC_FETCH_ONE) {
-                ZVAL_LONG(arr, (long)raw);
+                ZVAL_LONG(arr, (zend_long)raw);
             } else {
                 sc_add_assoc_long_ex(arr, column_name.c_str(), column_name.length(), (zend_long)raw);
             }
@@ -1705,9 +1653,9 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             }
         } else {
             if (is_array) {
-                add_next_index_long(arr, (long)v);
+                add_next_index_long(arr, (zend_long)v);
             } else if (fetch_mode & SC_FETCH_ONE) {
-                ZVAL_LONG(arr, (long)v);
+                ZVAL_LONG(arr, (zend_long)v);
             } else {
                 sc_add_assoc_long_ex(arr, column_name.c_str(), column_name.length(), (zend_long)v);
             }
@@ -1751,9 +1699,9 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             }
         } else {
             if (is_array) {
-                add_next_index_long(arr, (long)raw);
+                add_next_index_long(arr, (zend_long)raw);
             } else if (fetch_mode & SC_FETCH_ONE) {
-                ZVAL_LONG(arr, (long)raw);
+                ZVAL_LONG(arr, (zend_long)raw);
             } else {
                 sc_add_assoc_long_ex(arr, column_name.c_str(), column_name.length(), (zend_long)raw);
             }
@@ -1832,11 +1780,11 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         std::string_view name = array->NameAt(row);
         if (is_array)
         {
-            sc_add_next_index_stringl(arr, (char*)name.data(), name.length(), 1);
+            sc_add_next_index_stringl(arr, name.data(), name.length(), 1);
         }
         else
         {
-            SC_SINGLE_STRING((char*)name.data(), name.length());
+            SC_SINGLE_STRING(name.data(), name.length());
         }
         break;
     }
@@ -1849,11 +1797,11 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         std::string_view name = array->NameAt(row);
         if (is_array)
         {
-            sc_add_next_index_stringl(arr, (char*)name.data(), name.length(), 1);
+            sc_add_next_index_stringl(arr, name.data(), name.length(), 1);
         }
         else
         {
-            SC_SINGLE_STRING((char*)name.data(), name.length());
+            SC_SINGLE_STRING(name.data(), name.length());
         }
         break;
     }
@@ -1961,9 +1909,9 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             sv = std::string_view(sv.data(), len);
         }
         if (is_array) {
-            sc_add_next_index_stringl(arr, (char*)sv.data(), sv.length(), 1);
+            sc_add_next_index_stringl(arr, sv.data(), sv.length(), 1);
         } else {
-            SC_SINGLE_STRING((char*)sv.data(), sv.length());
+            SC_SINGLE_STRING(sv.data(), sv.length());
         }
         break;
     }
@@ -2045,13 +1993,13 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         auto addStrL = [&](int kkind, const std::string &sb, zend_long lk, double dk,
                            const char *vptr, size_t vlen) {
             if (kkind == 0) {
-                sc_add_assoc_stringl_ex(map_zv, sb.c_str(), sb.length(), (char*)vptr, vlen, 1);
+                sc_add_assoc_stringl_ex(map_zv, sb.c_str(), sb.length(), vptr, vlen, 1);
             } else if (kkind == 1) {
-                add_index_stringl(map_zv, lk, (char*)vptr, vlen);
+                add_index_stringl(map_zv, lk, vptr, vlen);
             } else {
                 char kbuf[64];
                 int klen = snprintf(kbuf, sizeof(kbuf), "%.17g", dk);
-                sc_add_assoc_stringl_ex(map_zv, kbuf, klen, (char*)vptr, vlen, 1);
+                sc_add_assoc_stringl_ex(map_zv, kbuf, klen, vptr, vlen, 1);
             }
         };
         auto addLong = [&](int kkind, const std::string &sb, zend_long lk, double dk, zend_long lv) {
