@@ -466,10 +466,17 @@ static ColumnRef appendUIntColumnWithHex(HashTable *values_ht,
             *Z_STRVAL_P(array_value) == '0' &&
             (*(Z_STRVAL_P(array_value) + 1) == 'x' || *(Z_STRVAL_P(array_value) + 1) == 'X')) {
             const char *s = Z_STRVAL_P(array_value);
+            size_t slen = Z_STRLEN_P(array_value);
             char *endp = NULL;
             errno = 0;
             auto n = strtoul_fn(s, &endp, 0);
-            if (errno == ERANGE || endp == s || (endp && *endp != '\0')) {
+            /* PHP zend_string is length-prefixed and may carry embedded
+             * NUL bytes. Comparing endp against ZSTR_LEN is the right
+             * "fully consumed" check; checking *endp == '\0' would let
+             * "0xABCD\0garbage" silently parse as 0xABCD because endp
+             * lands on the NUL. Same fix CR-306 applied to Map keys. */
+            if (errno == ERANGE || endp == s ||
+                (size_t)(endp - s) != slen) {
                 throw std::runtime_error(
                     std::string("invalid hex literal for ") + type_label);
             }
