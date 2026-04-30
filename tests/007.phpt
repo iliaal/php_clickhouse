@@ -38,7 +38,7 @@ function testFloat($client, $deleteTable = false) {
     $client->writeEnd();
     
     $result = $client->select("SELECT {select} FROM {table} ORDER BY float64_c DESC, float32_c DESC", [
-        'select' => 'float32_c, float64_c',
+        'select' => ['float32_c', 'float64_c'],
         'table' => 'test.float_test'
     ]);
     var_dump($result);

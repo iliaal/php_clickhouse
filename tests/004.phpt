@@ -35,7 +35,7 @@ function testString($client, $deleteTable = false) {
     ]);
     
     $result = $client->select("SELECT {select} FROM {table}", [
-        'select' => 'string_c, fixedstring_c',
+        'select' => ['string_c', 'fixedstring_c'],
         'table' => 'test.string_test'
     ]);
     var_dump($result);

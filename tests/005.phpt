@@ -33,7 +33,7 @@ function testNullAble($client, $deleteTable = false) {
     ]);
 
     $result = $client->select("SELECT {select} FROM {table}", [
-        'select' => 'int8null_c, stringnull_c, enumnull_c, float32null_c, uuidnull_c',
+        'select' => ['int8null_c', 'stringnull_c', 'enumnull_c', 'float32null_c', 'uuidnull_c'],
         'table' => 'test.nullable_test'
     ]);
     var_dump($result);

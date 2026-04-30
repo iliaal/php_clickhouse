@@ -22,6 +22,8 @@ $c->execute("CREATE TABLE test.fr1_secret (tenant Int32) ENGINE=Memory");
 
 $probes_reject = [
     "join smuggle"      => "test.fr1_a ANY INNER JOIN test.fr1_secret USING tenant",
+    "comma list"        => "test.fr1_a, test.fr1_secret",
+    "comma plain"       => "a, b, c",
     "internal space"    => "tbl name",
     "internal tab"      => "tbl\tname",
     "leading space"     => " tbl",
@@ -43,8 +45,6 @@ foreach ($probes_reject as $label => $val) {
 $probes_ok = [
     "identifier"        => "tbl_name",
     "db.tbl"            => "test.fr1_a",
-    "comma list"        => "a, b, c",
-    "comma list dot"    => "test.fr1_a, test.fr1_secret",
     "numeric int"       => "42",
     "numeric float"     => "1.5",
     "numeric exp"       => "1.5e3",
@@ -64,6 +64,8 @@ foreach (["fr1_a","fr1_secret"] as $t) $c->execute("DROP TABLE test.$t");
 ?>
 --EXPECT--
 join smuggle: REJECTED
+comma list: REJECTED
+comma plain: REJECTED
 internal space: REJECTED
 internal tab: REJECTED
 leading space: REJECTED
@@ -76,8 +78,6 @@ sign without digit: REJECTED
 exponent without digit: REJECTED
 identifier: ALLOWED
 db.tbl: ALLOWED
-comma list: ALLOWED
-comma list dot: ALLOWED
 numeric int: ALLOWED
 numeric float: ALLOWED
 numeric exp: ALLOWED

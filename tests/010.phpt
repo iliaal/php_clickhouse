@@ -28,7 +28,7 @@ function testTuple($client, $deleteTable = false) {
         [[2, 'two'], 2, 'two'],
     ]);
     $result = $client->select("SELECT {select} FROM {table}", [
-        'select' => 'tuple_c, int_c, string_c',
+        'select' => ['tuple_c', 'int_c', 'string_c'],
         'table' => 'test.tuple_test'
     ]);
     var_dump($result);
