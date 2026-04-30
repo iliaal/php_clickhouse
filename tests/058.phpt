@@ -40,7 +40,7 @@ foreach ($probes as $label => $val) {
         // Distinguish placeholder-validator rejections from server-side
         // SQL parse errors (the "ok" cases hit the server with an invalid
         // SQL fragment and come back with a parse error).
-        if (strpos($msg, "unsafe character") !== false) {
+        if (strpos($msg, "Placeholder value for") !== false) {
             echo "$label: REJECTED\n";
         } else {
             echo "$label: ALLOWED (server-rejected)\n";
