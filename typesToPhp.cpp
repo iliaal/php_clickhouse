@@ -691,21 +691,56 @@ static ColumnRef appendUIntColumnWithHex(HashTable *values_ht,
     return value;
 }
 
-// Build an Enum8 / Enum16 column from a PHP rows array. PHP integers
-// land in the unchecked numeric overload (the row's null mask handles
-// Nullable(Enum*); ColumnEnum*::Append(name) throws on ""), strings go
-// through the name-validating overload.
+// Build an Enum8 / Enum16 column from a PHP rows array. Integer cells
+// validate against the type's declared value set; the prior unchecked
+// Append silently stored values like 0 / 3 / 127 inside an
+// `Enum8('One'=1,'Two'=2)` column, after which normal reads threw
+// `map::at` because the read path looks up the name for the stored
+// integer. String cells go through ColumnEnum*::Append(name) which
+// validates internally.
+//
+// IS_NULL handling: rejected for non-Nullable enums (would otherwise
+// store raw 0, which is usually not a declared enum value and poisons
+// reads). The Nullable insert path bumps AllowNullGuard so its
+// recursive child build accepts NULL → declared-value placeholder; the
+// null mask captures the actual NULL.
 template <typename TCol, typename TInt>
 static ColumnRef appendEnumColumn(TypeRef type, HashTable *values_ht)
 {
     auto value = std::make_shared<TCol>(type);
+    auto enum_type = type->As<clickhouse::EnumType>();
+    /* Choose a placeholder int that's actually declared in the enum so
+     * NULL cells under AllowNullGuard land safely. EnumType exposes
+     * begin()/end() iterators over (name, value) pairs; just take the
+     * first one. enum_type can be null on an unexpected schema; in
+     * that case we conservatively use 0 and let HasEnumValue reject. */
+    TInt placeholder = 0;
+    if (enum_type) {
+        auto it = enum_type->BeginValueToName();
+        if (it != enum_type->EndValueToName()) {
+            placeholder = (TInt)it->first;
+        }
+    }
     zval *array_value;
     ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
         if (Z_TYPE_P(array_value) == IS_NULL) {
-            value->Append((TInt)0);
+            if (g_allow_null_in_strict <= 0) {
+                throw std::runtime_error(
+                    "null cannot be assigned to non-Nullable Enum column");
+            }
+            value->Append(placeholder);
         } else if (Z_TYPE_P(array_value) == IS_LONG) {
-            value->Append((TInt)zval_get_long(array_value));
+            zend_long n = Z_LVAL_P(array_value);
+            int16_t narrow = (int16_t)n;
+            if ((zend_long)narrow != n || !enum_type || !enum_type->HasEnumValue(narrow)) {
+                throw std::runtime_error(
+                    "Enum integer value " + std::to_string(n) +
+                    " is not declared in " + type->GetName());
+            }
+            value->Append((TInt)narrow);
         } else {
+            /* String path: ColumnEnum*::Append(name) validates internally
+             * and throws on unknown names. */
             ZStrGuard sg(array_value);
             value->Append(std::string(sg.val(), sg.len()));
         }

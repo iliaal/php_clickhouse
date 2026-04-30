@@ -28,9 +28,11 @@ foreach ($cases as [$label, $input, $expected]) {
     $r = new ReflectionObject($c);
     $p = $r->getProperty("compression");
     // PHP 7.4 enforces visibility on Reflection getValue() against
-    // protected properties; PHP 8.1+ implicitly makes Reflection
-    // accessors bypass the check.
-    $p->setAccessible(true);
+    // protected properties; PHP 8.1+ accessors bypass the check
+    // implicitly and PHP 8.5 deprecated the method outright.
+    if (PHP_VERSION_ID < 80100) {
+        $p->setAccessible(true);
+    }
     $got = $p->getValue($c);
     echo "compression=$label expected=$expected got=$got\n";
 }

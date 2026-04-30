@@ -1365,14 +1365,29 @@ static std::string getInsertSql(std::string_view table_name, const zval *columns
  *
  * Two syntaxes are supported and routed differently:
  *
- *   {name}        client-side identifier substitution. Value must
- *                 consist of letters, digits, `_`, `.`, `,`, whitespace,
- *                 or `-`. Used for table and column names plus simple
- *                 dotted/comma-joined identifier lists; rejects every
- *                 character a SQL injection needs (and the parens /
- *                 asterisks / plus a function call or subquery would
- *                 use). Callers that need expression fragments should
- *                 pre-validate upstream.
+ *   {name}        client-side identifier substitution. Two value
+ *                 shapes:
+ *
+ *                   - Scalar (string / int / float / bool): the value
+ *                     coerces to one token, validated as either a
+ *                     single identifier (`[A-Za-z_][A-Za-z0-9_]*`,
+ *                     optionally db-qualified by exactly one dot) or
+ *                     a numeric literal (optional sign, digits,
+ *                     optional fractional part, optional exponent).
+ *                     Whitespace, commas, and any other punctuation
+ *                     are rejected — the prior whitelist allowed
+ *                     comma-lists, which let `{tbl}` with value
+ *                     "a, b" turn `FROM {tbl}` into a cross join.
+ *
+ *                   - Array: each element is validated as a single
+ *                     scalar token by the same rule, then the
+ *                     elements are joined with ", " for the SQL
+ *                     replacement. Use this for legitimate column
+ *                     lists; an element with internal whitespace or
+ *                     commas is still rejected.
+ *
+ *                 Used for table and column names. Callers that need
+ *                 expression fragments should pre-validate upstream.
  *
  *   {name:Type}   server-side parameter (ClickHouse native). The SQL
  *                 text is left untouched (the server parses {name:Type}

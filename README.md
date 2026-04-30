@@ -282,12 +282,18 @@ $ch->dropPartition(string $table, string $partition);
 
 Two placeholder syntaxes are supported in `select` / `execute`:
 
-- `{name}` is client-side identifier substitution. The value is validated against an identifier-and-numerics character set; quotes, semicolons, backslashes, and other SQL meta-characters are rejected before the SQL is built. Use this for table and column names.
+- `{name}` is client-side identifier substitution. Two value shapes:
+  - **Scalar** (string / int / float): coerces to a single token, validated as either an identifier (`[A-Za-z_][A-Za-z0-9_]*`, optionally db-qualified by one dot like `db.tbl`) or a numeric literal. Whitespace, commas, quotes, semicolons, backslashes, and other SQL meta-characters are rejected.
+  - **Array**: each element is validated as a single scalar token, then joined with `", "` for the SQL replacement. Use this for legitimate column lists; an element with internal whitespace or commas is still rejected. A scalar value containing commas is rejected — that ambiguity (single identifier vs. list) is the point of the array-shape API.
 - `{name:Type}` is a server-side typed parameter. The SQL text is passed through unchanged; the value is bound via `Query::SetParam` and the server quotes and parses it according to `Type`. Pass PHP arrays for `Array(T)` types; `null` becomes a server `NULL`.
 
 ```php
-// Identifier substitution.
+// Single-identifier substitution.
 $ch->select("SELECT * FROM {tbl}", ["tbl" => "users"]);
+
+// Column-list substitution via array value.
+$ch->select("SELECT {cols} FROM users",
+            ["cols" => ["id", "name", "email"]]);
 
 // Server-side typed parameters, no client-side quoting needed.
 $ch->select("SELECT * FROM users WHERE id IN ({ids:Array(UInt32)})",
