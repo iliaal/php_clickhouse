@@ -353,6 +353,7 @@ PHP_MINIT_FUNCTION(clickhouse)
 #endif
 
     clickhouse_ce = register_class_ClickHouse();
+    clickhouse_ce->ce_flags |= ZEND_ACC_NOT_SERIALIZABLE;
     clickhouse_ce->create_object = clickhouse_create_object;
 #if PHP_VERSION_ID >= 80400
     clickhouse_ce->default_object_handlers = &clickhouse_object_handlers;
@@ -365,6 +366,7 @@ PHP_MINIT_FUNCTION(clickhouse)
     clickhouse_exception_ce = register_class_ClickHouseException(zend_ce_exception);
 
     clickhouse_iter_ce = register_class_ClickHouseRowIterator(zend_ce_iterator, zend_ce_countable);
+    clickhouse_iter_ce->ce_flags |= ZEND_ACC_NOT_SERIALIZABLE;
     clickhouse_iter_ce->create_object = clickhouse_iter_create_object;
 #if PHP_VERSION_ID >= 80400
     clickhouse_iter_ce->default_object_handlers = &clickhouse_iter_object_handlers;
@@ -375,6 +377,7 @@ PHP_MINIT_FUNCTION(clickhouse)
     clickhouse_iter_object_handlers.free_obj = clickhouse_iter_free_obj;
 
     clickhouse_statement_ce = register_class_ClickHouseStatement(zend_ce_iterator, zend_ce_countable, zend_ce_arrayaccess, php_json_serializable_ce);
+    clickhouse_statement_ce->ce_flags |= ZEND_ACC_NOT_SERIALIZABLE;
     clickhouse_statement_ce->create_object = clickhouse_statement_create_object;
 #if PHP_VERSION_ID >= 80400
     clickhouse_statement_ce->default_object_handlers = &clickhouse_statement_object_handlers;
@@ -449,7 +452,13 @@ PHP_METHOD(ClickHouse, __construct)
     if (php_array_get_value(_ht, "port", value))
     {
         convert_to_long(value);
-        sc_zend_update_property_long(clickhouse_ce, this_obj, "port", sizeof("port") - 1, Z_LVAL_P(value));
+        zend_long _p = Z_LVAL_P(value);
+        if (_p < 1 || _p > 65535) {
+            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                "port out of 1..65535 range", 0);
+            return;
+        }
+        sc_zend_update_property_long(clickhouse_ce, this_obj, "port", sizeof("port") - 1, _p);
     }
 
     if (php_array_get_value(_ht, "compression", value))
@@ -505,8 +514,8 @@ PHP_METHOD(ClickHouse, __construct)
     zval *connect_timeout = sc_zend_read_property(clickhouse_ce, this_obj, "connect_timeout", sizeof("connect_timeout") - 1, 0);
 
     ClientOptions Options = ClientOptions()
-                            .SetHost(Z_STRVAL_P(host))
-                            .SetPort(Z_LVAL_P(port))
+                            .SetHost(std::string(Z_STRVAL_P(host), Z_STRLEN_P(host)))
+                            .SetPort((uint16_t)Z_LVAL_P(port))
                             .SetSendRetries(Z_LVAL_P(retry_count))
                             .SetRetryTimeout(std::chrono::seconds(Z_LVAL_P(retry_timeout)))
                             .SetConnectionRecvTimeout(std::chrono::seconds(Z_LVAL_P(receive_timeout)))
@@ -688,20 +697,20 @@ PHP_METHOD(ClickHouse, __construct)
     {
         convert_to_string(value);
         sc_zend_update_property_string(clickhouse_ce, this_obj, "database", sizeof("database") - 1, Z_STRVAL_P(value));
-        Options = Options.SetDefaultDatabase(Z_STRVAL_P(value));
+        Options = Options.SetDefaultDatabase(std::string(Z_STRVAL_P(value), Z_STRLEN_P(value)));
     }
 
     if (php_array_get_value(_ht, "user", value))
     {
         convert_to_string(value);
         sc_zend_update_property_string(clickhouse_ce, this_obj, "user", sizeof("user") - 1, Z_STRVAL_P(value));
-        Options = Options.SetUser(Z_STRVAL_P(value));
+        Options = Options.SetUser(std::string(Z_STRVAL_P(value), Z_STRLEN_P(value)));
     }
 
     if (php_array_get_value(_ht, "passwd", value))
     {
         convert_to_string(value);
-        Options = Options.SetPassword(Z_STRVAL_P(value));
+        Options = Options.SetPassword(std::string(Z_STRVAL_P(value), Z_STRLEN_P(value)));
     }
 
     try
@@ -1099,31 +1108,38 @@ static void resetStats(clickhouse_object *obj)
 static void recordQuerySuccess(clickhouse_object *obj, const std::string &sql, const std::string &qid)
 {
     if (!obj->log_enabled) return;
-    QueryLog ql;
-    ql.sql = sql;
-    ql.query_id = qid;
-    ql.elapsed_ms = obj->stats.elapsed_ms;
-    ql.rows_read = obj->stats.rows_read;
-    ql.bytes_read = obj->stats.bytes_read;
-    obj->query_log.push_back(std::move(ql));
+    /* Never let a nested allocation failure here escape the wrapper. The caller
+     * may already be inside a catch-block (recording the previous error); a
+     * second uncaught exception would call std::terminate. */
+    try {
+        QueryLog ql;
+        ql.sql = sql;
+        ql.query_id = qid;
+        ql.elapsed_ms = obj->stats.elapsed_ms;
+        ql.rows_read = obj->stats.rows_read;
+        ql.bytes_read = obj->stats.bytes_read;
+        obj->query_log.push_back(std::move(ql));
+    } catch (...) { /* swallow; logging is best-effort */ }
 }
 
 static void recordQueryError(clickhouse_object *obj, const std::string &sql, const std::string &qid, const std::exception &e)
 {
     if (!obj->log_enabled) return;
-    QueryLog ql;
-    ql.sql = sql;
-    ql.query_id = qid;
-    ql.elapsed_ms = obj->stats.elapsed_ms;
-    ql.rows_read = obj->stats.rows_read;
-    ql.bytes_read = obj->stats.bytes_read;
-    if (auto se = dynamic_cast<const clickhouse::ServerException*>(&e)) {
-        ql.error_code = se->GetException().code;
-    } else {
-        ql.error_code = -1;
-    }
-    ql.error_message = sanitizeError(e.what());
-    obj->query_log.push_back(std::move(ql));
+    try {
+        QueryLog ql;
+        ql.sql = sql;
+        ql.query_id = qid;
+        ql.elapsed_ms = obj->stats.elapsed_ms;
+        ql.rows_read = obj->stats.rows_read;
+        ql.bytes_read = obj->stats.bytes_read;
+        if (auto se = dynamic_cast<const clickhouse::ServerException*>(&e)) {
+            ql.error_code = se->GetException().code;
+        } else {
+            ql.error_code = -1;
+        }
+        ql.error_message = sanitizeError(e.what());
+        obj->query_log.push_back(std::move(ql));
+    } catch (...) { /* swallow; logging must not throw from inside a catch */ }
 }
 
 void getInsertSql(string *sql, char *table_name, zval *columns)
@@ -2724,8 +2740,17 @@ PHP_METHOD(ClickHouseRowIterator, current)
         RETURN_NULL();
     }
     array_init(return_value);
-    for (size_t col = 0; col < block.GetColumnCount(); ++col) {
-        convertToZval(return_value, block[col], iter->row_idx, block.GetColumnName(col), 0, 0);
+    /* convertToZval throws on unsupported / malformed server-side types.
+     * The Zend dispatcher is C; let the exception cross it would be UB. */
+    try {
+        for (size_t col = 0; col < block.GetColumnCount(); ++col) {
+            convertToZval(return_value, block[col], iter->row_idx,
+                          block.GetColumnName(col), 0, 0);
+        }
+    } catch (const std::exception &e) {
+        zval_ptr_dtor(return_value);
+        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, e.what(), 0);
+        RETURN_NULL();
     }
 }
 
@@ -2933,12 +2958,16 @@ PHP_METHOD(ClickHouse, dropPartition)
             return;
         }
     }
-    /* SQL-standard single-quote doubling. */
+    /* ClickHouse accepts both SQL-standard '' and C-style \' as escapes inside
+     * single-quoted literals; backslash must be escaped too or '\'' would be
+     * parsed as an escaped quote followed by a closing quote. */
     std::string escaped;
-    escaped.reserve(ZSTR_LEN(part) + 4);
+    escaped.reserve(ZSTR_LEN(part) + 8);
     for (size_t i = 0; i < ZSTR_LEN(part); ++i) {
-        if (ZSTR_VAL(part)[i] == '\'') escaped += "''";
-        else escaped += ZSTR_VAL(part)[i];
+        char c = ZSTR_VAL(part)[i];
+        if (c == '\'')      escaped += "\\'";
+        else if (c == '\\') escaped += "\\\\";
+        else                escaped += c;
     }
     std::string sql = "ALTER TABLE " + std::string(ZSTR_VAL(table), ZSTR_LEN(table)) +
         " DROP PARTITION '" + escaped + "'";
