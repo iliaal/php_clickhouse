@@ -1558,8 +1558,14 @@ static void do_select_into(zval *out, zval *this_obj,
                     if (Z_TYPE(kp_col1) == IS_LONG) {
                          sc_zend_hash_index_update(Z_ARRVAL_P(out), Z_LVAL(kp_col1), &kp_col2);
                     } else {
-                        convert_to_string(&kp_col1);
-                        zend_symtable_update(Z_ARRVAL_P(out), Z_STR(kp_col1), &kp_col2);
+                        /* zval_get_string is the modern non-mutating
+                         * coercion (matches the post-CR-312 fetchKeyPair
+                         * path). The prior convert_to_string mutated
+                         * kp_col1 in place; both worked but the new form
+                         * keeps the two key-pair paths in lockstep. */
+                        zend_string *coerced = zval_get_string(&kp_col1);
+                        zend_symtable_update(Z_ARRVAL_P(out), coerced, &kp_col2);
+                        zend_string_release(coerced);
                     }
                     zval_ptr_dtor(&kp_col1);
                     continue;
