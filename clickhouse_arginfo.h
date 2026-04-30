@@ -1,5 +1,5 @@
 /* This is a generated file, edit clickhouse.stub.php instead.
- * Stub hash: ff72082d4d1a5668f78eb849284fa2fd3d76ce53 */
+ * Stub hash: 0540ef51645d51aa12734fa9b708ee7a6d326fa0 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_ClickHouse___construct, 0, 0, 1)
 	ZEND_ARG_TYPE_INFO(0, connectParams, IS_ARRAY, 0)
@@ -421,9 +421,9 @@ static zend_class_entry *register_class_ClickHouse(void)
 	zend_declare_typed_property(class_entry, ZSTR_KNOWN(ZEND_STR_USER), &property_user_default_value, ZEND_ACC_PROTECTED, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_STRING|MAY_BE_NULL));
 
 	zval property_compression_default_value;
-	ZVAL_FALSE(&property_compression_default_value);
+	ZVAL_LONG(&property_compression_default_value, 0);
 	zend_string *property_compression_name = zend_string_init("compression", sizeof("compression") - 1, true);
-	zend_declare_typed_property(class_entry, property_compression_name, &property_compression_default_value, ZEND_ACC_PROTECTED, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_BOOL));
+	zend_declare_typed_property(class_entry, property_compression_name, &property_compression_default_value, ZEND_ACC_PROTECTED, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_LONG));
 	zend_string_release_ex(property_compression_name, true);
 
 	zval property_retry_timeout_default_value;

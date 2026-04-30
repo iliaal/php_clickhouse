@@ -6,10 +6,11 @@ ClickHouse client-side {name} placeholder rejects unsafe characters (parens, sta
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression for CR-016: the client-side {name} placeholder validator
-// previously accepted `*`, `(`, `)`, `+` which let function-call and
-// subquery-shaped fragments smuggle into identifier positions. The
-// whitelist is now letters/digits/_/./,/whitespace/-.
+// Regression for CR-016 + CR-002: the client-side {name} placeholder
+// validator previously accepted `*`, `(`, `)`, `+` (CR-016) and then
+// `-` (CR-002), which let `tbl --` start a SQL line comment that
+// commented out the trailing predicate. The whitelist is now
+// letters/digits/_/./,/whitespace.
 
 $c = new ClickHouse(clickhouse_test_config());
 
@@ -23,10 +24,11 @@ $probes = [
     "semicolon"      => "id; DROP TABLE x",
     "single quote"   => "id', 'x",
     "backslash"      => "id\\x",
+    "minus"          => "neg-name",
+    "sql comment"    => "tbl --",
     "tab is ok"      => "id,\tname",
     "comma is ok"    => "id, name",
     "dot is ok"      => "db.tbl",
-    "minus is ok"    => "neg-name",
 ];
 
 foreach ($probes as $label => $val) {
@@ -56,7 +58,8 @@ subquery: REJECTED
 semicolon: REJECTED
 single quote: REJECTED
 backslash: REJECTED
+minus: REJECTED
+sql comment: REJECTED
 tab is ok: ALLOWED (server-rejected)
 comma is ok: ALLOWED (server-rejected)
 dot is ok: ALLOWED (server-rejected)
-minus is ok: ALLOWED (server-rejected)

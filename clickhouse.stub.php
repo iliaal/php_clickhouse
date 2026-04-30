@@ -16,7 +16,9 @@ final class ClickHouse
     // No `passwd` property is declared. The secret stays out of
     // get_object_vars, var_dump, serialize, and reflection by simply
     // not being stored on the object.
-    protected bool $compression = false;
+    // 0=none, 1=lz4, 2=zstd. Was `bool` but that coerced 2 → true → 1
+    // on read-back, silently downgrading "zstd" callers to LZ4.
+    protected int $compression = 0;
     protected int $retry_timeout = 5;
     protected int $retry_count = 1;
     protected int $receive_timeout = 0;
