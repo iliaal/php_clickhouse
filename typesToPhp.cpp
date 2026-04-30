@@ -683,14 +683,20 @@ static ColumnRef appendDateColumn(HashTable *values_ht, bool is_date)
 {
     auto value = std::make_shared<TCol>();
     zval *array_value;
+    const char *type_label = is_date ? "Date" : "DateTime";
     ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
-        if (Z_TYPE_P(array_value) == IS_STRING &&
-            memchr(Z_STRVAL_P(array_value), '-', Z_STRLEN_P(array_value)) != NULL) {
+        /* Any string is treated as a formatted date/datetime. The prior
+         * dash-only gate routed dashless strings through zval_get_long,
+         * which silently coerced "abc" to 0 and landed it as the epoch.
+         * to_time_t now does full validation (EOF after format, gmtime
+         * round-trip). Numeric inputs go through strict_zval_long so
+         * non-numeric, fractional, NaN/Inf are rejected. */
+        if (Z_TYPE_P(array_value) == IS_STRING) {
             value->Append((std::time_t)to_time_t(
                 std::string(Z_STRVAL_P(array_value), Z_STRLEN_P(array_value)),
                 is_date));
         } else {
-            value->Append((std::time_t)zval_get_long(array_value));
+            value->Append((std::time_t)strict_zval_long(array_value, type_label));
         }
     } ZEND_HASH_FOREACH_END();
     return value;
@@ -794,23 +800,35 @@ static ColumnRef appendMapByValueType(HashTable *values_ht, TypeRef vtype, KFn k
      * non-Map insert path has had these via appendIntColumn since pass 1;
      * the Map dispatch was using a single i64Val/u64Val for all widths
      * which silently wrapped Map(K, Int8) value 1000 to int8_t -24. */
-    auto i64Val = [](zval *mv) -> int64_t { return (int64_t)zval_get_long(mv); };
-    auto u64Val = [](zval *mv) -> uint64_t { return (uint64_t)zval_get_long(mv); };
+    /* All Map value extractors go through strict_zval_long /
+     * strict_zval_double so non-numeric strings, fractional doubles, and
+     * non-finite floats throw instead of silently coercing to 0 / 0.0
+     * inside the Map. Mirrors CR-003 for the non-Map path. */
+    auto i64Val = [](zval *mv) -> int64_t {
+        return (int64_t)strict_zval_long(mv, "Map value Int64");
+    };
+    auto u64Val = [](zval *mv) -> uint64_t {
+        zend_long n = strict_zval_long(mv, "Map value UInt64");
+        if (n < 0) throw std::runtime_error("negative value cannot fit in Map value UInt64");
+        return (uint64_t)n;
+    };
     auto narrowI = [](zval *mv, zend_long lo, zend_long hi, const char *t) -> int64_t {
-        zend_long n = zval_get_long(mv);
+        zend_long n = strict_zval_long(mv, t);
         if (n < lo || n > hi) {
             throw std::runtime_error(std::string("Map value out of range for ") + t);
         }
         return (int64_t)n;
     };
     auto narrowU = [](zval *mv, zend_ulong hi, const char *t) -> uint64_t {
-        zend_long n = zval_get_long(mv);
+        zend_long n = strict_zval_long(mv, t);
         if (n < 0 || (zend_ulong)n > hi) {
             throw std::runtime_error(std::string("Map value out of range for ") + t);
         }
         return (uint64_t)n;
     };
-    auto f64Val = [](zval *mv) -> double { return zval_get_double(mv); };
+    auto f64Val = [](zval *mv) -> double {
+        return strict_zval_double(mv, "Map value Float");
+    };
 
     Type::Code vc = vtype->GetCode();
     switch (vc) {
@@ -878,7 +896,9 @@ static std::tuple<double, double> phpToPoint(zval *zv)
     if (!x || !y) {
         throw std::runtime_error("Point is missing an element");
     }
-    return std::make_tuple(zval_get_double(x), zval_get_double(y));
+    return std::make_tuple(
+        strict_zval_double(x, "Point coordinate"),
+        strict_zval_double(y, "Point coordinate"));
 }
 
 static std::vector<std::tuple<double, double>> phpToRing(zval *zv)
@@ -986,17 +1006,20 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
 
         ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
-            if (Z_TYPE_P(array_value) == IS_STRING && memchr(Z_STRVAL_P(array_value), '-', Z_STRLEN_P(array_value)) != NULL) {
-                /* Preserve sub-second precision from "YYYY-MM-DD HH:MM:SS.ffffff"
-                 * style strings instead of dropping them on the floor. */
+            /* Any string is treated as a formatted timestamp; the prior
+             * dash-only gate let "abc" fall through zval_get_long to 0
+             * (epoch). to_time_t_with_frac validates fully. Numeric
+             * inputs go through strict_zval_long / strict_zval_double. */
+            if (Z_TYPE_P(array_value) == IS_STRING) {
                 auto [whole, frac] = to_time_t_with_frac(
                     std::string(Z_STRVAL_P(array_value), Z_STRLEN_P(array_value)),
                     precision, scale);
                 value->Append((int64_t)whole * scale + frac);
             } else if (Z_TYPE_P(array_value) == IS_DOUBLE) {
-                value->Append((int64_t)(Z_DVAL_P(array_value) * scale));
+                double d = strict_zval_double(array_value, "DateTime64");
+                value->Append((int64_t)(d * scale));
             } else {
-                value->Append((int64_t)zval_get_long(array_value) * scale);
+                value->Append((int64_t)strict_zval_long(array_value, "DateTime64") * scale);
             }
         }
         ZEND_HASH_FOREACH_END();
@@ -1012,7 +1035,17 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         auto value = std::make_shared<ColumnTime>();
         ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
-            value->Append((int32_t)zval_get_long(array_value));
+            /* Time is stored as int seconds-since-midnight; accept only
+             * numeric inputs. String inputs would need an "HH:MM:SS"
+             * parser which the column type doesn't currently expose, so
+             * reject strings explicitly instead of letting zval_get_long
+             * coerce "abc" to 0. */
+            if (Z_TYPE_P(array_value) == IS_STRING) {
+                throw std::runtime_error(
+                    "Time column inserts require numeric seconds; "
+                    "string formatted-time input is not currently supported");
+            }
+            value->Append((int32_t)strict_zval_long(array_value, "Time"));
         }
         ZEND_HASH_FOREACH_END();
         return value;
@@ -1025,10 +1058,16 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         for (size_t i = 0; i < precision; ++i) scale *= 10;
         ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
+            if (Z_TYPE_P(array_value) == IS_STRING) {
+                throw std::runtime_error(
+                    "Time64 column inserts require numeric seconds; "
+                    "string formatted-time input is not currently supported");
+            }
             if (Z_TYPE_P(array_value) == IS_DOUBLE) {
-                value->Append((int64_t)(Z_DVAL_P(array_value) * scale));
+                double d = strict_zval_double(array_value, "Time64");
+                value->Append((int64_t)(d * scale));
             } else {
-                value->Append((int64_t)zval_get_long(array_value) * scale);
+                value->Append((int64_t)strict_zval_long(array_value, "Time64") * scale);
             }
         }
         ZEND_HASH_FOREACH_END();
@@ -1071,7 +1110,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                     value->Append(static_cast<Int128>(mag));
                 }
             } else {
-                value->Append(Int128(zval_get_long(array_value)));
+                value->Append(Int128(strict_zval_long(array_value, "Int128")));
             }
         }
         ZEND_HASH_FOREACH_END();
@@ -1090,7 +1129,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 if (len > 0 && s[0] == '+') { i = 1; }
                 value->Append(parse_uint128_dec(s + i, len - i, "UInt128"));
             } else {
-                zend_long n = zval_get_long(array_value);
+                zend_long n = strict_zval_long(array_value, "UInt128");
                 if (n < 0) {
                     throw std::runtime_error("UInt128 cannot accept a negative integer");
                 }

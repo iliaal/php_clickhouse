@@ -1430,28 +1430,86 @@ static void applyPlaceholders(string &sql, HashTable *params_ht, std::vector<Typ
         }
 
         /* Fall through: client-side {name} identifier substitution.
-         * Whitelist: letters, digits, `_`, `.`, `,`, whitespace.
-         * `*`, `(`, `)`, `+`, `=`, `;`, quotes, backslash, etc. excluded
-         * to keep callers from smuggling expressions through identifier
-         * positions. `-` was allowed in earlier rounds but enables `--`
-         * SQL line comments — `{tbl}` with value "tbl --" turned the
-         * trailing predicate into a comment (CR-002 repro). Drop `-`. */
+         * Structural validation: each token is either a numeric literal
+         * (optional sign, digits, optional fractional part, optional
+         * exponent) or an identifier (`[A-Za-z_][A-Za-z0-9_]*` with at
+         * most one `.` separator for db-qualified names). Tokens may be
+         * joined by commas with optional whitespace ONLY around the
+         * commas — internal whitespace inside a token is rejected.
+         * The prior flat-whitelist form let "tbl ANY INNER JOIN secret
+         * USING tenant" land verbatim because it accepted spaces and
+         * letters globally; closing that requires per-token parsing. */
         zend_string *coerced = zval_get_string(pzval);
         const char *val = ZSTR_VAL(coerced);
         size_t vlen = ZSTR_LEN(coerced);
-        for (size_t i = 0; i < vlen; ++i) {
+        auto throwInvalid = [&](const char *why) {
+            std::string err = "Placeholder value for {" + name + "} is invalid: ";
+            err += why;
+            zend_string_release(coerced);
+            throw std::runtime_error(err);
+        };
+        if (vlen == 0) throwInvalid("empty");
+
+        auto isAlpha = [](unsigned char c) {
+            return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
+        };
+        auto isDigit = [](unsigned char c) { return c >= '0' && c <= '9'; };
+
+        size_t i = 0;
+        while (i < vlen) {
             unsigned char c = (unsigned char)val[i];
-            bool ok =
-                (c >= 'A' && c <= 'Z') ||
-                (c >= 'a' && c <= 'z') ||
-                (c >= '0' && c <= '9') ||
-                c == '_' || c == '.' || c == ',' || c == ' ' ||
-                c == '\t';
-            if (!ok) {
-                std::string err = "Placeholder value for {" + name + "} contains an unsafe character";
-                zend_string_release(coerced);
-                throw std::runtime_error(err);
+            if (isDigit(c) || c == '+' || c == '-') {
+                /* Numeric token. */
+                if ((c == '+' || c == '-')) {
+                    i++;
+                    if (i >= vlen || !isDigit((unsigned char)val[i])) {
+                        throwInvalid("sign without digits");
+                    }
+                }
+                bool seen_digit = false;
+                while (i < vlen && isDigit((unsigned char)val[i])) { i++; seen_digit = true; }
+                if (i < vlen && val[i] == '.') {
+                    i++;
+                    while (i < vlen && isDigit((unsigned char)val[i])) { i++; seen_digit = true; }
+                }
+                if (i < vlen && (val[i] == 'e' || val[i] == 'E')) {
+                    i++;
+                    if (i < vlen && (val[i] == '+' || val[i] == '-')) i++;
+                    if (i >= vlen || !isDigit((unsigned char)val[i])) {
+                        throwInvalid("malformed exponent");
+                    }
+                    while (i < vlen && isDigit((unsigned char)val[i])) i++;
+                }
+                if (!seen_digit) throwInvalid("numeric token without digits");
+            } else if (isAlpha(c)) {
+                /* Identifier token, optionally db-qualified. */
+                i++;
+                bool dot_seen = false;
+                while (i < vlen) {
+                    c = (unsigned char)val[i];
+                    if (isAlpha(c) || isDigit(c)) { i++; continue; }
+                    if (c == '.' && !dot_seen) {
+                        dot_seen = true; i++;
+                        if (i >= vlen) throwInvalid("trailing dot");
+                        if (!isAlpha((unsigned char)val[i])) {
+                            throwInvalid("segment after dot must start with a letter or underscore");
+                        }
+                        i++;
+                        continue;
+                    }
+                    break;
+                }
+            } else {
+                throwInvalid("token must start with a digit, sign, letter, or underscore");
             }
+
+            /* Optional whitespace, then comma (which means another token follows). */
+            while (i < vlen && (val[i] == ' ' || val[i] == '\t')) i++;
+            if (i >= vlen) break;
+            if (val[i] != ',') throwInvalid("unexpected character after token");
+            i++;
+            while (i < vlen && (val[i] == ' ' || val[i] == '\t')) i++;
+            if (i >= vlen) throwInvalid("trailing comma");
         }
         std::string needle = "{" + name + "}";
         std::string repl(val, vlen);
@@ -1996,6 +2054,18 @@ PHP_METHOD(ClickHouse, write)
 
     try
     {
+        /* Acquire the reentry guard before any heavy lifting (the
+         * transpose builds a column-major copy of the user's input).
+         * Same ordering as insert() — fail-fast on reentry rather than
+         * spending CPU and memory on a copy that will be discarded. */
+        clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
+        Client *client = getClient(obj);
+        QueryActiveGuard guard(obj);
+
+        if (!obj->has_insert_block) {
+            throw std::runtime_error("write() called without a matching writeStart()");
+        }
+
         zval *first_data = NULL;
         HashTable *values_ht = Z_ARRVAL_P(values);
         sc_zend_hash_get_current_data(values_ht, (void**) &first_data);
@@ -2006,14 +2076,6 @@ PHP_METHOD(ClickHouse, write)
         size_t columns_count = zend_hash_num_elements(Z_ARRVAL_P(first_data));
 
         buildColumnMajorRows(values_ht, columns_count, NULL, &transposed);
-
-        clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
-        Client *client = getClient(obj);
-        QueryActiveGuard guard(obj);
-
-        if (!obj->has_insert_block) {
-            throw std::runtime_error("write() called without a matching writeStart()");
-        }
         Block &blockQuery = obj->insert_block;
 
         Block blockInsert;
@@ -2544,10 +2606,25 @@ PHP_METHOD(ClickHouse, insertAssoc)
                 zval_ptr_dtor(&values_zv);
                 throw std::runtime_error("insertAssoc: each row must be an associative array");
             }
+            /* Reject rows whose key set drifts from the first row.
+             * Previously a later row with an extra key silently dropped
+             * the unexpected value and proceeded; the method's
+             * shared-key-set contract demands a hard error. Counting
+             * elements here catches both extra-key and duplicate-key
+             * cases (PHP arrays can't actually duplicate string keys,
+             * but cheap to count). The missing-key path is caught
+             * inside the col_order loop below by name lookup. */
+            HashTable *row_ht = Z_ARRVAL_P(row_zv);
+            if (zend_hash_num_elements(row_ht) != col_order.size()) {
+                zval_ptr_dtor(&columns_zv);
+                zval_ptr_dtor(&values_zv);
+                throw std::runtime_error(
+                    "insertAssoc: row key count differs from first row");
+            }
             zval row_out;
             array_init(&row_out);
             for (const std::string &col : col_order) {
-                zval *cell = sc_zend_hash_find(Z_ARRVAL_P(row_zv), (char*)col.c_str(), col.size());
+                zval *cell = sc_zend_hash_find(row_ht, (char*)col.c_str(), col.size());
                 if (!cell) {
                     zval_ptr_dtor(&row_out);
                     zval_ptr_dtor(&columns_zv);
