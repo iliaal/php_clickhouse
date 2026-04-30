@@ -1,3 +1,6 @@
+# in-progress security findings (pre-disclosure); never commit
+docs/security/
+
 # Prerequisites
 *.d
 

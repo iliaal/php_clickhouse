@@ -45,12 +45,12 @@ echo "profile_after_clear=", $got["count"] === 0 ? 1 : 0, "\n";
 // 6. getCurrentEndpoint returns the active endpoint when endpoints[] is set
 $cfg2 = clickhouse_test_config();
 $cfg2["endpoints"] = [
-    ["host" => "127.0.0.1", "port" => 9000],
+    ["host" => $cfg2["host"], "port" => $cfg2["port"]],
 ];
 $c2 = new ClickHouse($cfg2);
 $ep = $c2->getCurrentEndpoint();
-echo "endpoint_host=", $ep["host"], "\n";
-echo "endpoint_port=", $ep["port"], "\n";
+echo "endpoint_host_match=", ($ep["host"] === $cfg2["host"]) ? 1 : 0, "\n";
+echo "endpoint_port_match=", ($ep["port"] === $cfg2["port"]) ? 1 : 0, "\n";
 ?>
 --EXPECT--
 server.has_name=1
@@ -63,5 +63,5 @@ reset=1
 ping_after_reset=1
 profile_fired=1
 profile_after_clear=1
-endpoint_host=127.0.0.1
-endpoint_port=9000
+endpoint_host_match=1
+endpoint_port_match=1

@@ -1233,8 +1233,25 @@ static void emitNestedZval(zval *arr, zval *built, const string& column_name, in
     }
 }
 
+/* Cap recursion through nested types (Tuple/Array/Map/Nullable/LowCardinality)
+ * so a server-supplied schema like Tuple(Tuple(Tuple(...))) cannot stack-overflow
+ * the worker. Thread-local because clickhouse-cpp may dispatch from worker threads. */
+static thread_local int convert_depth = 0;
+static const int MAX_CONVERT_DEPTH = 32;
+
+struct ConvertDepthGuard {
+    ConvertDepthGuard() {
+        if (++convert_depth > MAX_CONVERT_DEPTH) {
+            --convert_depth;
+            throw std::runtime_error("ClickHouse column nested-type depth exceeds limit");
+        }
+    }
+    ~ConvertDepthGuard() { --convert_depth; }
+};
+
 void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column_name, int8_t is_array, long fetch_mode)
 {
+    ConvertDepthGuard _depth_guard;
     switch (columnRef->Type()->GetCode())
     {
     case Type::Code::UInt64:
@@ -1421,6 +1438,9 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
     {
         auto col = columnRef->As<ColumnDateTime64>();
         size_t precision = columnRef->Type()->As<DateTime64Type>()->GetPrecision();
+        if (precision > 9) {
+            throw std::runtime_error("DateTime64 precision out of spec range (0..9)");
+        }
         int64_t scale = 1;
         for (size_t i = 0; i < precision; ++i) scale *= 10;
         int64_t raw = col->At(row);
@@ -1431,10 +1451,12 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
         if (fetch_mode & SC_FETCH_DATE_AS_STRINGS) {
             char buffer[64];
             size_t l = strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", gmtime(&whole));
-            if (precision > 0) {
+            if (precision > 0 && l < sizeof(buffer)) {
                 int written = snprintf(buffer + l, sizeof(buffer) - l, ".%0*lld",
                                        (int)precision, (long long)frac);
-                if (written > 0) l += (size_t)written;
+                if (written > 0 && (size_t)written < sizeof(buffer) - l) {
+                    l += (size_t)written;
+                }
             }
             if (is_array) {
                 sc_add_next_index_stringl(arr, buffer, l, 1);
@@ -1495,6 +1517,9 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
     {
         auto col = columnRef->As<ColumnTime64>();
         size_t precision = columnRef->Type()->As<Time64Type>()->GetPrecision();
+        if (precision > 9) {
+            throw std::runtime_error("Time64 precision out of spec range (0..9)");
+        }
         int64_t scale = 1;
         for (size_t i = 0; i < precision; ++i) scale *= 10;
         int64_t raw = col->At(row);
@@ -1509,10 +1534,11 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
                              (long long)(abs_whole / 3600),
                              (long long)((abs_whole / 60) % 60),
                              (long long)(abs_whole % 60));
-            if (precision > 0 && l > 0) {
+            if (l < 0 || (size_t)l >= sizeof(buffer)) l = (int)sizeof(buffer) - 1;
+            if (precision > 0 && l > 0 && (size_t)l < sizeof(buffer)) {
                 int w = snprintf(buffer + l, sizeof(buffer) - l, ".%0*lld",
                                  (int)precision, (long long)frac);
-                if (w > 0) l += w;
+                if (w > 0 && (size_t)w < sizeof(buffer) - (size_t)l) l += w;
             }
             if (is_array) {
                 sc_add_next_index_stringl(arr, buffer, l, 1);
@@ -1730,6 +1756,12 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
         ColumnRef keys_any = (*tup)[0];
         ColumnRef values_any = (*tup)[1];
         size_t entry_count = keys_any->Size();
+        /* Defensive: a malformed/malicious server response could report
+         * key-count > value-count; subsequent At(i) on values would read
+         * past the value column. */
+        if (values_any->Size() < entry_count) {
+            throw std::runtime_error("Map column key/value size mismatch");
+        }
 
         zval *map_zv;
         SC_MAKE_STD_ZVAL(map_zv);
@@ -1759,12 +1791,12 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
                 case Type::Code::UUID: {
                     UUID u = keys_any->As<ColumnUUID>()->At(i);
                     char buf[64];
-                    snprintf(buf, sizeof(buf), "%08x-%04x-%04x-%04x-%012lx",
+                    snprintf(buf, sizeof(buf), "%08x-%04x-%04x-%04x-%012llx",
                              (uint32_t)(u.first >> 32),
                              (uint16_t)((u.first >> 16) & 0xffff),
                              (uint16_t)(u.first & 0xffff),
                              (uint16_t)(u.second >> 48),
-                             (unsigned long)(u.second & 0xffffffffffffull));
+                             (unsigned long long)(u.second & 0xffffffffffffull));
                     str_buf.assign(buf);
                     return 0;
                 }
@@ -1845,12 +1877,12 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, string column
             } else if (value_code == Type::Code::UUID) {
                 UUID u = values_any->As<ColumnUUID>()->At(i);
                 char buf[64];
-                int blen = snprintf(buf, sizeof(buf), "%08x-%04x-%04x-%04x-%012lx",
+                int blen = snprintf(buf, sizeof(buf), "%08x-%04x-%04x-%04x-%012llx",
                          (uint32_t)(u.first >> 32),
                          (uint16_t)((u.first >> 16) & 0xffff),
                          (uint16_t)(u.first & 0xffff),
                          (uint16_t)(u.second >> 48),
-                         (unsigned long)(u.second & 0xffffffffffffull));
+                         (unsigned long long)(u.second & 0xffffffffffffull));
                 addStrL(kkind, str_key_buf, long_key, dbl_key, buf, blen);
             } else {
                 throw std::runtime_error("Map read: unsupported value type " + map_type->As<MapType>()->GetValueType()->GetName());
