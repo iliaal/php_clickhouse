@@ -43,7 +43,6 @@ extern "C" {
 #include <deque>
 #include <optional>
 #include <unordered_map>
-#include <unordered_set>
 
 using namespace clickhouse;
 using namespace std;
@@ -2004,7 +2003,21 @@ static void do_insert_into(zval *this_obj, zend_string *table,
         obj->stats.last_query_id = qid;
         attachProgressAndProfile(insertQuery, obj);
         attachVerbose(insertQuery, obj);
-        Block blockQuery = client->BeginInsert(insertQuery);
+        /* BeginInsert can throw on server-side schema errors (missing
+         * table, bad column names, permissions). The vendored client
+         * sets its inserting_ flag before sending the query and before
+         * receiving the server's schema block, so a throw past that
+         * point leaves the native client wedged: every subsequent
+         * select/execute on the same handle throws "cannot execute
+         * query while inserting" until userland resetConnection()s by
+         * hand. Recover the handle here. */
+        Block blockQuery;
+        try {
+            blockQuery = client->BeginInsert(insertQuery);
+        } catch (...) {
+            try { client->ResetConnection(); } catch (...) {}
+            throw;
+        }
         bool insert_open = true;
         bool block_sent = false;
 
@@ -2147,7 +2160,18 @@ PHP_METHOD(ClickHouse, writeStart)
         obj->stats.last_query_id = qid;
         attachProgressAndProfile(insertQuery, obj);
         attachVerbose(insertQuery, obj);
-        Block blockQuery = client->BeginInsert(insertQuery);
+        /* Same recovery pattern as direct insert(): BeginInsert can
+         * throw on server-side schema errors after the vendored
+         * client has set its inserting_ flag. Reset the connection
+         * so the next call on this handle isn't met with "cannot
+         * execute query while inserting". */
+        Block blockQuery;
+        try {
+            blockQuery = client->BeginInsert(insertQuery);
+        } catch (...) {
+            try { client->ResetConnection(); } catch (...) {}
+            throw;
+        }
 
         obj->insert_block = blockQuery;
         obj->has_insert_block = true;
@@ -2745,22 +2769,28 @@ PHP_METHOD(ClickHouse, insertAssoc)
         zval columns_zv;
         array_init(&columns_zv);
 
-        /* First row defines the column set. Build the list and a hash
-         * we can lookup against when validating later rows. */
-        std::unordered_set<std::string> expected_keys;
-        zval *fv;
-        zend_string *fk;
-        zend_ulong fnk;
-        ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL_P(first), fnk, fk, fv) {
-            (void)fv;
-            (void)fnk;
-            if (!fk) {
-                zval_ptr_dtor(&columns_zv);
-                throw std::runtime_error("insertAssoc: each row must have string keys (column names)");
-            }
-            expected_keys.emplace(ZSTR_VAL(fk), ZSTR_LEN(fk));
-            add_next_index_stringl(&columns_zv, ZSTR_VAL(fk), ZSTR_LEN(fk));
-        } ZEND_HASH_FOREACH_END();
+        /* First row defines the column set. Validate its keys are all
+         * strings while building the columns list. The first row's
+         * HashTable then doubles as the expected-key oracle for every
+         * later row — zend_hash_exists takes a zend_string and
+         * compares hashes without allocating, which avoids the
+         * std::string copy that an std::unordered_set lookup needed. */
+        HashTable *first_ht = Z_ARRVAL_P(first);
+        size_t expected_count = zend_hash_num_elements(first_ht);
+        {
+            zval *fv;
+            zend_string *fk;
+            zend_ulong fnk;
+            ZEND_HASH_FOREACH_KEY_VAL(first_ht, fnk, fk, fv) {
+                (void)fv;
+                (void)fnk;
+                if (!fk) {
+                    zval_ptr_dtor(&columns_zv);
+                    throw std::runtime_error("insertAssoc: each row must have string keys (column names)");
+                }
+                add_next_index_stringl(&columns_zv, ZSTR_VAL(fk), ZSTR_LEN(fk));
+            } ZEND_HASH_FOREACH_END();
+        }
 
         /* Validate every row against the first row's key set without
          * materializing a positional copy. do_insert_into →
@@ -2777,7 +2807,7 @@ PHP_METHOD(ClickHouse, insertAssoc)
                 throw std::runtime_error("insertAssoc: each row must be an associative array");
             }
             HashTable *row_ht = Z_ARRVAL_P(row_zv);
-            if (zend_hash_num_elements(row_ht) != expected_keys.size()) {
+            if (zend_hash_num_elements(row_ht) != expected_count) {
                 zval_ptr_dtor(&columns_zv);
                 throw std::runtime_error(
                     "insertAssoc: row key count differs from first row");
@@ -2793,8 +2823,7 @@ PHP_METHOD(ClickHouse, insertAssoc)
                     throw std::runtime_error(
                         "insertAssoc: each row must have string keys (column names)");
                 }
-                if (expected_keys.find(std::string(ZSTR_VAL(rk), ZSTR_LEN(rk)))
-                        == expected_keys.end()) {
+                if (!zend_hash_exists(first_ht, rk)) {
                     zval_ptr_dtor(&columns_zv);
                     throw std::runtime_error(
                         std::string("insertAssoc: unexpected key '") +
