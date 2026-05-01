@@ -19,11 +19,15 @@ require __DIR__ . "/_clickhouse.inc";
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
 $c->execute("DROP TABLE IF EXISTS test.begin_recover");
+// Drop the probe target too — a stale table left in the test DB
+// from a previous run would let BeginInsert succeed and the test
+// would assert the wrong behavior.
+$c->execute("DROP TABLE IF EXISTS test.begin_recover_missing");
 $c->execute("CREATE TABLE test.begin_recover (id UInt32) ENGINE=Memory");
 
 // Path 1: direct insert() against a missing table.
 try {
-    $c->insert("test.no_such_table", ["id"], [[1]]);
+    $c->insert("test.begin_recover_missing", ["id"], [[1]]);
     echo "direct insert missing table: NO THROW\n";
 } catch (ClickHouseException $e) {
     echo "direct insert missing table: REJECTED\n";
@@ -33,7 +37,7 @@ echo "select after direct insert begin error: $x\n";
 
 // Path 2: writeStart() against a missing table.
 try {
-    $c->writeStart("test.no_such_table", ["id"]);
+    $c->writeStart("test.begin_recover_missing", ["id"]);
     echo "writeStart missing table: NO THROW\n";
 } catch (ClickHouseException $e) {
     echo "writeStart missing table: REJECTED\n";
