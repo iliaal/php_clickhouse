@@ -86,6 +86,15 @@ struct clickhouse_object {
     Client *client;
     Block insert_block;
     bool has_insert_block;
+    /* True once write() has handed any block to the native client during
+     * the current writeStart()/writeEnd() session. The streaming-insert
+     * recovery path keys off this: pre-send conversion failure on a
+     * still-clean session can EndInsert() to close an empty insert,
+     * but once even one block has been sent the recovery must
+     * ResetConnection() to discard partial data. EndInsert() in that
+     * case would commit the already-sent blocks and turn a thrown
+     * write() into a silent partial-commit. */
+    bool insert_blocks_sent;
     /* Guards same-client reentry. clickhouse-cpp's Client uses a single
      * socket and a single per-call packet loop; a userland callback that
      * fires another query / insert on the same client mid-stream sends
@@ -122,6 +131,7 @@ static zend_object *clickhouse_create_object(zend_class_entry *ce)
 
     obj->client = nullptr;
     obj->has_insert_block = false;
+    obj->insert_blocks_sent = false;
     obj->query_active = false;
     obj->log_enabled = false;
     obj->verbose_to_stderr = false;
@@ -2102,6 +2112,7 @@ PHP_METHOD(ClickHouse, writeStart)
 
         obj->insert_block = blockQuery;
         obj->has_insert_block = true;
+        obj->insert_blocks_sent = false;
         recordQuerySuccess(obj, sql, qid);
     }
     catch (const std::exception& e)
@@ -2140,14 +2151,23 @@ PHP_METHOD(ClickHouse, write)
             throw std::runtime_error("write() called without a matching writeStart()");
         }
 
-        zval *first_data = NULL;
         HashTable *values_ht = Z_ARRVAL_P(values);
-        sc_zend_hash_get_current_data(values_ht, (void**) &first_data);
-        if (NULL == first_data || Z_TYPE_P(first_data) != IS_ARRAY)
-        {
-            throw std::runtime_error("Empty or non-array first row passed to write()");
+        if (zend_hash_num_elements(values_ht) == 0) {
+            throw std::runtime_error("Empty rows array passed to write()");
         }
-        size_t columns_count = zend_hash_num_elements(Z_ARRVAL_P(first_data));
+
+        /* The native block was prepared by BeginInsert() with one column
+         * per declared writeStart() column. Use that count as the
+         * authoritative row width — not the first row's element count.
+         * Otherwise a row like [1] against `writeStart(t, ['a','b'])`
+         * silently sends a one-column block; the server fills the
+         * missing column with its default and the streamed insert
+         * returns success on truncated rows. */
+        size_t columns_count = obj->insert_block.GetColumnCount();
+        if (columns_count == 0) {
+            throw std::runtime_error(
+                "writeStart() block has no columns; cannot stream rows");
+        }
 
         buildColumnMajorRows(values_ht, columns_count, NULL, &transposed);
         Block &blockQuery = obj->insert_block;
@@ -2163,6 +2183,11 @@ PHP_METHOD(ClickHouse, write)
         }
         ZEND_HASH_FOREACH_END();
 
+        /* Mark the session dirty before SendInsertBlock so any failure
+         * mid-send routes the catch path to ResetConnection() instead
+         * of EndInsert(). EndInsert on a wire that already saw partial
+         * data would commit it. */
+        obj->insert_blocks_sent = true;
         client->SendInsertBlock(blockInsert);
         zval_ptr_dtor(&transposed);
         ZVAL_UNDEF(&transposed);
@@ -2173,23 +2198,36 @@ PHP_METHOD(ClickHouse, write)
             zval_ptr_dtor(&transposed);
             ZVAL_UNDEF(&transposed);
         }
-        /* The failure can happen in two phases:
-         *   - Pre-send: zvalToBlock conversion threw on bad input. The
-         *     wire is still healthy; we just need to close the open
-         *     insert (writeStart already called BeginInsert) so the
-         *     vendored Client clears its internal `inserting_` flag.
-         *     Without this, the next select/execute on the same client
-         *     throws "cannot execute query while inserting" and the
-         *     caller has to figure out they need resetConnection().
-         *   - Send: SendInsertBlock itself threw mid-stream. The wire
-         *     is broken; EndInsert is best-effort and may fail too.
-         * Try EndInsert in both cases and swallow secondary failures. */
+        /* Three failure phases now, each needing a different recovery:
+         *   - Pre-send on a clean session (no prior write() succeeded):
+         *     the wire is healthy and no data has crossed it; close the
+         *     empty insert with EndInsert() so the vendored Client
+         *     clears its `inserting_` flag. Without this, the next
+         *     select/execute throws "cannot execute query while
+         *     inserting" and the caller has to resetConnection() by
+         *     hand.
+         *   - Pre-send on a dirty session (a prior write() already sent
+         *     blocks): EndInsert() would commit those earlier blocks
+         *     and turn this thrown write() into a silent partial commit.
+         *     Drop the connection instead so the server discards the
+         *     in-flight insert.
+         *   - Mid-send (SendInsertBlock itself threw): the wire is
+         *     dirty regardless of prior writes; reset for the same
+         *     reason. insert_blocks_sent is set true before
+         *     SendInsertBlock so this case lands here too.
+         * Swallow secondary failures from the recovery call — we are
+         * already throwing the original error to PHP. */
         clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
         if (obj->client && obj->has_insert_block) {
-            try { obj->client->EndInsert(); } catch (...) {}
+            if (obj->insert_blocks_sent) {
+                try { obj->client->ResetConnection(); } catch (...) {}
+            } else {
+                try { obj->client->EndInsert(); } catch (...) {}
+            }
         }
         obj->insert_block = Block();
         obj->has_insert_block = false;
+        obj->insert_blocks_sent = false;
         throwClickHouseError(e);
     }
     RETURN_TRUE;
@@ -2212,6 +2250,7 @@ PHP_METHOD(ClickHouse, writeEnd)
         client->EndInsert();
         obj->insert_block = Block();
         obj->has_insert_block = false;
+        obj->insert_blocks_sent = false;
     }
     catch (const std::exception& e)
     {
@@ -2221,6 +2260,7 @@ PHP_METHOD(ClickHouse, writeEnd)
          * is destroyed. */
         obj->insert_block = Block();
         obj->has_insert_block = false;
+        obj->insert_blocks_sent = false;
         throwClickHouseError(e);
         return;
     }

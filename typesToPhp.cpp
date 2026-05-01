@@ -201,6 +201,86 @@ static zend_long strict_zval_long(zval *z, const char *type_label)
     }
 }
 
+/* UInt64 needs a strict parser of its own because strict_zval_long
+ * tops out at ZEND_LONG_MAX (2^63-1): values above that arrive as
+ * decimal strings (PHP can't fit them in a zend_long) and must be
+ * parsed via strtoull, not strtoll. Same shape as strict_zval_long
+ * — full-consumption check, NULL handled under AllowNullGuard,
+ * fractional / non-finite doubles rejected — but with the unsigned
+ * range and an additional `0x` hex form. */
+static uint64_t strict_zval_u64(zval *z, const char *type_label)
+{
+    switch (Z_TYPE_P(z)) {
+        case IS_LONG: {
+            zend_long n = Z_LVAL_P(z);
+            if (n < 0) {
+                throw std::runtime_error(
+                    std::string("negative value cannot fit in ") + type_label);
+            }
+            return (uint64_t)n;
+        }
+        case IS_TRUE:  return 1;
+        case IS_FALSE: return 0;
+        case IS_NULL:
+            if (g_allow_null_in_strict > 0) return 0;
+            throw std::runtime_error(
+                std::string("null cannot be assigned to non-Nullable column ") + type_label);
+        case IS_DOUBLE: {
+            double d = Z_DVAL_P(z);
+            if (std::isnan(d) || std::isinf(d)) {
+                throw std::runtime_error(
+                    std::string("non-finite double cannot be assigned to ") + type_label);
+            }
+            double frac, intpart;
+            frac = std::modf(d, &intpart);
+            if (frac != 0.0) {
+                throw std::runtime_error(
+                    std::string("fractional double cannot be assigned to integer column ") + type_label);
+            }
+            /* 18446744073709551616.0 is the next representable double
+             * above 2^64. Anything >= it overflows uint64_t. Negatives
+             * are rejected explicitly. */
+            if (d < 0.0 || d >= 18446744073709551616.0) {
+                throw std::runtime_error(
+                    std::string("double out of range for integer column ") + type_label);
+            }
+            return (uint64_t)d;
+        }
+        case IS_STRING: {
+            const char *s = Z_STRVAL_P(z);
+            size_t slen = Z_STRLEN_P(z);
+            if (slen == 0) {
+                throw std::runtime_error(
+                    std::string("empty string cannot be assigned to ") + type_label);
+            }
+            int base = 10;
+            const char *p = s;
+            size_t plen = slen;
+            if (slen >= 3 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+                base = 16;
+                p = s + 2;
+                plen = slen - 2;
+            }
+            if (*p == '-' || *p == '+') {
+                throw std::runtime_error(
+                    std::string("invalid integer string for ") + type_label);
+            }
+            char *endp = NULL;
+            errno = 0;
+            unsigned long long v = strtoull(p, &endp, base);
+            if (errno == ERANGE || endp == p ||
+                (size_t)(endp - p) != plen) {
+                throw std::runtime_error(
+                    std::string("invalid integer string for ") + type_label);
+            }
+            return (uint64_t)v;
+        }
+        default:
+            throw std::runtime_error(
+                std::string("array / object / resource cannot be assigned to integer column ") + type_label);
+    }
+}
+
 static double strict_zval_double(zval *z, const char *type_label)
 {
     switch (Z_TYPE_P(z)) {
@@ -883,9 +963,7 @@ static ColumnRef appendMapByValueType(HashTable *values_ht, TypeRef vtype, KFn k
         return (int64_t)strict_zval_long(mv, "Map value Int64");
     };
     auto u64Val = [](zval *mv) -> uint64_t {
-        zend_long n = strict_zval_long(mv, "Map value UInt64");
-        if (n < 0) throw std::runtime_error("negative value cannot fit in Map value UInt64");
-        return (uint64_t)n;
+        return strict_zval_u64(mv, "Map value UInt64");
     };
     auto narrowI = [](zval *mv, zend_long lo, zend_long hi, const char *t) -> int64_t {
         zend_long n = strict_zval_long(mv, t);
@@ -1010,8 +1088,20 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
 
     switch (type->GetCode())
     {
-    case Type::Code::UInt64:
-        return appendUIntColumnWithHex<ColumnUInt64>(values_ht, strtoull, UINT64_MAX, "UInt64");
+    case Type::Code::UInt64: {
+        /* Direct call into strict_zval_u64 instead of going through
+         * appendUIntColumnWithHex<ColumnUInt64>. The templated path
+         * casts through zend_long for the non-hex branch and rejects
+         * decimal strings above ZEND_LONG_MAX. UInt64 values up to
+         * UINT64_MAX must be insertable from PHP — readers already
+         * surface them as decimal strings — so the writer needs to
+         * accept the same form. */
+        auto value = std::make_shared<ColumnUInt64>();
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
+            value->Append(strict_zval_u64(array_value, "UInt64"));
+        } ZEND_HASH_FOREACH_END();
+        return value;
+    }
     case Type::Code::UInt8:
         return appendIntColumn<ColumnUInt8>(values_ht, 0, 0xFF, "UInt8");
     case Type::Code::UInt16:
