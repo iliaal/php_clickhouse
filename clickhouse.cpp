@@ -153,11 +153,22 @@ static void clickhouse_free_obj(zend_object *object)
 {
     clickhouse_object *obj = clickhouse_from_obj(object);
 
-    /* If a script left writeStart()/write() pending without writeEnd(),
-     * close the insert stream first so the server doesn't see a half-open
-     * transaction. Swallow errors: free_obj must not throw. */
+    /* Mirror write()'s catch-side recovery policy for an orphaned
+     * streaming insert. EndInsert() commits whatever blocks have
+     * already been sent, so on a session that received write() rows
+     * but never writeEnd() — script bailout, exception unwinding,
+     * unset() before completion — calling EndInsert() here turns an
+     * incomplete user intent into an implicit partial commit. Use
+     * ResetConnection() in that case so the server discards the
+     * in-flight insert. A clean session (BeginInsert ran, no blocks
+     * sent yet) is harmless to close with EndInsert. Swallow errors:
+     * free_obj must not throw. */
     if (obj->client && obj->has_insert_block) {
-        try { obj->client->EndInsert(); } catch (...) {}
+        if (obj->insert_blocks_sent) {
+            try { obj->client->ResetConnection(); } catch (...) {}
+        } else {
+            try { obj->client->EndInsert(); } catch (...) {}
+        }
     }
 
     if (obj->client) {
@@ -1864,68 +1875,68 @@ PHP_METHOD(ClickHouse, selectStatement)
 /* }}} */
 
 /*
- * Build a column-major zval matrix [col][row] from a row-major PHP
- * HashTable [row][col]. Used by insert() and write() to transpose the
- * user's row-of-rows input into the per-column shape zvalToBlock wants.
- *
- * column_names != NULL: missing positional entries are looked up by
- * name (insert() accepts {col=>val} rows). NULL: positional only.
+ * Pre-flight row shape check shared by insert() and write(). Each row
+ * must be an array and have at most columns_count cells; extras would
+ * be silently dropped by the per-column gather below, which was the
+ * data-integrity hole behind a row like `[1, 99]` against a
+ * single-column table landing as `1` with `99` dropped. Missing cells
+ * still surface inside buildSingleColumnZval via the per-row lookup.
+ */
+static void validateRowShapes(HashTable *values_ht, size_t columns_count)
+{
+    zval *pzval;
+    ZEND_HASH_FOREACH_VAL(values_ht, pzval) {
+        if (Z_TYPE_P(pzval) != IS_ARRAY) {
+            throw std::runtime_error(
+                "The insert function needs to pass in a two-dimensional array");
+        }
+        size_t row_count = zend_hash_num_elements(Z_ARRVAL_P(pzval));
+        if (row_count > columns_count) {
+            throw std::runtime_error(
+                "row has " + std::to_string(row_count) +
+                " cells but only " + std::to_string(columns_count) +
+                " columns were declared; extra cells would be silently dropped");
+        }
+    } ZEND_HASH_FOREACH_END();
+}
+
+/*
+ * Build a per-column PHP zval array of refcount-bumped cells for one
+ * column index. column_names != NULL: missing positional entries are
+ * looked up by name (insert() accepts {col=>val} rows). NULL:
+ * positional only.
  *
  * Sets *out to an IS_ARRAY zval the caller owns. On throw, *out is
  * reset to IS_UNDEF and any partial state is freed.
+ *
+ * Streaming column-by-column instead of materializing the full
+ * column-major matrix keeps peak PHP memory at one column at a time
+ * (plus the original row-major input the caller still holds) instead
+ * of N_rows * N_cols. The native ClickHouse column built from this
+ * intermediate is also independent per call, so the caller can drop
+ * the inner zval before moving to the next column.
  */
-static void buildColumnMajorRows(HashTable *values_ht, size_t columns_count,
-                                 const std::vector<zend_string*> *column_names,
-                                 zval *out)
+static void buildSingleColumnZval(HashTable *values_ht, size_t column_index,
+                                  const std::vector<zend_string*> *column_names,
+                                  zval *out)
 {
-    /* Pre-flight row shape check. The transpose loop below pulls
-     * exactly columns_count cells from each row by index (or by name);
-     * any extra positional or named cells are silently ignored, which
-     * was the data-integrity hole behind a row like `[1, 99]` against
-     * a single-column table landing as `1` with `99` dropped. Reject
-     * up front: each row must be an array AND its element count must
-     * not exceed columns_count. Missing cells are still detected
-     * inside the loop by name lookup. */
-    {
-        zval *pzval;
-        ZEND_HASH_FOREACH_VAL(values_ht, pzval) {
-            if (Z_TYPE_P(pzval) != IS_ARRAY) {
-                throw std::runtime_error(
-                    "The insert function needs to pass in a two-dimensional array");
-            }
-            size_t row_count = zend_hash_num_elements(Z_ARRVAL_P(pzval));
-            if (row_count > columns_count) {
-                throw std::runtime_error(
-                    "row has " + std::to_string(row_count) +
-                    " cells but only " + std::to_string(columns_count) +
-                    " columns were declared; extra cells would be silently dropped");
-            }
-        } ZEND_HASH_FOREACH_END();
-    }
-
     array_init(out);
     try {
-        zval inner;
-        for (size_t i = 0; i < columns_count; ++i) {
-            array_init(&inner);
-            zval *pzval, *fzval;
-            ZEND_HASH_FOREACH_VAL(values_ht, pzval) {
-                fzval = sc_zend_hash_index_find(Z_ARRVAL_P(pzval), i);
-                if (!fzval && column_names) {
-                    zend_string *col = (*column_names)[i];
-                    fzval = sc_zend_hash_find(Z_ARRVAL_P(pzval),
-                                              ZSTR_VAL(col), ZSTR_LEN(col));
-                }
-                if (!fzval) {
-                    zval_ptr_dtor(&inner);
-                    throw std::runtime_error(
-                        "The number of parameters inserted per line is inconsistent");
-                }
-                sc_zval_add_ref(fzval);
-                add_next_index_zval(&inner, fzval);
-            } ZEND_HASH_FOREACH_END();
-            add_next_index_zval(out, &inner);
-        }
+        zval *pzval, *fzval;
+        ZEND_HASH_FOREACH_VAL(values_ht, pzval) {
+            fzval = sc_zend_hash_index_find(Z_ARRVAL_P(pzval), column_index);
+            if (!fzval && column_names) {
+                zend_string *col = (*column_names)[column_index];
+                fzval = sc_zend_hash_find(Z_ARRVAL_P(pzval),
+                                          ZSTR_VAL(col), ZSTR_LEN(col));
+            }
+            if (!fzval) {
+                throw std::runtime_error(
+                    "The number of parameters inserted per line is inconsistent");
+            }
+            sc_zval_add_ref(fzval);
+            add_next_index_zval(out, fzval);
+        } ZEND_HASH_FOREACH_END();
     } catch (...) {
         zval_ptr_dtor(out);
         ZVAL_UNDEF(out);
@@ -1948,12 +1959,6 @@ static void do_insert_into(zval *this_obj, zend_string *table,
                            const std::string &qid, zval *settings)
 {
     string sql;
-
-    // Storage for return_should lives in the function frame so that an
-    // exception thrown by BeginInsert / SendInsertBlock / EndInsert can
-    // still reach a valid zval header to free its array_init'd HashTable.
-    zval transposed;
-    ZVAL_UNDEF(&transposed);
 
     clickhouse_object *obj = Z_CLICKHOUSE_P(this_obj);
     try
@@ -1988,7 +1993,7 @@ static void do_insert_into(zval *this_obj, zend_string *table,
             } ZEND_HASH_FOREACH_END();
         }
 
-        buildColumnMajorRows(values_ht, columns_count, &column_names, &transposed);
+        validateRowShapes(values_ht, columns_count);
 
         sql = getInsertSql(std::string_view(ZSTR_VAL(table), ZSTR_LEN(table)), columns);
 
@@ -2003,15 +2008,24 @@ static void do_insert_into(zval *this_obj, zend_string *table,
 
         try {
             Block blockInsert;
-            size_t index = 0;
-            zval *pzval;
 
-            ZEND_HASH_FOREACH_VAL(Z_ARRVAL(transposed), pzval)
-            {
-                zvalToBlock(blockInsert, blockQuery, index, pzval);
-                index++;
+            /* Build one column at a time and feed it directly into the
+             * native block. The previous path materialized a full
+             * column-major PHP zval matrix first, which doubled peak
+             * PHP memory for the duration of the call. Streaming
+             * column-by-column keeps peak intermediate memory at one
+             * column. */
+            for (size_t index = 0; index < columns_count; ++index) {
+                zval inner;
+                buildSingleColumnZval(values_ht, index, &column_names, &inner);
+                try {
+                    zvalToBlock(blockInsert, blockQuery, index, &inner);
+                } catch (...) {
+                    zval_ptr_dtor(&inner);
+                    throw;
+                }
+                zval_ptr_dtor(&inner);
             }
-            ZEND_HASH_FOREACH_END();
 
             auto t0 = std::chrono::steady_clock::now();
             client->SendInsertBlock(blockInsert);
@@ -2030,15 +2044,9 @@ static void do_insert_into(zval *this_obj, zend_string *table,
             throw;
         }
         recordQuerySuccess(obj, sql, qid);
-        zval_ptr_dtor(&transposed);
-        ZVAL_UNDEF(&transposed);
     }
     catch (const std::exception& e)
     {
-        if (Z_TYPE(transposed) != IS_UNDEF) {
-            zval_ptr_dtor(&transposed);
-            ZVAL_UNDEF(&transposed);
-        }
         recordQueryError(obj, sql, qid, e);
         throwClickHouseError(e, qid);
     }
@@ -2134,15 +2142,11 @@ PHP_METHOD(ClickHouse, write)
         Z_PARAM_ARRAY(values)
     ZEND_PARSE_PARAMETERS_END();
 
-    zval transposed;
-    ZVAL_UNDEF(&transposed);
-
     try
     {
-        /* Acquire the reentry guard before any heavy lifting (the
-         * transpose builds a column-major copy of the user's input).
-         * Same ordering as insert() — fail-fast on reentry rather than
-         * spending CPU and memory on a copy that will be discarded. */
+        /* Acquire the reentry guard before any heavy lifting. Fail-fast
+         * on reentry rather than spending CPU and memory on a per-column
+         * build that will be discarded. */
         clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
         Client *client = getClient(obj);
         QueryActiveGuard guard(obj);
@@ -2169,19 +2173,21 @@ PHP_METHOD(ClickHouse, write)
                 "writeStart() block has no columns; cannot stream rows");
         }
 
-        buildColumnMajorRows(values_ht, columns_count, NULL, &transposed);
+        validateRowShapes(values_ht, columns_count);
         Block &blockQuery = obj->insert_block;
 
         Block blockInsert;
-        size_t index = 0;
-        zval *pzval;
-
-        ZEND_HASH_FOREACH_VAL(Z_ARRVAL(transposed), pzval)
-        {
-            zvalToBlock(blockInsert, blockQuery, index, pzval);
-            index++;
+        for (size_t index = 0; index < columns_count; ++index) {
+            zval inner;
+            buildSingleColumnZval(values_ht, index, NULL, &inner);
+            try {
+                zvalToBlock(blockInsert, blockQuery, index, &inner);
+            } catch (...) {
+                zval_ptr_dtor(&inner);
+                throw;
+            }
+            zval_ptr_dtor(&inner);
         }
-        ZEND_HASH_FOREACH_END();
 
         /* Mark the session dirty before SendInsertBlock so any failure
          * mid-send routes the catch path to ResetConnection() instead
@@ -2189,15 +2195,9 @@ PHP_METHOD(ClickHouse, write)
          * data would commit it. */
         obj->insert_blocks_sent = true;
         client->SendInsertBlock(blockInsert);
-        zval_ptr_dtor(&transposed);
-        ZVAL_UNDEF(&transposed);
     }
     catch (const std::exception& e)
     {
-        if (Z_TYPE(transposed) != IS_UNDEF) {
-            zval_ptr_dtor(&transposed);
-            ZVAL_UNDEF(&transposed);
-        }
         /* Three failure phases now, each needing a different recovery:
          *   - Pre-send on a clean session (no prior write() succeeded):
          *     the wire is healthy and no data has crossed it; close the
