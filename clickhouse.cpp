@@ -2005,6 +2005,7 @@ static void do_insert_into(zval *this_obj, zend_string *table,
         attachVerbose(insertQuery, obj);
         Block blockQuery = client->BeginInsert(insertQuery);
         bool insert_open = true;
+        bool block_sent = false;
 
         try {
             Block blockInsert;
@@ -2029,17 +2030,38 @@ static void do_insert_into(zval *this_obj, zend_string *table,
 
             auto t0 = std::chrono::steady_clock::now();
             client->SendInsertBlock(blockInsert);
+            block_sent = true;
             client->EndInsert();
             insert_open = false;
             auto t1 = std::chrono::steady_clock::now();
             obj->stats.elapsed_ms =
                 std::chrono::duration<double, std::milli>(t1 - t0).count();
         } catch (...) {
-            /* BeginInsert opened the wire; if a subsequent step throws,
-             * try once to close the stream so the underlying client's
-             * inserting_ flag clears. Swallow secondary failures. */
+            /* BeginInsert opened the wire. Three cases:
+             *   - Pre-send failure (zvalToBlock conversion throw): the
+             *     wire is healthy and no rows crossed it; EndInsert()
+             *     closes the empty insert and clears the vendored
+             *     client's inserting_ flag.
+             *   - Send/end failure (SendInsertBlock or EndInsert
+             *     itself threw): rows have been transmitted (or
+             *     partially so) and the server may have rejected them
+             *     via constraint, schema, or transport error. The
+             *     wire's native inserting_ state is dirty; EndInsert
+             *     would commit any successfully transmitted rows and
+             *     leave the client unable to run subsequent queries
+             *     ("cannot execute query while inserting" until manual
+             *     resetConnection). ResetConnection() drops the socket
+             *     and reconnects — discards any in-flight insert and
+             *     leaves the handle reusable.
+             * A throw past SendInsertBlock means the data left this
+             * process; the server alone determined whether to commit.
+             * Reset to recover the handle either way. */
             if (insert_open) {
-                try { client->EndInsert(); } catch (...) {}
+                if (block_sent) {
+                    try { client->ResetConnection(); } catch (...) {}
+                } else {
+                    try { client->EndInsert(); } catch (...) {}
+                }
             }
             throw;
         }
@@ -2254,10 +2276,18 @@ PHP_METHOD(ClickHouse, writeEnd)
     }
     catch (const std::exception& e)
     {
-        /* Clear the local state even if EndInsert failed. The server-side
-         * stream is no longer recoverable here; leaving has_insert_block
-         * true would wedge every subsequent call until the PHP object
-         * is destroyed. */
+        /* Reset the native connection on EndInsert failure. The server
+         * may have rejected the insert (constraint violation, schema
+         * drift, etc.) or the wire is otherwise dirty; in either case
+         * the vendored client's inserting_ flag is still set, so the
+         * next select/execute on this same handle would throw "cannot
+         * execute query while inserting" and the caller would have to
+         * resetConnection() by hand. Drop the socket and reconnect so
+         * the handle stays usable. Swallow secondary failures from the
+         * reset — we are already throwing the original error. */
+        if (obj->client) {
+            try { obj->client->ResetConnection(); } catch (...) {}
+        }
         obj->insert_block = Block();
         obj->has_insert_block = false;
         obj->insert_blocks_sent = false;
@@ -2703,11 +2733,10 @@ PHP_METHOD(ClickHouse, insertAssoc)
             throw std::runtime_error("insertAssoc: each row must be an associative array");
         }
 
-        zval columns_zv, values_zv;
+        zval columns_zv;
         array_init(&columns_zv);
-        array_init(&values_zv);
 
-        std::vector<std::string> col_order;
+        size_t expected_keys = 0;
         zval *fv;
         zend_string *fk;
         zend_ulong fnk;
@@ -2716,50 +2745,35 @@ PHP_METHOD(ClickHouse, insertAssoc)
             (void)fnk;
             if (!fk) {
                 zval_ptr_dtor(&columns_zv);
-                zval_ptr_dtor(&values_zv);
                 throw std::runtime_error("insertAssoc: each row must have string keys (column names)");
             }
-            col_order.emplace_back(ZSTR_VAL(fk), ZSTR_LEN(fk));
+            ++expected_keys;
             add_next_index_stringl(&columns_zv, ZSTR_VAL(fk), ZSTR_LEN(fk));
         } ZEND_HASH_FOREACH_END();
 
+        /* Validate row shape up front, but do NOT materialize a
+         * positional copy. do_insert_into → buildSingleColumnZval
+         * already handles assoc rows: when index lookup fails for an
+         * IS_ARRAY row, the path falls through to name lookup using
+         * the column-name list built from columns_zv above. That
+         * removes the second full PHP matrix the previous version
+         * built in addition to the original assoc rows. The key-count
+         * check here preserves the hard error on shape drift between
+         * rows. The missing-key surface is covered inside
+         * buildSingleColumnZval, which throws "inconsistent" when both
+         * positional and named lookups fail. */
         zval *row_zv;
         ZEND_HASH_FOREACH_VAL(rows_ht, row_zv) {
             if (Z_TYPE_P(row_zv) != IS_ARRAY) {
                 zval_ptr_dtor(&columns_zv);
-                zval_ptr_dtor(&values_zv);
                 throw std::runtime_error("insertAssoc: each row must be an associative array");
             }
-            /* Reject rows whose key set drifts from the first row.
-             * Previously a later row with an extra key silently dropped
-             * the unexpected value and proceeded; the method's
-             * shared-key-set contract demands a hard error. Counting
-             * elements here catches both extra-key and duplicate-key
-             * cases (PHP arrays can't actually duplicate string keys,
-             * but cheap to count). The missing-key path is caught
-             * inside the col_order loop below by name lookup. */
             HashTable *row_ht = Z_ARRVAL_P(row_zv);
-            if (zend_hash_num_elements(row_ht) != col_order.size()) {
+            if (zend_hash_num_elements(row_ht) != expected_keys) {
                 zval_ptr_dtor(&columns_zv);
-                zval_ptr_dtor(&values_zv);
                 throw std::runtime_error(
                     "insertAssoc: row key count differs from first row");
             }
-            zval row_out;
-            array_init(&row_out);
-            for (const std::string &col : col_order) {
-                zval *cell = sc_zend_hash_find(row_ht, (char*)col.c_str(), col.size());
-                if (!cell) {
-                    zval_ptr_dtor(&row_out);
-                    zval_ptr_dtor(&columns_zv);
-                    zval_ptr_dtor(&values_zv);
-                    throw std::runtime_error(
-                        "insertAssoc: row is missing key '" + col + "'");
-                }
-                Z_TRY_ADDREF_P(cell);
-                add_next_index_zval(&row_out, cell);
-            }
-            add_next_index_zval(&values_zv, &row_out);
         } ZEND_HASH_FOREACH_END();
 
         /* Dispatch directly into the shared insert helper. The previous
@@ -2767,9 +2781,8 @@ PHP_METHOD(ClickHouse, insertAssoc)
          * added a full PHP method-dispatch frame on every assoc insert
          * and exposed the helper to user-defined subclass overrides
          * of insert(). */
-        do_insert_into(getThis(), table, &columns_zv, &values_zv, qid, settings);
+        do_insert_into(getThis(), table, &columns_zv, rows, qid, settings);
         zval_ptr_dtor(&columns_zv);
-        zval_ptr_dtor(&values_zv);
         if (EG(exception)) {
             return;
         }
