@@ -43,6 +43,7 @@ extern "C" {
 #include <deque>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 
 using namespace clickhouse;
 using namespace std;
@@ -2029,8 +2030,16 @@ static void do_insert_into(zval *this_obj, zend_string *table,
             }
 
             auto t0 = std::chrono::steady_clock::now();
-            client->SendInsertBlock(blockInsert);
+            /* Mark the wire dirty before SendInsertBlock so a throw
+             * during the call (transport error mid-frame, server
+             * pushback packet, etc.) routes the catch path through
+             * ResetConnection instead of EndInsert. EndInsert on a
+             * partially transmitted block can either commit the
+             * transmitted prefix or leave the native client wedged
+             * in inserting state. Same ordering streaming write()
+             * uses for insert_blocks_sent. */
             block_sent = true;
+            client->SendInsertBlock(blockInsert);
             client->EndInsert();
             insert_open = false;
             auto t1 = std::chrono::steady_clock::now();
@@ -2736,7 +2745,9 @@ PHP_METHOD(ClickHouse, insertAssoc)
         zval columns_zv;
         array_init(&columns_zv);
 
-        size_t expected_keys = 0;
+        /* First row defines the column set. Build the list and a hash
+         * we can lookup against when validating later rows. */
+        std::unordered_set<std::string> expected_keys;
         zval *fv;
         zend_string *fk;
         zend_ulong fnk;
@@ -2747,21 +2758,18 @@ PHP_METHOD(ClickHouse, insertAssoc)
                 zval_ptr_dtor(&columns_zv);
                 throw std::runtime_error("insertAssoc: each row must have string keys (column names)");
             }
-            ++expected_keys;
+            expected_keys.emplace(ZSTR_VAL(fk), ZSTR_LEN(fk));
             add_next_index_stringl(&columns_zv, ZSTR_VAL(fk), ZSTR_LEN(fk));
         } ZEND_HASH_FOREACH_END();
 
-        /* Validate row shape up front, but do NOT materialize a
-         * positional copy. do_insert_into → buildSingleColumnZval
-         * already handles assoc rows: when index lookup fails for an
-         * IS_ARRAY row, the path falls through to name lookup using
-         * the column-name list built from columns_zv above. That
-         * removes the second full PHP matrix the previous version
-         * built in addition to the original assoc rows. The key-count
-         * check here preserves the hard error on shape drift between
-         * rows. The missing-key surface is covered inside
-         * buildSingleColumnZval, which throws "inconsistent" when both
-         * positional and named lookups fail. */
+        /* Validate every row against the first row's key set without
+         * materializing a positional copy. do_insert_into →
+         * buildSingleColumnZval handles the value lookup later, but
+         * its gatherer tries integer-index lookup before name lookup;
+         * a later row like `[0 => 99, "b" => 4]` would silently land
+         * 99 into the first column instead of throwing. Reject any
+         * row that has integer keys or whose string-key set drifts
+         * from the first row's set. */
         zval *row_zv;
         ZEND_HASH_FOREACH_VAL(rows_ht, row_zv) {
             if (Z_TYPE_P(row_zv) != IS_ARRAY) {
@@ -2769,11 +2777,31 @@ PHP_METHOD(ClickHouse, insertAssoc)
                 throw std::runtime_error("insertAssoc: each row must be an associative array");
             }
             HashTable *row_ht = Z_ARRVAL_P(row_zv);
-            if (zend_hash_num_elements(row_ht) != expected_keys) {
+            if (zend_hash_num_elements(row_ht) != expected_keys.size()) {
                 zval_ptr_dtor(&columns_zv);
                 throw std::runtime_error(
                     "insertAssoc: row key count differs from first row");
             }
+            zend_string *rk;
+            zend_ulong rnk;
+            zval *rv;
+            ZEND_HASH_FOREACH_KEY_VAL(row_ht, rnk, rk, rv) {
+                (void)rv;
+                (void)rnk;
+                if (!rk) {
+                    zval_ptr_dtor(&columns_zv);
+                    throw std::runtime_error(
+                        "insertAssoc: each row must have string keys (column names)");
+                }
+                if (expected_keys.find(std::string(ZSTR_VAL(rk), ZSTR_LEN(rk)))
+                        == expected_keys.end()) {
+                    zval_ptr_dtor(&columns_zv);
+                    throw std::runtime_error(
+                        std::string("insertAssoc: unexpected key '") +
+                        std::string(ZSTR_VAL(rk), ZSTR_LEN(rk)) +
+                        "' (not in first row's column set)");
+                }
+            } ZEND_HASH_FOREACH_END();
         } ZEND_HASH_FOREACH_END();
 
         /* Dispatch directly into the shared insert helper. The previous
