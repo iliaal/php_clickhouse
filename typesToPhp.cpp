@@ -42,6 +42,7 @@ extern "C" {
 #include <algorithm>
 #include <cmath>
 #include <cerrno>
+#include <cinttypes>
 
 #include "typesToPhp.hpp"
 
@@ -1674,6 +1675,50 @@ static inline void emitIntColumn(zval *arr, const ColumnRef& columnRef, int row,
     }
 }
 
+// UInt64 specialization. Values above ZEND_LONG_MAX (2^63-1) lose
+// unsigned semantics when cast to zend_long — they read back as
+// negatives in PHP, and Map(UInt64,*) keys collapse distinct
+// unsigned values onto the same PHP-signed key. For values that
+// don't fit a signed PHP integer, emit a decimal string instead so
+// the user can round-trip safely. Values <= ZEND_LONG_MAX continue
+// to come back as PHP int for backward compatibility.
+static inline void emitUInt64Cell(zval *arr, uint64_t v,
+                                  const string& column_name, int8_t is_array, long fetch_mode)
+{
+    if (v <= (uint64_t)ZEND_LONG_MAX) {
+        if (is_array) {
+            add_next_index_long(arr, (zend_long)v);
+        } else if (fetch_mode & SC_FETCH_ONE) {
+            ZVAL_LONG(arr, (zend_long)v);
+        } else {
+            sc_add_assoc_long_ex(arr, column_name.c_str(), column_name.length(),
+                                 (zend_long)v);
+        }
+        return;
+    }
+    char buf[32];
+    int len = snprintf(buf, sizeof(buf), "%" PRIu64, v);
+    if (is_array) {
+        sc_add_next_index_stringl(arr, buf, len, 1);
+    } else if (fetch_mode & SC_FETCH_ONE) {
+        ZVAL_STRINGL(arr, buf, len);
+    } else {
+        sc_add_assoc_stringl_ex(arr, column_name.c_str(), column_name.length(),
+                                buf, len, 1);
+    }
+}
+
+template <>
+inline void emitIntColumn<ColumnUInt64>(zval *arr, const ColumnRef& columnRef, int row,
+                                        const string& column_name, int8_t is_array, long fetch_mode)
+{
+    auto col_ptr = columnRef->As<ColumnUInt64>();
+    if (!col_ptr) {
+        throw std::runtime_error("Integer column downcast failed");
+    }
+    emitUInt64Cell(arr, (uint64_t)(*col_ptr)[row], column_name, is_array, fetch_mode);
+}
+
 // Build a PHP 2-element numeric array for a Point. Output is a freshly
 // initialized zval owned by the caller; the caller decides how to attach
 // it (next_index, assoc, or write-into-arr).
@@ -2404,7 +2449,23 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
                     return 0;
                 }
                 case Type::Code::Int64:   long_out = (zend_long)k_i64_col->At(i);  return 1;
-                case Type::Code::UInt64:  long_out = (zend_long)k_u64_col->At(i);  return 1;
+                case Type::Code::UInt64: {
+                    /* UInt64 values above ZEND_LONG_MAX (2^63-1) lose
+                     * unsigned semantics if cast to zend_long, and PHP
+                     * array keys can't be unsigned, so distinct large
+                     * UInt64 keys would otherwise collapse to the same
+                     * negative signed-key. Promote to string when the
+                     * value doesn't fit a signed PHP integer. */
+                    uint64_t uk = (uint64_t)k_u64_col->At(i);
+                    if (uk > (uint64_t)ZEND_LONG_MAX) {
+                        char buf[32];
+                        int len = snprintf(buf, sizeof(buf), "%" PRIu64, uk);
+                        str_buf.assign(buf, len);
+                        return 0;
+                    }
+                    long_out = (zend_long)uk;
+                    return 1;
+                }
                 case Type::Code::Int32:   long_out = (zend_long)k_i32_col->At(i);  return 1;
                 case Type::Code::UInt32:  long_out = (zend_long)k_u32_col->At(i);  return 1;
                 case Type::Code::Int16:   long_out = (zend_long)k_i16_col->At(i);  return 1;
@@ -2488,14 +2549,26 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             if (value_code == Type::Code::String) {
                 std::string_view vv = (*v_str_col)[i];
                 addStrL(kkind, str_key_buf, long_key, dbl_key, vv.data(), vv.length());
-            } else if (value_code == Type::Code::Int64 || value_code == Type::Code::UInt64
+            } else if (value_code == Type::Code::UInt64) {
+                /* UInt64 values above ZEND_LONG_MAX surface as
+                 * negatives if cast to zend_long; emit as a string
+                 * value so callers can round-trip safely. Same fix
+                 * as the scalar UInt64 read path. */
+                uint64_t uv = (uint64_t)v_u64_col->At(i);
+                if (uv > (uint64_t)ZEND_LONG_MAX) {
+                    char buf[32];
+                    int len = snprintf(buf, sizeof(buf), "%" PRIu64, uv);
+                    addStrL(kkind, str_key_buf, long_key, dbl_key, buf, len);
+                } else {
+                    addLong(kkind, str_key_buf, long_key, dbl_key, (zend_long)uv);
+                }
+            } else if (value_code == Type::Code::Int64
                     || value_code == Type::Code::Int32 || value_code == Type::Code::UInt32
                     || value_code == Type::Code::Int16 || value_code == Type::Code::UInt16
                     || value_code == Type::Code::Int8  || value_code == Type::Code::UInt8) {
                 zend_long lv = 0;
                 switch (value_code) {
                     case Type::Code::Int64:  lv = (zend_long)v_i64_col->At(i); break;
-                    case Type::Code::UInt64: lv = (zend_long)v_u64_col->At(i); break;
                     case Type::Code::Int32:  lv = (zend_long)v_i32_col->At(i); break;
                     case Type::Code::UInt32: lv = (zend_long)v_u32_col->At(i); break;
                     case Type::Code::Int16:  lv = (zend_long)v_i16_col->At(i); break;

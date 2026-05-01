@@ -1868,6 +1868,31 @@ static void buildColumnMajorRows(HashTable *values_ht, size_t columns_count,
                                  const std::vector<zend_string*> *column_names,
                                  zval *out)
 {
+    /* Pre-flight row shape check. The transpose loop below pulls
+     * exactly columns_count cells from each row by index (or by name);
+     * any extra positional or named cells are silently ignored, which
+     * was the data-integrity hole behind a row like `[1, 99]` against
+     * a single-column table landing as `1` with `99` dropped. Reject
+     * up front: each row must be an array AND its element count must
+     * not exceed columns_count. Missing cells are still detected
+     * inside the loop by name lookup. */
+    {
+        zval *pzval;
+        ZEND_HASH_FOREACH_VAL(values_ht, pzval) {
+            if (Z_TYPE_P(pzval) != IS_ARRAY) {
+                throw std::runtime_error(
+                    "The insert function needs to pass in a two-dimensional array");
+            }
+            size_t row_count = zend_hash_num_elements(Z_ARRVAL_P(pzval));
+            if (row_count > columns_count) {
+                throw std::runtime_error(
+                    "row has " + std::to_string(row_count) +
+                    " cells but only " + std::to_string(columns_count) +
+                    " columns were declared; extra cells would be silently dropped");
+            }
+        } ZEND_HASH_FOREACH_END();
+    }
+
     array_init(out);
     try {
         zval inner;
@@ -1875,11 +1900,6 @@ static void buildColumnMajorRows(HashTable *values_ht, size_t columns_count,
             array_init(&inner);
             zval *pzval, *fzval;
             ZEND_HASH_FOREACH_VAL(values_ht, pzval) {
-                if (Z_TYPE_P(pzval) != IS_ARRAY) {
-                    zval_ptr_dtor(&inner);
-                    throw std::runtime_error(
-                        "The insert function needs to pass in a two-dimensional array");
-                }
                 fzval = sc_zend_hash_index_find(Z_ARRVAL_P(pzval), i);
                 if (!fzval && column_names) {
                     zend_string *col = (*column_names)[i];
@@ -2153,11 +2173,21 @@ PHP_METHOD(ClickHouse, write)
             zval_ptr_dtor(&transposed);
             ZVAL_UNDEF(&transposed);
         }
-        /* SendInsertBlock failed mid-stream. The wire is broken; mark the
-         * insert as no longer in progress so the user can resetConnection
-         * and start over without first calling writeEnd (which would
-         * itself fail). */
+        /* The failure can happen in two phases:
+         *   - Pre-send: zvalToBlock conversion threw on bad input. The
+         *     wire is still healthy; we just need to close the open
+         *     insert (writeStart already called BeginInsert) so the
+         *     vendored Client clears its internal `inserting_` flag.
+         *     Without this, the next select/execute on the same client
+         *     throws "cannot execute query while inserting" and the
+         *     caller has to figure out they need resetConnection().
+         *   - Send: SendInsertBlock itself threw mid-stream. The wire
+         *     is broken; EndInsert is best-effort and may fail too.
+         * Try EndInsert in both cases and swallow secondary failures. */
         clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
+        if (obj->client && obj->has_insert_block) {
+            try { obj->client->EndInsert(); } catch (...) {}
+        }
         obj->insert_block = Block();
         obj->has_insert_block = false;
         throwClickHouseError(e);
