@@ -15,7 +15,7 @@ $qid_drop   = "clickhouse-test-q-drop-" . bin2hex(random_bytes(4));
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
 $c->execute("DROP TABLE IF EXISTS test.qid_t");
 $c->execute("CREATE TABLE test.qid_t (id UInt32) ENGINE = Memory");
-$c->insert("test.qid_t", ["id"], [[1, 2]], $qid_insert);
+$c->insert("test.qid_t", ["id"], [[1], [2]], $qid_insert);
 $c->select("SELECT * FROM test.qid_t", [], 0, $qid_select);
 $c->execute("DROP TABLE test.qid_t", [], $qid_drop);
 
