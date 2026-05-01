@@ -7,6 +7,107 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-05-01
+
+Hardening release covering nine rounds of reviewer-driven fixes
+across the insert, write, and type-conversion surfaces. Streaming
+and direct insert paths now recover the native client across every
+server-side rejection point (BeginInsert, SendInsertBlock,
+EndInsert) so a thrown insert no longer wedges the handle with
+"cannot execute query while inserting". Type conversion gained
+strict full-consumption parsers for the Map, narrow-int, UInt64,
+Int128/UInt128, and date/time surfaces; placeholders, hex literals,
+enums, and Nullable inserts validate up front instead of silently
+coercing. Insert and write batch transposition no longer
+materializes a full PHP column-major matrix — peak intermediate PHP
+memory drops from N_rows × N_cols to one column at a time.
+
+### Added
+
+- UInt64 inserts accept decimal and hex strings above
+  `ZEND_LONG_MAX` on both the scalar and `Map(*, UInt64)` paths
+  via a shared `strict_zval_u64` parser. Reads continue to surface
+  upper-half values as decimal strings.
+- 23 new PHPTs (072–094) pinning the new safety surfaces:
+  insert/write shape validation, UInt64 string round-trip,
+  server-side `EndInsert`/`BeginInsert` recovery, destructor
+  rollback, partial-commit abort, enum range/Nullable rejection,
+  single-token placeholder enforcement, Map narrow-int bounds,
+  DateTime64 fractional validation, `insertAssoc` key-set drift.
+
+### Changed
+
+- `insert()` and `write()` build native ClickHouse columns one at
+  a time directly from the user's row-major input. The previous
+  path materialized a full column-major PHP zval matrix before
+  building.
+- `insertAssoc()` no longer makes a positional PHP copy of input
+  rows; the column gatherer reads each column directly from the
+  original associative rows. Key validation now uses
+  `zend_hash_exists` against the first row's HashTable instead of
+  allocating an `std::string` for every row key.
+- `require.php` floor raised to `>=7.4` to match the CI matrix
+  (PHP 7.1–7.3 were never tested).
+
+### Fixed
+
+- `BeginInsert`, `SendInsertBlock`, and `EndInsert` exceptions
+  reset the native connection before rethrowing, so the same
+  handle stays usable. Previously a server-side rejection
+  (missing table, bad column, CHECK constraint, schema drift)
+  left the vendored client's `inserting_` flag set; subsequent
+  `select`/`execute` on the same handle threw "cannot execute
+  query while inserting" until manual `resetConnection()`.
+- Destructor cleanup mirrors the dirty/clean recovery split: an
+  in-flight streaming insert with sent blocks is dropped via
+  `ResetConnection` on `unset()` rather than committed via
+  `EndInsert`. Clean sessions still `EndInsert`. Avoids partial
+  commit on script bailout.
+- `write()` rejects rows narrower or wider than the `writeStart`
+  column count instead of silently sending a truncated block. The
+  previous path took the first row's element count as
+  authoritative, so a row like `[1]` against
+  `writeStart(t, ['a','b'])` landed `1` into column `a` with `b`
+  defaulted server-side.
+- `insert()` rejects rows with extra positional or named cells
+  instead of silently dropping them. A row like `[1, 99]` against
+  a single-column table previously landed as `1` with `99` lost.
+- A failed later `write()` no longer commits previously sent
+  blocks. The catch path tracks whether any block has been sent
+  in the current `writeStart()` session and chooses
+  `ResetConnection` (discard) over `EndInsert` (commit) on a
+  dirty session.
+- `insertAssoc()` rejects integer-keyed later rows and any
+  key-set drift from the first row. The first row defines the
+  column set; every later row must have the same string-key set.
+- `Enum8`/`Enum16` inserts reject undeclared integers, NULL on
+  non-Nullable columns, and unknown string names.
+- PHP 8.5 `ReflectionProperty::setAccessible()` deprecation
+  guarded by version. `ZEND_ACC_NOT_SERIALIZABLE` guarded for
+  PHP < 8.1.
+
+### Security & Hardening
+
+- Strict full-consumption integer and double parsers across the
+  Map, narrow-int, Int128/UInt128, geo, DateTime64, and Time64
+  insert paths. Non-numeric strings, fractional doubles, non-finite
+  floats, and out-of-range values throw instead of silently
+  coercing to 0/0.0 inside the column.
+- Single-token placeholder validator: `{name}` placeholders accept
+  exactly one identifier (column or table name) and reject
+  comma-separated lists. Comma-list callers must use array form.
+- Hex literal sanity: `0x...` strings reject embedded NUL bytes
+  and partial parses against unsigned integer columns.
+- Same-client reentry guard: a userland progress/profile callback
+  that fires another query on the same handle throws cleanly
+  instead of crashing the worker on the next `ReceiveData`.
+- Recursive type-conversion depth cap (32) keeps deeply nested
+  structures (`Array(Array(...))`, `Map(K, Tuple(...))`) from
+  blowing the stack.
+- Public-API consistency: `setSettings()` validates keys,
+  `setVerbose(null)` disables verbose mode cleanly, and
+  `setProgressCallback(null)` clears the registered callback.
+
 ## [0.8.0] - 2026-04-30
 
 Architecture refactor that moves per-Client state from file-scope
@@ -500,7 +601,8 @@ own way.
   emits a clear "unsupported" warning. Full Windows build of the
   vendored zstd + absl + lz4 + cityhash is a separate project.
 
-[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.8.0...HEAD
+[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.8.1...HEAD
+[0.8.1]: https://github.com/iliaal/php_clickhouse/releases/tag/0.8.1
 [0.8.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.8.0
 [0.7.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.7.0
 [0.6.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.6.0
