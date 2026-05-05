@@ -1,7 +1,7 @@
 --TEST--
 Check for ClickHouse extension presence
---SKIPIF--
-<?php if (!extension_loaded("clickhouse")) print "skip"; ?>
+--EXTENSIONS--
+clickhouse
 --FILE--
 <?php 
 echo "ClickHouse extension is available";

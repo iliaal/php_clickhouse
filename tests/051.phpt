@@ -1,7 +1,7 @@
 --TEST--
 ClickHouse offline surface: classes, constants, methods, exception path (no server)
---SKIPIF--
-<?php if (!extension_loaded("clickhouse")) { echo "skip clickhouse extension not loaded"; } ?>
+--EXTENSIONS--
+clickhouse
 --FILE--
 <?php
 /* Server-free smoke. Validates that the .dll/.so loads, every public

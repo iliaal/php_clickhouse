@@ -1,5 +1,7 @@
 --TEST--
 ClickHouse UInt64 values above ZEND_LONG_MAX read back as decimal strings, not negative ints
+--EXTENSIONS--
+clickhouse
 --SKIPIF--
 <?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--

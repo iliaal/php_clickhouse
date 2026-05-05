@@ -1,5 +1,7 @@
 --TEST--
 ClickHouse IPv4 / IPv6 read paths return canonical string form (regression)
+--EXTENSIONS--
+clickhouse
 --SKIPIF--
 <?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--

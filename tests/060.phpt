@@ -1,5 +1,7 @@
 --TEST--
 ClickHouse integer insert rejects out-of-range values for narrow column types
+--EXTENSIONS--
+clickhouse
 --SKIPIF--
 <?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--

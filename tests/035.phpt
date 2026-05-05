@@ -1,5 +1,7 @@
 --TEST--
 ClickHouse setSettings + per-call settings precedence
+--EXTENSIONS--
+clickhouse
 --SKIPIF--
 <?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--

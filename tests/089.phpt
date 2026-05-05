@@ -1,5 +1,7 @@
 --TEST--
 ClickHouse write() failure after prior blocks rolls back instead of partial-committing
+--EXTENSIONS--
+clickhouse
 --SKIPIF--
 <?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--

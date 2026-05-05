@@ -1,5 +1,7 @@
 --TEST--
 ClickHouse Time and Time64 round-trip
+--EXTENSIONS--
+clickhouse
 --SKIPIF--
 <?php
 require __DIR__ . "/_clickhouse.inc";

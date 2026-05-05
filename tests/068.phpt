@@ -1,5 +1,7 @@
 --TEST--
 ClickHouse Map insert rejects out-of-range values for narrow Int / UInt key and value columns
+--EXTENSIONS--
+clickhouse
 --SKIPIF--
 <?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--

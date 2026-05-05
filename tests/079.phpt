@@ -1,5 +1,7 @@
 --TEST--
 ClickHouse Date / DateTime / DateTime64 / Time / Time64 reject non-numeric strings instead of coercing to 0
+--EXTENSIONS--
+clickhouse
 --SKIPIF--
 <?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--

@@ -1,5 +1,7 @@
 --TEST--
 ClickHouse Map(Float, *) read keys are locale-independent
+--EXTENSIONS--
+clickhouse
 --SKIPIF--
 <?php
 require __DIR__ . "/_clickhouse.inc";

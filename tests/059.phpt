@@ -1,5 +1,7 @@
 --TEST--
 ClickHouse insert rejects sparse / associative / non-string columns array (regression for NULL-deref)
+--EXTENSIONS--
+clickhouse
 --SKIPIF--
 <?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--

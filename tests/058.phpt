@@ -1,5 +1,7 @@
 --TEST--
 ClickHouse client-side {name} placeholder rejects unsafe characters (parens, star, plus)
+--EXTENSIONS--
+clickhouse
 --SKIPIF--
 <?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--
