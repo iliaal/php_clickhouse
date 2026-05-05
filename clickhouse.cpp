@@ -118,7 +118,7 @@ struct clickhouse_object {
 
 static inline clickhouse_object *clickhouse_from_obj(zend_object *obj)
 {
-    return (clickhouse_object *)((char *)obj - XtOffsetOf(clickhouse_object, std));
+    return (clickhouse_object *)((char *)obj - offsetof(clickhouse_object, std));
 }
 
 #define Z_CLICKHOUSE_P(zv) clickhouse_from_obj(Z_OBJ_P(zv))
@@ -219,7 +219,7 @@ struct clickhouse_iter_object {
 
 static inline clickhouse_iter_object *clickhouse_iter_from_obj(zend_object *obj)
 {
-    return (clickhouse_iter_object *)((char *)obj - XtOffsetOf(clickhouse_iter_object, std));
+    return (clickhouse_iter_object *)((char *)obj - offsetof(clickhouse_iter_object, std));
 }
 
 #define Z_CLICKHOUSE_ITER_P(zv) clickhouse_iter_from_obj(Z_OBJ_P(zv))
@@ -269,7 +269,7 @@ struct clickhouse_statement_object {
 
 static inline clickhouse_statement_object *clickhouse_statement_from_obj(zend_object *obj)
 {
-    return (clickhouse_statement_object *)((char *)obj - XtOffsetOf(clickhouse_statement_object, std));
+    return (clickhouse_statement_object *)((char *)obj - offsetof(clickhouse_statement_object, std));
 }
 
 #define Z_CLICKHOUSE_STATEMENT_P(zv) clickhouse_statement_from_obj(Z_OBJ_P(zv))
@@ -402,7 +402,7 @@ PHP_MINIT_FUNCTION(clickhouse)
 #endif
 
     memcpy(&clickhouse_object_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
-    clickhouse_object_handlers.offset = XtOffsetOf(clickhouse_object, std);
+    clickhouse_object_handlers.offset = offsetof(clickhouse_object, std);
     clickhouse_object_handlers.free_obj = clickhouse_free_obj;
 
     clickhouse_exception_ce = register_class_ClickHouseException(zend_ce_exception);
@@ -417,7 +417,7 @@ PHP_MINIT_FUNCTION(clickhouse)
 #endif
 
     memcpy(&clickhouse_iter_object_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
-    clickhouse_iter_object_handlers.offset = XtOffsetOf(clickhouse_iter_object, std);
+    clickhouse_iter_object_handlers.offset = offsetof(clickhouse_iter_object, std);
     clickhouse_iter_object_handlers.free_obj = clickhouse_iter_free_obj;
 
     clickhouse_statement_ce = register_class_ClickHouseStatement(zend_ce_iterator, zend_ce_countable, zend_ce_arrayaccess, php_json_serializable_ce);
@@ -430,7 +430,7 @@ PHP_MINIT_FUNCTION(clickhouse)
 #endif
 
     memcpy(&clickhouse_statement_object_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
-    clickhouse_statement_object_handlers.offset = XtOffsetOf(clickhouse_statement_object, std);
+    clickhouse_statement_object_handlers.offset = offsetof(clickhouse_statement_object, std);
     clickhouse_statement_object_handlers.free_obj = clickhouse_statement_free_obj;
 
     /* Back-compat aliases for the original SeasClick name. Deprecated;
