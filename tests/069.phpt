@@ -1,5 +1,7 @@
 --TEST--
 ClickHouse Int128 string insert rejects magnitudes outside [-2^127, 2^127-1]
+--EXTENSIONS--
+clickhouse
 --SKIPIF--
 <?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--

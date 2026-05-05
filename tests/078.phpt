@@ -1,5 +1,7 @@
 --TEST--
 ClickHouse strict numeric validation extended to Map values, Int128/UInt128 non-strings, and geo coords
+--EXTENSIONS--
+clickhouse
 --SKIPIF--
 <?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--

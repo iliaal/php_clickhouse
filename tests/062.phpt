@@ -1,5 +1,7 @@
 --TEST--
 ClickHouse Map numeric keys reject non-numeric strings instead of silently coercing
+--EXTENSIONS--
+clickhouse
 --SKIPIF--
 <?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--

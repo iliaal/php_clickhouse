@@ -1,5 +1,7 @@
 --TEST--
 ClickHouse rejects non-array input on declared-array parameters with TypeError (no segfault)
+--EXTENSIONS--
+clickhouse
 --SKIPIF--
 <?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--

@@ -1,5 +1,7 @@
 --TEST--
 ClickHouse insertAssoc derives column order from first row
+--EXTENSIONS--
+clickhouse
 --SKIPIF--
 <?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--

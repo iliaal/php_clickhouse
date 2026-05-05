@@ -1,5 +1,7 @@
 --TEST--
 ClickHouseException carries server_code, server_name, query_id
+--EXTENSIONS--
+clickhouse
 --SKIPIF--
 <?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--

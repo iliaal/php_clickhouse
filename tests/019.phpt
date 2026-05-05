@@ -1,5 +1,7 @@
 --TEST--
 ClickHouse Map row I/O across supported K/V combinations
+--EXTENSIONS--
+clickhouse
 --SKIPIF--
 <?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--

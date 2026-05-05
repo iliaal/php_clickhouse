@@ -1,5 +1,7 @@
 --TEST--
 ClickHouse selectStreamCallback row callback exception aborts the stream and surfaces to caller
+--EXTENSIONS--
+clickhouse
 --SKIPIF--
 <?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--

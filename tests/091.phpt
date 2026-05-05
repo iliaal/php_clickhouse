@@ -1,5 +1,7 @@
 --TEST--
 ClickHouse destructor on an in-flight streaming insert rolls back, does not commit
+--EXTENSIONS--
+clickhouse
 --SKIPIF--
 <?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--

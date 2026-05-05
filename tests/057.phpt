@@ -1,5 +1,7 @@
 --TEST--
 ClickHouse progress/profile callback exceptions propagate to caller (regression for silent-drop)
+--EXTENSIONS--
+clickhouse
 --SKIPIF--
 <?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--

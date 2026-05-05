@@ -1,5 +1,7 @@
 --TEST--
 ClickHouse Map matrix expansion: LowCardinality keys, UUID K/V, integer width K/V, Float keys, narrow ints
+--EXTENSIONS--
+clickhouse
 --SKIPIF--
 <?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--

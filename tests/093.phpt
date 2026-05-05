@@ -1,5 +1,7 @@
 --TEST--
 ClickHouse insertAssoc() rejects integer keys and key-set drift in later rows
+--EXTENSIONS--
+clickhouse
 --SKIPIF--
 <?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--

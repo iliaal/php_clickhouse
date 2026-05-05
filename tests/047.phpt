@@ -1,5 +1,7 @@
 --TEST--
 ClickHouse Phase D: getStatistics() echoes the query_id supplied to select/execute/insert
+--EXTENSIONS--
+clickhouse
 --SKIPIF--
 <?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--

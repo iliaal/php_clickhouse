@@ -1,5 +1,7 @@
 --TEST--
 ClickHouse hex-literal UInt insert rejects strings with embedded NUL bytes
+--EXTENSIONS--
+clickhouse
 --SKIPIF--
 <?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--

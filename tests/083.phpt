@@ -1,5 +1,7 @@
 --TEST--
 ClickHouse DateTime64 fractional parser rejects bare dot, non-digits, and zero-precision suffixes
+--EXTENSIONS--
+clickhouse
 --SKIPIF--
 <?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--

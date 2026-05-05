@@ -1,5 +1,7 @@
 --TEST--
 ClickHouse server-side typed Float params are locale-independent
+--EXTENSIONS--
+clickhouse
 --SKIPIF--
 <?php
 require __DIR__ . "/_clickhouse.inc";

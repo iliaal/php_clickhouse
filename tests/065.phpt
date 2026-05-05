@@ -1,5 +1,7 @@
 --TEST--
 ClickHouse insert path rejects deeply-nested PHP input via depth guard
+--EXTENSIONS--
+clickhouse
 --SKIPIF--
 <?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--

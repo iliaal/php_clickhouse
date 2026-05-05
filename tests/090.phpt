@@ -1,5 +1,7 @@
 --TEST--
 ClickHouse UInt64 inserts accept decimal and hex strings above ZEND_LONG_MAX, scalar and Map
+--EXTENSIONS--
+clickhouse
 --SKIPIF--
 <?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--

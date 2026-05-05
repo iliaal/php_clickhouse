@@ -1,5 +1,7 @@
 --TEST--
 ClickHouse smi2-style ergonomics: chainable settings, setSetting, setDatabase, exception getters
+--EXTENSIONS--
+clickhouse
 --SKIPIF--
 <?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--

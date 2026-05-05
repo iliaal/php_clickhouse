@@ -1,5 +1,7 @@
 --TEST--
 ClickHouseStatement: smi2-style result wrapper. Iterator + Countable + ArrayAccess + JsonSerializable + fetch helpers
+--EXTENSIONS--
+clickhouse
 --SKIPIF--
 <?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--

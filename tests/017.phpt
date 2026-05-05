@@ -1,5 +1,7 @@
 --TEST--
 ClickHouse Int128 / UInt128 / Decimal128 string round-trip
+--EXTENSIONS--
+clickhouse
 --SKIPIF--
 <?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
 --FILE--
