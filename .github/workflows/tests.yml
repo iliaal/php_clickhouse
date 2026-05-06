@@ -98,13 +98,16 @@ jobs:
           CLICKHOUSE_PASSWD: test
           NO_INTERACTION: 1
         run: |
+          # Stage the built .so into the system extension_dir so
+          # run-tests.php's --EXTENSIONS-- clickhouse directive resolves
+          # via the standard $ext_dir/clickhouse.so path on every PHP
+          # version. Loading via -d extension=$(pwd)/modules/clickhouse.so
+          # tripped PHP 7.4 dl.c's extension_dir prepend; overriding
+          # extension_dir breaks the system dom/xml/phar/etc that
+          # setup-php loads by basename.
+          EXT_DIR=$(php -r 'echo ini_get("extension_dir");')
+          sudo cp modules/clickhouse.so "$EXT_DIR/"
           export TEST_PHP_EXECUTABLE=$(which php)
-          # extension_dir + basename (not absolute path) so run-tests.php's
-          # --EXTENSIONS-- handler resolves $ext_dir/clickhouse.so to the
-          # built module on every PHP version. Absolute -d extension= trips
-          # PHP 7.4 dl.c's extension_dir prepend, which made the EXTENSIONS
-          # fallback emit a startup warning that broke every test.
-          export TEST_PHP_ARGS="-d extension_dir=$(pwd)/modules -d extension=clickhouse"
           # run-tests.php exits non-zero on failures, zero on all-pass /
           # all-skip. Let its exit code drive the step.
           php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK tests/
@@ -175,8 +178,10 @@ jobs:
           CLICKHOUSE_PASSWD: test
           NO_INTERACTION: 1
         run: |
+          EXT_DIR=$(/tmp/php-zts/bin/php -r 'echo ini_get("extension_dir");')
+          mkdir -p "$EXT_DIR"
+          cp modules/clickhouse.so "$EXT_DIR/"
           export TEST_PHP_EXECUTABLE=/tmp/php-zts/bin/php
-          export TEST_PHP_ARGS="-d extension_dir=$(pwd)/modules -d extension=clickhouse"
           /tmp/php-zts/bin/php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK tests/
 
   # Windows extension builds need the official PHP SDK + matching MSVC
@@ -322,6 +327,8 @@ jobs:
           # PHP and the extension are linked against the shared libasan/ubsan
           # runtimes, so the dynamic linker needs to find them. LD_LIBRARY_PATH
           # points at clang's runtime dir; no LD_PRELOAD is needed.
+          EXT_DIR=$(/tmp/php-asan/bin/php -r 'echo ini_get("extension_dir");')
+          mkdir -p "$EXT_DIR"
+          cp modules/clickhouse.so "$EXT_DIR/"
           export TEST_PHP_EXECUTABLE=/tmp/php-asan/bin/php
-          export TEST_PHP_ARGS="-d extension_dir=$(pwd)/modules -d extension=clickhouse"
           /tmp/php-asan/bin/php run-tests.php --show-diff --asan -g FAIL,BORK,LEAK,XLEAK tests/
