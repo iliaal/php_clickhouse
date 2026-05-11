@@ -69,6 +69,16 @@ final class ClickHouse
         array $settings = []
     ): bool {}
 
+    public function insertFromStream(
+        string $table,
+        array $columns,
+        mixed $stream,
+        string $format = "TabSeparated",
+        int $batch_rows = 10000,
+        string $query_id = "",
+        array $settings = []
+    ): int {}
+
     public function writeStart(
         string $table,
         array $columns,

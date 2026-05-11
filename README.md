@@ -228,6 +228,21 @@ $ch->insertAssoc(string $table, array $rows,
                  string $query_id = "",
                  array $settings = []);
 
+// Stream-parse a TSV / CSV file (or any PHP stream resource) and insert
+// the rows in batches of $batch_rows. Bytes are parsed in C++; only
+// $batch_rows worth of per-column zvals exist at any time, so inputs
+// larger than memory work fine. Formats match selectToStream()'s set
+// (TabSeparated, TabSeparatedWithNames, CSV, CSVWithNames). Literal `\N`
+// in either format is the NULL marker; empty CSV cells become empty
+// strings. Returns rows inserted.
+$f = fopen("/tmp/events.csv", "rb");
+$n = $ch->insertFromStream(string $table, array $columns, mixed $stream,
+                           string $format = "TabSeparated",
+                           int    $batch_rows = 10000,
+                           string $query_id = "",
+                           array  $settings = []);
+fclose($f);
+
 // Streaming insert (open block, append, close)
 $ch->writeStart(string $table, array $columns,
                 string $query_id = "",

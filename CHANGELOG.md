@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `insertFromStream($table, $columns, $stream, $format, $batch_rows, $query_id, $settings)`
+  stream-parses a TSV or CSV file (or any readable PHP stream resource)
+  and INSERTs rows in batches of `$batch_rows` (default 10000) without
+  materializing the full file in PHP memory. The parser is C++ and
+  handles TSV escapes (`\\`, `\t`, `\n`, `\r`, `\0`) and RFC 4180 CSV
+  quoting (embedded `"`, `,`, CRLF, doubled `""`). Literal `\N` is the
+  NULL marker in both formats; empty CSV cells stay as empty strings.
+  `*WithNames` variants discard the first input row. Returns rows
+  inserted. Same recovery semantics as `insert()` / `writeStart()`: a
+  mid-stream throw resets the native client so the handle stays
+  usable. Smoke test: 100k single-block-shaped rows insert in ~140ms
+  on a local Memory-engine table.
+- 4 new PHPTs (103–106) cover the TSV happy path with header skipping
+  and escape decoding, CSV quoting / embedded commas / `""` / CRLF
+  rows / multi-line cells, NULL parsing in both formats plus batch
+  boundary correctness with `batch_rows=10`, and the rejection
+  surface (bad format, non-stream zval, zero batch, empty columns,
+  row-too-wide, unterminated quoted CSV cell, handle remains usable
+  after each rejection).
 - `selectToStream($sql, $params, $stream, $format, $query_id, $settings)`
   writes SELECT rows directly to a PHP stream resource (`fopen` /
   `php://memory` / `php://stdout` / any writable stream) in

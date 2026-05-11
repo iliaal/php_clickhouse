@@ -315,6 +315,7 @@ static PHP_METHOD(ClickHouse, selectWithExternalData);
 static PHP_METHOD(ClickHouse, selectToStream);
 static PHP_METHOD(ClickHouse, insert);
 static PHP_METHOD(ClickHouse, insertAssoc);
+static PHP_METHOD(ClickHouse, insertFromStream);
 static PHP_METHOD(ClickHouse, writeStart);
 static PHP_METHOD(ClickHouse, write);
 static PHP_METHOD(ClickHouse, writeEnd);
@@ -2631,6 +2632,432 @@ PHP_METHOD(ClickHouse, insert)
         return;
     }
     RETURN_TRUE;
+}
+/* }}} */
+
+/* === insertFromStream() ===================================================
+ *
+ * Streaming TSV / CSV ingester. Reads a PHP stream, parses rows in C++,
+ * batches them into native ClickHouse Blocks of N rows, and sends each
+ * block as it fills. No row-major PHP zval matrix is materialized for
+ * the whole file — only one batch of per-column packed arrays at a time.
+ */
+
+enum class InsertStreamFormat { TSV, TSVWithNames, CSV, CSVWithNames };
+
+static bool parseInsertStreamFormat(const char *s, size_t l, InsertStreamFormat &out)
+{
+    auto eq = [&](const char *lit) {
+        size_t n = strlen(lit);
+        return l == n && memcmp(s, lit, n) == 0;
+    };
+    if (eq("TabSeparated") || eq("TSV"))                   { out = InsertStreamFormat::TSV;          return true; }
+    if (eq("TabSeparatedWithNames") || eq("TSVWithNames")) { out = InsertStreamFormat::TSVWithNames; return true; }
+    if (eq("CSV"))                                         { out = InsertStreamFormat::CSV;          return true; }
+    if (eq("CSVWithNames"))                                { out = InsertStreamFormat::CSVWithNames; return true; }
+    return false;
+}
+
+static inline bool insertStreamFormatIsCSV(InsertStreamFormat f)
+{
+    return f == InsertStreamFormat::CSV || f == InsertStreamFormat::CSVWithNames;
+}
+
+static inline bool insertStreamFormatHasHeader(InsertStreamFormat f)
+{
+    return f == InsertStreamFormat::TSVWithNames || f == InsertStreamFormat::CSVWithNames;
+}
+
+/* Push the just-parsed cell into the current row. NULL marker `\N`
+ * (literal, in both formats) becomes IS_NULL; everything else becomes
+ * IS_STRING. The cell buffer is cleared on return. The flag
+ * cell_is_quoted lets us treat a quoted-empty-CSV-cell ("") as an
+ * empty string rather than NULL, even if cell_buf happens to equal
+ * "\\N" later. */
+static void pushCell(std::string &cell_buf, bool cell_is_quoted,
+                     std::vector<zval> &row_cells)
+{
+    zval z;
+    if (!cell_is_quoted && cell_buf.size() == 2 &&
+        cell_buf[0] == '\\' && cell_buf[1] == 'N') {
+        ZVAL_NULL(&z);
+    } else {
+        /* The cell buffer's bytes already had escapes / quoting resolved
+         * during parse; what's left is the raw cell content. */
+        ZVAL_STRINGL(&z, cell_buf.data(), cell_buf.size());
+    }
+    row_cells.push_back(z);
+    cell_buf.clear();
+}
+
+struct InsertStreamParser {
+    InsertStreamFormat fmt;
+    size_t expected_cols;
+
+    enum class State { CellStart, InCell, InQuoted, QuotePending } state = State::CellStart;
+    std::string cell_buf;
+    bool cell_is_quoted = false;     // CSV: did this cell start with `"`?
+    std::vector<zval> row_cells;
+    bool first_row_skipped = false;
+    bool prev_was_cr = false;
+
+    /* Owned by the parser between calls; transferred to the caller via
+     * finishRow() and consumed there. */
+
+    void finishCell() {
+        pushCell(cell_buf, cell_is_quoted, row_cells);
+        cell_is_quoted = false;
+    }
+
+    /* Hand the just-completed row to the row handler. The handler takes
+     * ownership of the zvals (we move out of row_cells). On throw, the
+     * remaining zvals in row_cells get dtor'd by the parser destructor. */
+    template<typename RowHandler>
+    void finishRow(RowHandler &on_row) {
+        if (insertStreamFormatHasHeader(fmt) && !first_row_skipped) {
+            /* Discard the header row entirely. We don't verify it
+             * against $columns; the user is responsible for matching
+             * order. */
+            for (zval &z : row_cells) zval_ptr_dtor(&z);
+            row_cells.clear();
+            first_row_skipped = true;
+            return;
+        }
+        if (row_cells.size() != expected_cols) {
+            size_t got = row_cells.size();
+            for (zval &z : row_cells) zval_ptr_dtor(&z);
+            row_cells.clear();
+            throw std::runtime_error(
+                "insertFromStream: row has " + std::to_string(got) +
+                " cells but " + std::to_string(expected_cols) +
+                " columns were declared");
+        }
+        on_row(row_cells);
+        row_cells.clear();
+    }
+
+    ~InsertStreamParser() {
+        for (zval &z : row_cells) zval_ptr_dtor(&z);
+    }
+
+    /* Feed `len` bytes and emit each completed row through on_row. */
+    template<typename RowHandler>
+    void feed(const char *data, size_t len, RowHandler &on_row) {
+        const bool csv = insertStreamFormatIsCSV(fmt);
+        const char cell_sep = csv ? ',' : '\t';
+
+        for (size_t i = 0; i < len; ++i) {
+            char c = data[i];
+
+            /* CSV-only quoted-cell state machine. TSV ignores '"' entirely. */
+            if (csv && state == State::InQuoted) {
+                if (c == '"') {
+                    state = State::QuotePending;
+                } else {
+                    cell_buf.push_back(c);
+                }
+                continue;
+            }
+            if (csv && state == State::QuotePending) {
+                if (c == '"') {
+                    /* Doubled quote -> literal " inside cell, stay quoted. */
+                    cell_buf.push_back('"');
+                    state = State::InQuoted;
+                    continue;
+                }
+                /* Quote was the closing one; fall through and reprocess c
+                 * as if we were InCell (so cell_sep / newline finalize). */
+                state = State::InCell;
+            }
+
+            if (c == cell_sep) {
+                finishCell();
+                state = State::CellStart;
+                continue;
+            }
+            if (c == '\n' || c == '\r') {
+                if (c == '\r') {
+                    prev_was_cr = true;
+                } else {
+                    /* '\n' after '\r' is the CRLF tail; swallow it. */
+                    if (prev_was_cr) { prev_was_cr = false; continue; }
+                }
+                /* End of row. Tolerate a trailing blank line at EOF. */
+                if (state == State::CellStart && row_cells.empty() && cell_buf.empty()) {
+                    state = State::CellStart;
+                    continue;
+                }
+                finishCell();
+                finishRow(on_row);
+                state = State::CellStart;
+                continue;
+            }
+            prev_was_cr = false;
+
+            if (state == State::CellStart) {
+                if (csv && c == '"') {
+                    state = State::InQuoted;
+                    cell_is_quoted = true;
+                    continue;
+                }
+                state = State::InCell;
+                /* fallthrough */
+            }
+
+            /* TSV escapes inside an unquoted cell. CSV unquoted cells
+             * have no escape syntax. */
+            if (!csv && c == '\\' && i + 1 < len) {
+                char n = data[i + 1];
+                switch (n) {
+                    case '\\': cell_buf.push_back('\\'); ++i; continue;
+                    case 't':  cell_buf.push_back('\t'); ++i; continue;
+                    case 'n':  cell_buf.push_back('\n'); ++i; continue;
+                    case 'r':  cell_buf.push_back('\r'); ++i; continue;
+                    case '0':  cell_buf.push_back('\0'); ++i; continue;
+                    case 'N':
+                        /* Whole-cell NULL marker only at cell start with no other content. */
+                        if (cell_buf.empty()) {
+                            cell_buf.push_back('\\');
+                            cell_buf.push_back('N');
+                            ++i;
+                            continue;
+                        }
+                        cell_buf.push_back('\\');
+                        continue;
+                    default:
+                        cell_buf.push_back('\\');
+                        continue;
+                }
+            }
+
+            cell_buf.push_back(c);
+        }
+    }
+
+    /* Flush any trailing partial row at EOF. A non-empty cell or
+     * non-empty row_cells means the last line had no newline; treat it
+     * as a complete row. */
+    template<typename RowHandler>
+    void finish(RowHandler &on_row) {
+        if (state == State::QuotePending) {
+            /* Closing quote on the final line. */
+            state = State::InCell;
+        }
+        if (state == State::InQuoted) {
+            throw std::runtime_error("insertFromStream: unterminated quoted CSV cell at EOF");
+        }
+        if (!cell_buf.empty() || !row_cells.empty()) {
+            finishCell();
+            finishRow(on_row);
+        }
+    }
+};
+
+/* {{{ proto int insertFromStream(string table, array columns, mixed stream, string format = "TabSeparated", int batch_rows = 10000, string query_id = "", array settings = [])
+ *
+ * Stream-parse a TSV / CSV file (or any PHP stream resource) and INSERT
+ * the rows into `table` in batches of `batch_rows`. Bytes are parsed in
+ * C++; only `batch_rows` worth of per-column zvals exist at a time, so
+ * the function works on inputs larger than memory.
+ *
+ * Formats: TabSeparated (alias TSV), TabSeparatedWithNames (alias
+ * TSVWithNames), CSV, CSVWithNames. For `*WithNames`, the first row of
+ * the input is discarded (the user is responsible for matching column
+ * order to `$columns`).
+ *
+ * NULL: a literal cell `\N` (in either format) becomes a PHP null and
+ * is rejected unless the target column is Nullable. Empty CSV cells
+ * become empty strings, not NULL.
+ *
+ * Type coercion is delegated to the existing insertColumn() path; all
+ * cells arrive there as IS_STRING (PHP coerces numeric strings to int
+ * and float for the appropriate column types). `Time` columns reject
+ * string input — TSV / CSV imports are not supported for Time today.
+ *
+ * Returns the total number of rows inserted.
+ */
+PHP_METHOD(ClickHouse, insertFromStream)
+{
+    zend_string *table = NULL;
+    zval *columns = NULL;
+    zval *stream_zv = NULL;
+    zend_string *format_s = NULL;
+    zend_long batch_rows = 10000;
+    zend_string *query_id = NULL;
+    zval *settings = NULL;
+
+    ZEND_PARSE_PARAMETERS_START(3, 7)
+        Z_PARAM_STR(table)
+        Z_PARAM_ARRAY(columns)
+        Z_PARAM_ZVAL(stream_zv)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_STR(format_s)
+        Z_PARAM_LONG(batch_rows)
+        Z_PARAM_STR(query_id)
+        Z_PARAM_ARRAY(settings)
+    ZEND_PARSE_PARAMETERS_END();
+
+    InsertStreamFormat fmt = InsertStreamFormat::TSV;
+    if (format_s) {
+        if (!parseInsertStreamFormat(ZSTR_VAL(format_s), ZSTR_LEN(format_s), fmt)) {
+            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                "insertFromStream: unknown format; expected TabSeparated, "
+                "TabSeparatedWithNames, CSV, or CSVWithNames", 0);
+            return;
+        }
+    }
+
+    if (batch_rows < 1) {
+        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+            "insertFromStream: batch_rows must be >= 1", 0);
+        return;
+    }
+
+    php_stream *stream = NULL;
+    php_stream_from_zval_no_verify(stream, stream_zv);
+    if (!stream) {
+        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+            "insertFromStream: argument 3 must be an open stream resource", 0);
+        return;
+    }
+
+    HashTable *columns_ht = Z_ARRVAL_P(columns);
+    size_t columns_count = zend_hash_num_elements(columns_ht);
+    if (columns_count == 0) {
+        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+            "insertFromStream: columns list cannot be empty", 0);
+        return;
+    }
+
+    std::string qid = makeQid(query_id);
+    clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
+    std::string sql;
+    zend_long total_rows = 0;
+
+    try {
+        Client *client = getClient(obj);
+        QueryActiveGuard guard(obj);
+
+        if (obj->has_insert_block) {
+            throw std::runtime_error("The insert operation is now in progress");
+        }
+
+        /* Validate column-name list shape (same rules as insert()). */
+        std::vector<zend_string*> column_names;
+        column_names.reserve(columns_count);
+        {
+            zval *cz;
+            ZEND_HASH_FOREACH_VAL(columns_ht, cz) {
+                if (Z_TYPE_P(cz) != IS_STRING) {
+                    throw std::runtime_error(
+                        "insertFromStream: columns must be a list of column-name strings");
+                }
+                column_names.push_back(Z_STR_P(cz));
+            } ZEND_HASH_FOREACH_END();
+        }
+
+        sql = getInsertSql(std::string_view(ZSTR_VAL(table), ZSTR_LEN(table)), columns);
+
+        Query insertQuery = qid.empty() ? Query(sql) : Query(sql, qid);
+        applyMergedSettings(insertQuery, obj, settings);
+        resetStats(obj);
+        obj->stats.last_query_id = qid;
+        attachProgressAndProfile(insertQuery, obj);
+        attachVerbose(insertQuery, obj);
+
+        Block blockQuery;
+        try {
+            blockQuery = client->BeginInsert(insertQuery);
+        } catch (...) {
+            try { client->ResetConnection(); } catch (...) {}
+            throw;
+        }
+
+        bool insert_open  = true;
+        bool block_dirty  = false;
+
+        /* Per-column packed-zval accumulators. One IS_ARRAY zval per
+         * column; each insert from the row handler appends one cell. */
+        std::vector<zval> col_zvals(columns_count);
+        for (size_t c = 0; c < columns_count; ++c) array_init(&col_zvals[c]);
+
+        auto cleanup_col_zvals = [&]() {
+            for (size_t c = 0; c < columns_count; ++c) {
+                if (Z_TYPE(col_zvals[c]) != IS_UNDEF) zval_ptr_dtor(&col_zvals[c]);
+            }
+        };
+
+        size_t pending_rows = 0;
+
+        auto flush_batch = [&]() {
+            if (pending_rows == 0) return;
+            Block blockInsert;
+            for (size_t c = 0; c < columns_count; ++c) {
+                zvalToBlock(blockInsert, blockQuery, c, &col_zvals[c]);
+                zval_ptr_dtor(&col_zvals[c]);
+                array_init(&col_zvals[c]);
+            }
+            block_dirty = true;
+            client->SendInsertBlock(blockInsert);
+            block_dirty = false;
+            pending_rows = 0;
+        };
+
+        auto on_row = [&](std::vector<zval> &row) {
+            /* row.size() == columns_count is guaranteed by InsertStreamParser. */
+            for (size_t c = 0; c < columns_count; ++c) {
+                /* Move cell zval into the column accumulator. The cell
+                 * already owns its IS_STRING buffer; ownership transfers
+                 * with add_next_index_zval. */
+                add_next_index_zval(&col_zvals[c], &row[c]);
+                ZVAL_UNDEF(&row[c]);
+            }
+            ++pending_rows;
+            ++total_rows;
+            if (pending_rows >= (size_t)batch_rows) {
+                flush_batch();
+            }
+        };
+
+        try {
+            InsertStreamParser parser;
+            parser.fmt = fmt;
+            parser.expected_cols = columns_count;
+
+            constexpr size_t CHUNK = 64 * 1024;
+            char buf[CHUNK];
+            while (!php_stream_eof(stream)) {
+                ssize_t n = php_stream_read(stream, buf, CHUNK);
+                if (n <= 0) break;
+                parser.feed(buf, (size_t)n, on_row);
+            }
+            parser.finish(on_row);
+
+            flush_batch();
+            client->EndInsert();
+            insert_open = false;
+        } catch (...) {
+            cleanup_col_zvals();
+            if (insert_open) {
+                if (block_dirty || total_rows > 0) {
+                    try { client->ResetConnection(); } catch (...) {}
+                } else {
+                    try { client->EndInsert(); } catch (...) {}
+                }
+            }
+            throw;
+        }
+
+        cleanup_col_zvals();
+        recordQuerySuccess(obj, sql, qid);
+    }
+    catch (const std::exception &e) {
+        recordQueryError(obj, sql, qid, e);
+        throwClickHouseError(e, qid);
+        return;
+    }
+
+    RETURN_LONG(total_rows);
 }
 /* }}} */
 
