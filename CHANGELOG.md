@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `selectToStream($sql, $params, $stream, $format, $query_id, $settings)`
+  writes SELECT rows directly to a PHP stream resource (`fopen` /
+  `php://memory` / `php://stdout` / any writable stream) in
+  `TabSeparated`, `TabSeparatedWithNames`, `CSV`, or `CSVWithNames`
+  format. Returns rows written. Cells are formatted block-by-block in
+  C++ from native column data and flushed without per-row PHP array
+  assembly or userland callback overhead, so large exports run
+  meaningfully faster than `selectStream` + manual `fwrite`. Dates
+  always emit as ISO strings; Decimal / Int128 / UInt128 as decimal
+  strings; NULL renders as `\N` in TSV and as an empty cell in CSV.
+  Nullable and LowCardinality wrappers around supported scalars are
+  fine; Array, Tuple, Map, and geometry columns are rejected with a
+  `ClickHouseException` — text formats can't unambiguously represent
+  them. Mid-stream errors `ResetConnection()` the handle to keep it
+  usable, mirroring the existing recovery in `insert()` / `writeStart()`.
+- 5 new PHPTs (098–102) cover TSV happy path with escape characters,
+  CSV RFC-4180 quoting (embedded `"`, `,`, `\n`, `\r`), `WithNames`
+  header emission (including the empty-result-still-emits-header
+  case), Nullable rendering, and the rejection surface (bad format,
+  non-stream argument, unsupported column types).
 - `selectWithExternalData($sql, $externals, ...)` sends one or more
   named in-memory tables alongside a SELECT (ClickHouse "external
   data" feature). Lets the query body reference the externals by name

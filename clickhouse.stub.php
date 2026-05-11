@@ -45,6 +45,15 @@ final class ClickHouse
         array $settings = []
     ): mixed {}
 
+    public function selectToStream(
+        string $sql,
+        array $params,
+        mixed $stream,
+        string $format = "TabSeparated",
+        string $query_id = "",
+        array $settings = []
+    ): int {}
+
     public function insert(
         string $table,
         array $columns,

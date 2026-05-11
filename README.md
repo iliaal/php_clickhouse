@@ -247,6 +247,19 @@ $ch->selectStreamCallback(string $sql, callable $cb,
                           array $params = [], string $query_id = "",
                           array $settings = []);  // true per-row stream
 
+// Write rows straight to a PHP stream resource as TSV / CSV — bypasses
+// per-row PHP array assembly and userland callbacks; cells are
+// formatted block-by-block in C++ and flushed to the stream. Returns
+// rows written. Formats: TabSeparated (alias TSV), TabSeparatedWithNames
+// (alias TSVWithNames), CSV, CSVWithNames. Dates emit as ISO strings;
+// Decimal / Int128 / UInt128 as decimal strings. NULL = `\N` (TSV) /
+// empty (CSV). Array / Tuple / Map columns are rejected.
+$f = fopen("/tmp/events.tsv", "wb");
+$n = $ch->selectToStream(string $sql, array $params, mixed $stream,
+                         string $format = "TabSeparated",
+                         string $query_id = "", array $settings = []);
+fclose($f);
+
 // smi2-style result wrapper: returns a ClickHouseStatement (Iterator,
 // Countable, ArrayAccess, JsonSerializable) carrying a per-call stats
 // snapshot. Use when you want fetchOne / fetchKeyPair / fetchColumn /
