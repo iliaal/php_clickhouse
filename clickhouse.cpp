@@ -1939,6 +1939,21 @@ static Block buildExternalTableBlock(zval *entry, std::string &name_out)
 
     validateRowShapes(rows_ht, columns_count);
 
+    /* The native protocol uses a zero-row block as the "end of stream"
+     * marker for the external-data section, so clickhouse-cpp skips
+     * empty named tables on the wire (lib/clickhouse-cpp/clickhouse/
+     * client.cpp:354). The server then never sees the table identifier
+     * and the query fails with "Unknown expression or table expression
+     * identifier ext_X". Reject upfront with a message that points to
+     * the userland workaround (skip the query when the filter set is
+     * empty). */
+    if (zend_hash_num_elements(rows_ht) == 0) {
+        throw std::runtime_error(
+            "external table '" + name_out + "' has no rows; the native protocol "
+            "cannot carry an empty named external table — guard the call in "
+            "userland and skip the query when the filter set is empty");
+    }
+
     Block block;
     for (size_t c = 0; c < columns_count; ++c) {
         zval inner;
@@ -3152,9 +3167,27 @@ PHP_METHOD(ClickHouse, insertFromStream)
 
             constexpr size_t CHUNK = 64 * 1024;
             char buf[CHUNK];
-            while (!php_stream_eof(stream)) {
+            while (true) {
                 ssize_t n = php_stream_read(stream, buf, CHUNK);
-                if (n <= 0) break;
+                if (n < 0) {
+                    /* Wrapper signaled an error. Routing through the
+                     * catch path means the existing recovery resets the
+                     * connection if any rows have been queued, so the
+                     * partially-parsed data does not commit. The
+                     * pre-fix `if (n <= 0) break` treated this case as
+                     * clean EOF and silently inserted whatever had been
+                     * parsed up to the failure. */
+                    throw std::runtime_error(
+                        "insertFromStream: stream read returned an error");
+                }
+                if (n == 0) {
+                    if (php_stream_eof(stream)) break;
+                    /* Some wrappers return 0 without setting the EOF
+                     * flag (transient unavailability, badly-written
+                     * userland wrapper). Don't conflate with EOF. */
+                    throw std::runtime_error(
+                        "insertFromStream: stream returned 0 bytes without reaching EOF");
+                }
                 parser.feed(buf, (size_t)n, on_row);
             }
             parser.finish(on_row);
