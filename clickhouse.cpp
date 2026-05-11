@@ -312,6 +312,7 @@ static PHP_METHOD(ClickHouse, __construct);
 static PHP_METHOD(ClickHouse, __destruct);
 static PHP_METHOD(ClickHouse, select);
 static PHP_METHOD(ClickHouse, selectWithExternalData);
+static PHP_METHOD(ClickHouse, selectToStream);
 static PHP_METHOD(ClickHouse, insert);
 static PHP_METHOD(ClickHouse, insertAssoc);
 static PHP_METHOD(ClickHouse, writeStart);
@@ -2021,6 +2022,328 @@ PHP_METHOD(ClickHouse, selectWithExternalData)
     std::string qid = makeQid(query_id);
     do_select_into(return_value, getThis(), ZSTR_VAL(sql), ZSTR_LEN(sql),
                    params, fetch_mode, qid, settings, &ext_tables);
+}
+/* }}} */
+
+/* Output format for selectToStream(). Aliases TSV / TSVWithNames match
+ * ClickHouse's own short names and are accepted on input. */
+enum class StreamOutFormat { TSV, TSVWithNames, CSV, CSVWithNames };
+
+static bool parseStreamFormat(const char *s, size_t l, StreamOutFormat &out)
+{
+    auto eq = [&](const char *lit) {
+        size_t n = strlen(lit);
+        return l == n && memcmp(s, lit, n) == 0;
+    };
+    if (eq("TabSeparated") || eq("TSV"))                    { out = StreamOutFormat::TSV;          return true; }
+    if (eq("TabSeparatedWithNames") || eq("TSVWithNames"))  { out = StreamOutFormat::TSVWithNames; return true; }
+    if (eq("CSV"))                                          { out = StreamOutFormat::CSV;          return true; }
+    if (eq("CSVWithNames"))                                 { out = StreamOutFormat::CSVWithNames; return true; }
+    return false;
+}
+
+static inline bool streamFormatIsCSV(StreamOutFormat f)
+{
+    return f == StreamOutFormat::CSV || f == StreamOutFormat::CSVWithNames;
+}
+
+static inline bool streamFormatHasHeader(StreamOutFormat f)
+{
+    return f == StreamOutFormat::TSVWithNames || f == StreamOutFormat::CSVWithNames;
+}
+
+/* Walk Nullable / LowCardinality wrappers and reject the composite
+ * column types that text formats can't unambiguously serialize. Returns
+ * true when the column is OK; on false, *reason_out names the offending
+ * type for the error message. */
+static bool isStreamableColumnType(const TypeRef &t, std::string &reason_out)
+{
+    switch (t->GetCode()) {
+        case Type::Code::Nullable:
+            return isStreamableColumnType(t->As<NullableType>()->GetNestedType(), reason_out);
+        case Type::Code::LowCardinality:
+            return isStreamableColumnType(t->As<LowCardinalityType>()->GetNestedType(), reason_out);
+        case Type::Code::Array:
+        case Type::Code::Tuple:
+        case Type::Code::Map:
+        case Type::Code::Point:
+        case Type::Code::Ring:
+        case Type::Code::Polygon:
+        case Type::Code::MultiPolygon:
+            reason_out = t->GetName();
+            return false;
+        default:
+            return true;
+    }
+}
+
+static void tsvAppendEscaped(smart_str *buf, const char *s, size_t len)
+{
+    for (size_t i = 0; i < len; ++i) {
+        char c = s[i];
+        switch (c) {
+            case '\\': smart_str_appendl(buf, "\\\\", 2); break;
+            case '\t': smart_str_appendl(buf, "\\t", 2);  break;
+            case '\n': smart_str_appendl(buf, "\\n", 2);  break;
+            case '\r': smart_str_appendl(buf, "\\r", 2);  break;
+            case '\0': smart_str_appendl(buf, "\\0", 2);  break;
+            default:   smart_str_appendc(buf, c);
+        }
+    }
+}
+
+/* RFC 4180-style CSV escape. Cell wrapped in double-quotes if it
+ * contains ", ',', '\r', or '\n'; embedded '"' is doubled. Numeric and
+ * plain-ASCII cells are emitted verbatim. */
+static void csvAppendEscaped(smart_str *buf, const char *s, size_t len)
+{
+    bool needs_quoting = false;
+    for (size_t i = 0; i < len; ++i) {
+        char c = s[i];
+        if (c == '"' || c == ',' || c == '\n' || c == '\r') {
+            needs_quoting = true;
+            break;
+        }
+    }
+    if (!needs_quoting) {
+        smart_str_appendl(buf, s, len);
+        return;
+    }
+    smart_str_appendc(buf, '"');
+    for (size_t i = 0; i < len; ++i) {
+        char c = s[i];
+        if (c == '"') {
+            smart_str_appendl(buf, "\"\"", 2);
+        } else {
+            smart_str_appendc(buf, c);
+        }
+    }
+    smart_str_appendc(buf, '"');
+}
+
+/* Append one cell (already-formatted text or IS_NULL) to the per-block
+ * buffer. NULL renders as `\N` in TSV and as an empty cell in CSV. */
+static void appendCellForStream(smart_str *buf, zval *cell, StreamOutFormat fmt)
+{
+    if (Z_TYPE_P(cell) == IS_NULL) {
+        if (!streamFormatIsCSV(fmt)) {
+            smart_str_appendl(buf, "\\N", 2);
+        }
+        return;
+    }
+    zend_string *zs = zval_get_string(cell);
+    if (streamFormatIsCSV(fmt)) {
+        csvAppendEscaped(buf, ZSTR_VAL(zs), ZSTR_LEN(zs));
+    } else {
+        tsvAppendEscaped(buf, ZSTR_VAL(zs), ZSTR_LEN(zs));
+    }
+    zend_string_release(zs);
+}
+
+/* Flush the per-block buffer to the PHP stream and reset it. Throws on
+ * short-write so the caller's catch path can map to ClickHouseException. */
+static void flushStreamBuf(smart_str *buf, php_stream *stream)
+{
+    if (!buf->s || ZSTR_LEN(buf->s) == 0) return;
+    size_t n = ZSTR_LEN(buf->s);
+    ssize_t w = php_stream_write(stream, ZSTR_VAL(buf->s), n);
+    if (w < 0 || (size_t)w != n) {
+        throw std::runtime_error("selectToStream: short write to PHP stream");
+    }
+    smart_str_free(buf);
+}
+
+/*
+ * Internal: run a SELECT and write rows directly to a PHP stream in
+ * TSV / CSV (with optional header). No PHP row-array assembly; the
+ * type-aware text comes from convertToZval into a temporary scalar
+ * zval, then zval_get_string + format-specific escape, written
+ * block-by-block to keep syscall count low.
+ */
+static zend_long do_select_to_stream(zval *this_obj,
+                                     const char *sql, size_t l_sql,
+                                     zval *params, php_stream *stream,
+                                     StreamOutFormat fmt,
+                                     const std::string &qid, zval *settings)
+{
+    clickhouse_object *obj = Z_CLICKHOUSE_P(this_obj);
+    zend_long total_rows = 0;
+    try
+    {
+        Client *client = getClient(obj);
+        QueryActiveGuard guard(obj);
+
+        if (obj->has_insert_block) {
+            throw std::runtime_error("The insert operation is now in progress");
+        }
+
+        std::string sql_s(sql, l_sql);
+        std::vector<TypedParam> typed_params;
+        if (params != NULL && Z_TYPE_P(params) == IS_ARRAY) {
+            applyPlaceholders(sql_s, Z_ARRVAL_P(params), typed_params);
+        } else if (params != NULL && Z_TYPE_P(params) != IS_ARRAY) {
+            throw std::runtime_error("The second argument to selectToStream must be an array");
+        }
+
+        Query query = qid.empty() ? Query(sql_s) : Query(sql_s, qid);
+        attachTypedParams(query, typed_params);
+        applyMergedSettings(query, obj, settings);
+        resetStats(obj);
+        obj->stats.last_query_id = qid;
+        attachProgressAndProfile(query, obj);
+        attachVerbose(query, obj);
+
+        bool header_written = false;
+        smart_str buf = {0};
+        const long fetch_mode = SC_FETCH_DATE_AS_STRINGS | SC_FETCH_ONE;
+        const char *row_term  = streamFormatIsCSV(fmt) ? "\r\n" : "\n";
+        const size_t row_term_len = streamFormatIsCSV(fmt) ? 2 : 1;
+        const char  cell_sep  = streamFormatIsCSV(fmt) ? ','  : '\t';
+
+        query.OnData([&](const Block &block) {
+            const size_t col_count = block.GetColumnCount();
+            const size_t row_count = block.GetRowCount();
+            if (col_count == 0) return;
+
+            if (!header_written) {
+                /* Validate types once, against the first non-empty block.
+                 * The server guarantees identical schema across all blocks
+                 * of a single query, so checking once is sufficient. */
+                for (size_t c = 0; c < col_count; ++c) {
+                    std::string reason;
+                    if (!isStreamableColumnType(block[c]->Type(), reason)) {
+                        throw std::runtime_error(
+                            "selectToStream: column '" + std::string(block.GetColumnName(c)) +
+                            "' has unsupported type '" + reason +
+                            "'; TSV/CSV cannot represent it");
+                    }
+                }
+                if (streamFormatHasHeader(fmt)) {
+                    for (size_t c = 0; c < col_count; ++c) {
+                        if (c > 0) smart_str_appendc(&buf, cell_sep);
+                        std::string nm = block.GetColumnName(c);
+                        if (streamFormatIsCSV(fmt)) {
+                            csvAppendEscaped(&buf, nm.data(), nm.size());
+                        } else {
+                            tsvAppendEscaped(&buf, nm.data(), nm.size());
+                        }
+                    }
+                    smart_str_appendl(&buf, row_term, row_term_len);
+                }
+                header_written = true;
+            }
+
+            for (size_t r = 0; r < row_count; ++r) {
+                for (size_t c = 0; c < col_count; ++c) {
+                    if (c > 0) smart_str_appendc(&buf, cell_sep);
+                    zval cell;
+                    ZVAL_UNDEF(&cell);
+                    try {
+                        convertToZval(&cell, block[c], r, "", 0, fetch_mode);
+                    } catch (...) {
+                        if (Z_TYPE(cell) != IS_UNDEF) zval_ptr_dtor(&cell);
+                        throw;
+                    }
+                    appendCellForStream(&buf, &cell, fmt);
+                    zval_ptr_dtor(&cell);
+                }
+                smart_str_appendl(&buf, row_term, row_term_len);
+                ++total_rows;
+            }
+
+            flushStreamBuf(&buf, stream);
+        });
+
+        auto t0 = std::chrono::steady_clock::now();
+        try {
+            client->Select(query);
+        } catch (...) {
+            /* OnData lambda throws (unsupported column type, short stream
+             * write) bubble out mid-stream and leave the native client
+             * with unread blocks on the wire. Subsequent queries on the
+             * same handle would then receive the residual data and
+             * appear corrupted. Reset to recover; the original throw
+             * still propagates. */
+            smart_str_free(&buf);
+            try { client->ResetConnection(); } catch (...) {}
+            throw;
+        }
+        flushStreamBuf(&buf, stream);
+        smart_str_free(&buf);
+        auto t1 = std::chrono::steady_clock::now();
+        obj->stats.elapsed_ms =
+            std::chrono::duration<double, std::milli>(t1 - t0).count();
+        recordQuerySuccess(obj, sql_s, qid);
+    }
+    catch (const std::exception &e)
+    {
+        recordQueryError(obj, std::string(sql, l_sql), qid, e);
+        throwClickHouseError(e, qid);
+        return 0;
+    }
+    return total_rows;
+}
+
+/* {{{ proto int selectToStream(string sql, array params, mixed stream, string format = "TabSeparated", string query_id = "", array settings = [])
+ *
+ * Run a SELECT and write rows directly to a PHP stream resource in
+ * TSV / CSV format (with optional column-name header). Returns the
+ * number of rows written. Skips per-row PHP array assembly entirely —
+ * cells are formatted from native column data and flushed block by
+ * block to the stream. Use for large exports where selectStream() +
+ * userland fwrite() is too slow.
+ *
+ * Supported formats: TabSeparated (alias TSV), TabSeparatedWithNames
+ * (alias TSVWithNames), CSV, CSVWithNames. Other values are rejected.
+ *
+ * Dates always emit as YYYY-MM-DD / YYYY-MM-DD HH:MM:SS[.fff] strings;
+ * Decimal / Int128 / UInt128 as decimal strings. Array / Tuple / Map /
+ * geometry columns are rejected — text formats can't unambiguously
+ * serialize them. Nullable and LowCardinality wrappers around supported
+ * scalars are fine.
+ */
+PHP_METHOD(ClickHouse, selectToStream)
+{
+    zend_string *sql = NULL;
+    zval *params = NULL;
+    zval *stream_zv = NULL;
+    zend_string *format_s = NULL;
+    zend_string *query_id = NULL;
+    zval *settings = NULL;
+
+    ZEND_PARSE_PARAMETERS_START(3, 6)
+        Z_PARAM_STR(sql)
+        Z_PARAM_ARRAY(params)
+        Z_PARAM_ZVAL(stream_zv)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_STR(format_s)
+        Z_PARAM_STR(query_id)
+        Z_PARAM_ARRAY(settings)
+    ZEND_PARSE_PARAMETERS_END();
+
+    StreamOutFormat fmt = StreamOutFormat::TSV;
+    if (format_s) {
+        if (!parseStreamFormat(ZSTR_VAL(format_s), ZSTR_LEN(format_s), fmt)) {
+            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                "selectToStream: unknown format; expected TabSeparated, "
+                "TabSeparatedWithNames, CSV, or CSVWithNames", 0);
+            return;
+        }
+    }
+
+    php_stream *stream = NULL;
+    php_stream_from_zval_no_verify(stream, stream_zv);
+    if (!stream) {
+        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+            "selectToStream: argument 3 must be an open stream resource", 0);
+        return;
+    }
+
+    std::string qid = makeQid(query_id);
+    zend_long n = do_select_to_stream(getThis(), ZSTR_VAL(sql), ZSTR_LEN(sql),
+                                      params, stream, fmt, qid, settings);
+    if (EG(exception)) return;
+    RETURN_LONG(n);
 }
 /* }}} */
 
