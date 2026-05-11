@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.5] - 2026-05-11
+
 ### Added
 
 - `insertFromStream($table, $columns, $stream, $format, $batch_rows, $query_id, $settings)`
@@ -64,6 +66,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   multi-column lookup pairs), and the malformed-input rejection
   surface (empty externals, missing/wrong keys, bad identifier,
   unsupported type, row width mismatch, recovery after rejection).
+
+### Changed
+
+- Parser strictness for `insertFromStream` is RFC 4180-strict in CSV
+  (any byte other than `,` / CR / LF / `""`-escape after a closing
+  quote throws; a quoted-empty cell at EOF without a trailing newline
+  still flushes the row) and ClickHouse-TSV-strict (`\N` is the
+  whole-cell NULL marker — trailing bytes after it throw, `\\N`
+  decodes to the literal two-character string and not NULL). NULL
+  into a non-Nullable target column is rejected up front against the
+  server schema (Nullable / LowCardinality(Nullable(...)) accepted,
+  everything else throws with the column name). Empty external-table
+  rows in `selectWithExternalData` are rejected with a clear message
+  (the native protocol uses an empty block as the end-of-stream
+  marker, so the clickhouse-cpp client silently skips zero-row named
+  blocks and the server then sees no such table). Stream read errors
+  do not commit partial data — `php_stream_read` returning `n < 0`,
+  or `n == 0` while `!php_stream_eof()`, throws and routes through
+  the existing `ResetConnection()` recovery so any rows enqueued
+  before the failure discard before commit. TSV escapes split across
+  a `php_stream_read` chunk boundary (a `\` at byte 65 535) now
+  decode correctly via a `pending_backslash` parser-state field
+  (same mechanism `prev_was_cr` uses for CRLF straddling a chunk).
+- Internal: parser containers (`cell_buf`, `row_cells`) pre-sized at
+  setup so the first row pays the same allocation cost as subsequent
+  rows; `appendCellForStream` skips the `zend_string` round-trip
+  when the cell is already `IS_STRING` (String / FixedString / Date*
+  / DateTime* / Decimal* / Int128 / UInt128 / UUID / IPv4 / IPv6 —
+  produced as strings by `convertToZval` under
+  `SC_FETCH_DATE_AS_STRINGS`). `StreamOutFormat` and
+  `InsertStreamFormat` collapsed into one `StreamFormat` enum with a
+  single parse helper, removing the synchronization hazard between
+  the input and output sides of the format alias table.
 
 ## [0.8.1] - 2026-05-01
 
@@ -659,7 +694,8 @@ own way.
   emits a clear "unsupported" warning. Full Windows build of the
   vendored zstd + absl + lz4 + cityhash is a separate project.
 
-[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.8.1...HEAD
+[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.8.5...HEAD
+[0.8.5]: https://github.com/iliaal/php_clickhouse/releases/tag/0.8.5
 [0.8.1]: https://github.com/iliaal/php_clickhouse/releases/tag/0.8.1
 [0.8.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.8.0
 [0.7.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.7.0
