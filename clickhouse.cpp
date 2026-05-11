@@ -2142,13 +2142,29 @@ static void appendCellForStream(smart_str *buf, zval *cell, StreamOutFormat fmt)
         }
         return;
     }
-    zend_string *zs = zval_get_string(cell);
-    if (streamFormatIsCSV(fmt)) {
-        csvAppendEscaped(buf, ZSTR_VAL(zs), ZSTR_LEN(zs));
+    /* Fast path for cells that are already IS_STRING — convertToZval
+     * with SC_FETCH_DATE_AS_STRINGS produces strings directly for
+     * String/FixedString, all Date* and DateTime* variants, Decimal*,
+     * Int128/UInt128, UUID, IPv4, IPv6. Avoids one zend_string heap
+     * round-trip per cell. Other types (numeric scalars) still go
+     * through zval_get_string for the snprintf-driven conversion. */
+    const char *p;
+    size_t l;
+    zend_string *zs = NULL;
+    if (Z_TYPE_P(cell) == IS_STRING) {
+        p = Z_STRVAL_P(cell);
+        l = Z_STRLEN_P(cell);
     } else {
-        tsvAppendEscaped(buf, ZSTR_VAL(zs), ZSTR_LEN(zs));
+        zs = zval_get_string(cell);
+        p = ZSTR_VAL(zs);
+        l = ZSTR_LEN(zs);
     }
-    zend_string_release(zs);
+    if (streamFormatIsCSV(fmt)) {
+        csvAppendEscaped(buf, p, l);
+    } else {
+        tsvAppendEscaped(buf, p, l);
+    }
+    if (zs) zend_string_release(zs);
 }
 
 /* Flush the per-block buffer to the PHP stream and reset it. Throws on
@@ -3083,6 +3099,13 @@ PHP_METHOD(ClickHouse, insertFromStream)
             InsertStreamParser parser;
             parser.fmt = fmt;
             parser.expected_cols = columns_count;
+            /* Pre-size the parser's per-row containers so the first row
+             * doesn't pay vector / std::string reallocations. cell_buf's
+             * SSO is only ~15 bytes on common libstdc++ builds; a 256-
+             * byte hint covers most TSV/CSV cells (URLs, names, UUIDs,
+             * timestamps) without growth. */
+            parser.row_cells.reserve(columns_count);
+            parser.cell_buf.reserve(256);
 
             constexpr size_t CHUNK = 64 * 1024;
             char buf[CHUNK];
