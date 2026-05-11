@@ -30,9 +30,11 @@ probe("bad-format", fn() =>
     $c->insertFromStream("test.bad_stream", ["id", "name"], $mem, "Parquet"));
 fclose($mem);
 
-// 2. Not a stream.
+// 2. Not a stream. `@`-suppress: PHP 7.4 emits an E_WARNING before
+// php_stream_from_zval_no_verify returns NULL on a non-resource argument;
+// PHP 8.x is silent. The throw is identical on both.
 probe("not-a-stream", fn() =>
-    $c->insertFromStream("test.bad_stream", ["id", "name"], "not a stream"));
+    @$c->insertFromStream("test.bad_stream", ["id", "name"], "not a stream"));
 
 // 3. batch_rows <= 0.
 $mem = fopen("php://memory", "w+b");
