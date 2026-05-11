@@ -2036,31 +2036,32 @@ PHP_METHOD(ClickHouse, selectWithExternalData)
 }
 /* }}} */
 
-/* Output format for selectToStream(). Aliases TSV / TSVWithNames match
- * ClickHouse's own short names and are accepted on input. */
-enum class StreamOutFormat { TSV, TSVWithNames, CSV, CSVWithNames };
+/* Wire format shared by selectToStream() (output) and insertFromStream()
+ * (input). The same four formats apply to both directions; aliases
+ * TSV / TSVWithNames match ClickHouse's own short names. */
+enum class StreamFormat { TSV, TSVWithNames, CSV, CSVWithNames };
 
-static bool parseStreamFormat(const char *s, size_t l, StreamOutFormat &out)
+static bool parseStreamFormat(const char *s, size_t l, StreamFormat &out)
 {
     auto eq = [&](const char *lit) {
         size_t n = strlen(lit);
         return l == n && memcmp(s, lit, n) == 0;
     };
-    if (eq("TabSeparated") || eq("TSV"))                    { out = StreamOutFormat::TSV;          return true; }
-    if (eq("TabSeparatedWithNames") || eq("TSVWithNames"))  { out = StreamOutFormat::TSVWithNames; return true; }
-    if (eq("CSV"))                                          { out = StreamOutFormat::CSV;          return true; }
-    if (eq("CSVWithNames"))                                 { out = StreamOutFormat::CSVWithNames; return true; }
+    if (eq("TabSeparated") || eq("TSV"))                    { out = StreamFormat::TSV;          return true; }
+    if (eq("TabSeparatedWithNames") || eq("TSVWithNames"))  { out = StreamFormat::TSVWithNames; return true; }
+    if (eq("CSV"))                                          { out = StreamFormat::CSV;          return true; }
+    if (eq("CSVWithNames"))                                 { out = StreamFormat::CSVWithNames; return true; }
     return false;
 }
 
-static inline bool streamFormatIsCSV(StreamOutFormat f)
+static inline bool streamFormatIsCSV(StreamFormat f)
 {
-    return f == StreamOutFormat::CSV || f == StreamOutFormat::CSVWithNames;
+    return f == StreamFormat::CSV || f == StreamFormat::CSVWithNames;
 }
 
-static inline bool streamFormatHasHeader(StreamOutFormat f)
+static inline bool streamFormatHasHeader(StreamFormat f)
 {
-    return f == StreamOutFormat::TSVWithNames || f == StreamOutFormat::CSVWithNames;
+    return f == StreamFormat::TSVWithNames || f == StreamFormat::CSVWithNames;
 }
 
 /* Walk Nullable / LowCardinality wrappers and reject the composite
@@ -2134,7 +2135,7 @@ static void csvAppendEscaped(smart_str *buf, const char *s, size_t len)
 
 /* Append one cell (already-formatted text or IS_NULL) to the per-block
  * buffer. NULL renders as `\N` in TSV and as an empty cell in CSV. */
-static void appendCellForStream(smart_str *buf, zval *cell, StreamOutFormat fmt)
+static void appendCellForStream(smart_str *buf, zval *cell, StreamFormat fmt)
 {
     if (Z_TYPE_P(cell) == IS_NULL) {
         if (!streamFormatIsCSV(fmt)) {
@@ -2190,7 +2191,7 @@ static void flushStreamBuf(smart_str *buf, php_stream *stream)
 static zend_long do_select_to_stream(zval *this_obj,
                                      const char *sql, size_t l_sql,
                                      zval *params, php_stream *stream,
-                                     StreamOutFormat fmt,
+                                     StreamFormat fmt,
                                      const std::string &qid, zval *settings)
 {
     clickhouse_object *obj = Z_CLICKHOUSE_P(this_obj);
@@ -2348,7 +2349,7 @@ PHP_METHOD(ClickHouse, selectToStream)
         Z_PARAM_ARRAY(settings)
     ZEND_PARSE_PARAMETERS_END();
 
-    StreamOutFormat fmt = StreamOutFormat::TSV;
+    StreamFormat fmt = StreamFormat::TSV;
     if (format_s) {
         if (!parseStreamFormat(ZSTR_VAL(format_s), ZSTR_LEN(format_s), fmt)) {
             sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
@@ -2669,31 +2670,6 @@ PHP_METHOD(ClickHouse, insert)
  * the whole file — only one batch of per-column packed arrays at a time.
  */
 
-enum class InsertStreamFormat { TSV, TSVWithNames, CSV, CSVWithNames };
-
-static bool parseInsertStreamFormat(const char *s, size_t l, InsertStreamFormat &out)
-{
-    auto eq = [&](const char *lit) {
-        size_t n = strlen(lit);
-        return l == n && memcmp(s, lit, n) == 0;
-    };
-    if (eq("TabSeparated") || eq("TSV"))                   { out = InsertStreamFormat::TSV;          return true; }
-    if (eq("TabSeparatedWithNames") || eq("TSVWithNames")) { out = InsertStreamFormat::TSVWithNames; return true; }
-    if (eq("CSV"))                                         { out = InsertStreamFormat::CSV;          return true; }
-    if (eq("CSVWithNames"))                                { out = InsertStreamFormat::CSVWithNames; return true; }
-    return false;
-}
-
-static inline bool insertStreamFormatIsCSV(InsertStreamFormat f)
-{
-    return f == InsertStreamFormat::CSV || f == InsertStreamFormat::CSVWithNames;
-}
-
-static inline bool insertStreamFormatHasHeader(InsertStreamFormat f)
-{
-    return f == InsertStreamFormat::TSVWithNames || f == InsertStreamFormat::CSVWithNames;
-}
-
 /* Push the just-parsed cell into the current row. NULL marker `\N`
  * (literal, in both formats) becomes IS_NULL; everything else becomes
  * IS_STRING. The cell buffer is cleared on return. The flag
@@ -2717,7 +2693,7 @@ static void pushCell(std::string &cell_buf, bool cell_is_quoted,
 }
 
 struct InsertStreamParser {
-    InsertStreamFormat fmt;
+    StreamFormat fmt;
     size_t expected_cols;
 
     enum class State { CellStart, InCell, InQuoted, QuotePending } state = State::CellStart;
@@ -2744,7 +2720,7 @@ struct InsertStreamParser {
      * remaining zvals in row_cells get dtor'd by the parser destructor. */
     template<typename RowHandler>
     void finishRow(RowHandler &on_row) {
-        if (insertStreamFormatHasHeader(fmt) && !first_row_skipped) {
+        if (streamFormatHasHeader(fmt) && !first_row_skipped) {
             /* Discard the header row entirely. We don't verify it
              * against $columns; the user is responsible for matching
              * order. */
@@ -2773,7 +2749,7 @@ struct InsertStreamParser {
     /* Feed `len` bytes and emit each completed row through on_row. */
     template<typename RowHandler>
     void feed(const char *data, size_t len, RowHandler &on_row) {
-        const bool csv = insertStreamFormatIsCSV(fmt);
+        const bool csv = streamFormatIsCSV(fmt);
         const char cell_sep = csv ? ',' : '\t';
 
         /* Decode the byte that follows a `\` in a TSV escape. Returns
@@ -2973,9 +2949,9 @@ PHP_METHOD(ClickHouse, insertFromStream)
         Z_PARAM_ARRAY(settings)
     ZEND_PARSE_PARAMETERS_END();
 
-    InsertStreamFormat fmt = InsertStreamFormat::TSV;
+    StreamFormat fmt = StreamFormat::TSV;
     if (format_s) {
-        if (!parseInsertStreamFormat(ZSTR_VAL(format_s), ZSTR_LEN(format_s), fmt)) {
+        if (!parseStreamFormat(ZSTR_VAL(format_s), ZSTR_LEN(format_s), fmt)) {
             sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
                 "insertFromStream: unknown format; expected TabSeparated, "
                 "TabSeparatedWithNames, CSV, or CSVWithNames", 0);
