@@ -2706,6 +2706,12 @@ struct InsertStreamParser {
      * for the next chunk to know what it escapes. Same role prev_was_cr
      * plays for CRLF straddling a chunk boundary. */
     bool pending_backslash = false;
+    /* TSV-only: set when the cell opens with the literal `\N` NULL
+     * marker. ClickHouse's TSV format treats `\N` as the entire cell
+     * content for NULL — any trailing bytes before the cell separator
+     * are a parse error. Without this strictness, `\Nx` silently became
+     * the literal three-character string `\Nx` for String columns. */
+    bool cell_is_null = false;
 
     /* Owned by the parser between calls; transferred to the caller via
      * finishRow() and consumed there. */
@@ -2713,6 +2719,7 @@ struct InsertStreamParser {
     void finishCell() {
         pushCell(cell_buf, cell_is_quoted, row_cells);
         cell_is_quoted = false;
+        cell_is_null = false;
     }
 
     /* Hand the just-completed row to the row handler. The handler takes
@@ -2772,6 +2779,7 @@ struct InsertStreamParser {
                     if (cell_buf.empty()) {
                         cell_buf.push_back('\\');
                         cell_buf.push_back('N');
+                        cell_is_null = true;
                         return true;
                     }
                     cell_buf.push_back('\\');
@@ -2839,6 +2847,16 @@ struct InsertStreamParser {
                 continue;
             }
             prev_was_cr = false;
+
+            /* `\N` at cell start is the whole-cell NULL marker; bytes
+             * other than the cell separator or row terminator after it
+             * are a parse error. (Pre-fix the cell silently became the
+             * literal string "\Nx..." for String columns.) */
+            if (cell_is_null) {
+                throw std::runtime_error(
+                    "insertFromStream: TSV `\\N` is the whole-cell NULL "
+                    "marker and cannot be followed by other data");
+            }
 
             if (state == State::CellStart) {
                 if (csv && c == '"') {
