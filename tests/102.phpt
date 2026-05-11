@@ -30,8 +30,11 @@ $mem = fopen("php://memory", "w+b");
 probe("bad-format", fn() =>
     $c->selectToStream("SELECT id FROM test.stream_bad", [], $mem, "Parquet"));
 
+// `@`-suppress: PHP 7.4 emits an E_WARNING before php_stream_from_zval_no_verify
+// returns NULL on a non-resource argument; PHP 8.x is silent. The throw is
+// identical on both — only the pre-throw warning text differs.
 probe("not-a-stream", fn() =>
-    $c->selectToStream("SELECT id FROM test.stream_bad", [], "not a stream"));
+    @$c->selectToStream("SELECT id FROM test.stream_bad", [], "not a stream"));
 
 probe("array-column", fn() =>
     $c->selectToStream("SELECT id, tags FROM test.stream_bad", [], $mem));
