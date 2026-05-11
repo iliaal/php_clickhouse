@@ -59,29 +59,27 @@ $n = $c->insertFromStream("test.null_strict", ["id", "s", "note"], $mem);
 fclose($mem);
 echo "row-term-after-N rows: $n\n";
 
-// 5. `\N` followed by tab is fine.
+// 5. `\N` followed by tab is fine — column order swapped so the NULL
+//    targets the Nullable `note` column instead of the non-Nullable `s`.
 $mem = fopen("php://memory", "w+b");
 fwrite($mem, "3\t\\N\tok\n");
 rewind($mem);
-$n = $c->insertFromStream("test.null_strict", ["id", "s", "note"], $mem);
+$n = $c->insertFromStream("test.null_strict", ["id", "note", "s"], $mem);
 fclose($mem);
 echo "cell-sep-after-N rows: $n\n";
 
-// 6. `\\N` (escaped backslash followed by N) decodes to literal `\N`
-//    in the cell — should be the 2-char string, NOT NULL. ClickHouse's
-//    own TSV parser treats this as a literal `\N` value because the `\\`
-//    decodes to `\`, leaving the N as ordinary content.
-//
-//    NOTE: today the parser still emits a 2-char `\N` cell_buf and
-//    pushCell can't distinguish it from the NULL marker (bytes-based
-//    check). This is a separate known limitation; for now we just
-//    confirm the parse doesn't throw.
+// 6. `\\N` (escape `\\` decodes to one `\`, then literal `N`) is the
+//    two-character IS_STRING value `\N`, NOT the NULL marker. Pre-fix
+//    pushCell's bytes-based check could not distinguish the two cases;
+//    now the parser uses cell_is_null state to discriminate.
 $mem = fopen("php://memory", "w+b");
 fwrite($mem, "4\t\\\\N\tplain\n");
 rewind($mem);
 $n = $c->insertFromStream("test.null_strict", ["id", "s", "note"], $mem);
 fclose($mem);
 echo "double-backslash-N rows: $n\n";
+$r = $c->select("SELECT s, length(s) AS l FROM test.null_strict WHERE id=4")[0];
+echo "row 4 s={$r['s']} len={$r['l']}\n";
 
 // 7. CSV `\N` followed by non-comma is permissive — becomes a string.
 //    Documented behavior; CSV has no escape protocol.
@@ -108,6 +106,7 @@ nullable-after-N: REJECTED
 row-term-after-N rows: 1
 cell-sep-after-N rows: 1
 double-backslash-N rows: 1
+row 4 s=\N len=2
 csv-trailing-after-N rows: 1
 csv row 5 s=\Nx
 total rows: 4

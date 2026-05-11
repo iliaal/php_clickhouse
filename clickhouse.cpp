@@ -2670,22 +2670,42 @@ PHP_METHOD(ClickHouse, insert)
  * the whole file — only one batch of per-column packed arrays at a time.
  */
 
-/* Push the just-parsed cell into the current row. NULL marker `\N`
- * (literal, in both formats) becomes IS_NULL; everything else becomes
- * IS_STRING. The cell buffer is cleared on return. The flag
- * cell_is_quoted lets us treat a quoted-empty-CSV-cell ("") as an
- * empty string rather than NULL, even if cell_buf happens to equal
- * "\\N" later. */
+/* True when the column type can accept a PHP NULL — i.e. Nullable(X)
+ * or LowCardinality(Nullable(X)). Anything else would have
+ * insertColumn() silently coerce NULL to "" or 0; we want to reject
+ * the row at parse time to honor the documented contract that `\N` is
+ * only valid against Nullable columns. */
+static bool acceptsNullCell(const TypeRef &t)
+{
+    switch (t->GetCode()) {
+        case Type::Code::Nullable:
+            return true;
+        case Type::Code::LowCardinality:
+            return acceptsNullCell(t->As<LowCardinalityType>()->GetNestedType());
+        default:
+            return false;
+    }
+}
+
+/* Push the just-parsed cell into the current row. TSV uses the
+ * parser's cell_is_null flag (set when `\N` is decoded at cell start),
+ * so `\\N` — which decodes to the literal byte sequence `\N` — round-
+ * trips as the two-character IS_STRING value, not NULL. CSV has no
+ * escape protocol, so a literal unquoted `\N` cell is the only way to
+ * write NULL by our convention; we keep the bytes-based fallback for
+ * that path. The cell buffer is cleared on return. */
 static void pushCell(std::string &cell_buf, bool cell_is_quoted,
+                     bool cell_is_null, StreamFormat fmt,
                      std::vector<zval> &row_cells)
 {
     zval z;
-    if (!cell_is_quoted && cell_buf.size() == 2 &&
-        cell_buf[0] == '\\' && cell_buf[1] == 'N') {
+    if (cell_is_null) {
+        ZVAL_NULL(&z);
+    } else if (streamFormatIsCSV(fmt) && !cell_is_quoted &&
+               cell_buf.size() == 2 && cell_buf[0] == '\\' &&
+               cell_buf[1] == 'N') {
         ZVAL_NULL(&z);
     } else {
-        /* The cell buffer's bytes already had escapes / quoting resolved
-         * during parse; what's left is the raw cell content. */
         ZVAL_STRINGL(&z, cell_buf.data(), cell_buf.size());
     }
     row_cells.push_back(z);
@@ -2717,7 +2737,7 @@ struct InsertStreamParser {
      * finishRow() and consumed there. */
 
     void finishCell() {
-        pushCell(cell_buf, cell_is_quoted, row_cells);
+        pushCell(cell_buf, cell_is_quoted, cell_is_null, fmt, row_cells);
         cell_is_quoted = false;
         cell_is_null = false;
     }
@@ -2819,9 +2839,19 @@ struct InsertStreamParser {
                     state = State::InQuoted;
                     continue;
                 }
-                /* Quote was the closing one; fall through and reprocess c
-                 * as if we were InCell (so cell_sep / newline finalize). */
+                /* RFC 4180: the only valid bytes after a closing quote
+                 * are the cell separator, a row terminator, or EOF.
+                 * Permissive parsers that accept `"ab"c` as `abc` silently
+                 * hide upstream export bugs; ClickHouse's own CSV reader
+                 * rejects this. */
+                if (c != cell_sep && c != '\n' && c != '\r') {
+                    throw std::runtime_error(
+                        "insertFromStream: malformed CSV - byte after closing "
+                        "quote must be ',', newline, or end of input");
+                }
                 state = State::InCell;
+                /* fall through so cell_sep / row terminator handlers below
+                 * see c and finalize the cell / row. */
             }
 
             if (c == cell_sep) {
@@ -2916,7 +2946,11 @@ struct InsertStreamParser {
         if (state == State::InQuoted) {
             throw std::runtime_error("insertFromStream: unterminated quoted CSV cell at EOF");
         }
-        if (!cell_buf.empty() || !row_cells.empty()) {
+        /* cell_is_quoted catches the "" no-trailing-newline case: the
+         * cell was started by an opening quote and immediately closed,
+         * leaving cell_buf and row_cells both empty; without this flag
+         * the row would be silently dropped at EOF. */
+        if (!cell_buf.empty() || !row_cells.empty() || cell_is_quoted) {
             finishCell();
             finishRow(on_row);
         }
@@ -3076,6 +3110,21 @@ PHP_METHOD(ClickHouse, insertFromStream)
         auto on_row = [&](std::vector<zval> &row) {
             /* row.size() == columns_count is guaranteed by InsertStreamParser. */
             for (size_t c = 0; c < columns_count; ++c) {
+                /* `\N` (TSV) or literal-bytes `\N` (CSV) become IS_NULL
+                 * at the parser. The server schema tells us whether the
+                 * destination column can accept that NULL. Without this
+                 * check, insertColumn() silently coerces NULL to "" for
+                 * String / FixedString (zval_get_string on IS_NULL) and
+                 * to 0 for numeric types — contradicting the documented
+                 * "\N is rejected unless target column is Nullable"
+                 * contract and corrupting imports. */
+                if (Z_TYPE(row[c]) == IS_NULL &&
+                    !acceptsNullCell(blockQuery[c]->Type())) {
+                    throw std::runtime_error(
+                        "insertFromStream: NULL (`\\N`) value for column '" +
+                        std::string(blockQuery.GetColumnName(c)) +
+                        "' which is not Nullable");
+                }
                 /* Move cell zval into the column accumulator. The cell
                  * already owns its IS_STRING buffer; ownership transfers
                  * with add_next_index_zval. */
