@@ -99,6 +99,15 @@ $ch->insert("events", ["id", "ts", "tag"], [
     [2, time(), "beta"],
 ]);
 
+// Filter by an in-memory list of IDs without bloating the SQL — the
+// server reads `ext_ids` as a named temp table for this query only.
+$hits = $ch->selectWithExternalData(
+    "SELECT id, tag FROM events WHERE id IN ext_ids",
+    [["name" => "ext_ids",
+      "columns" => ["id" => "UInt32"],
+      "rows" => [[1], [42], [1337]]]]
+);
+
 foreach ($ch->select("SELECT id, ts, tag FROM events ORDER BY id",
                      [], ClickHouse::DATE_AS_STRINGS) as $row) {
     print_r($row);
@@ -195,6 +204,18 @@ $rows = $ch->select(string $sql,
                     int $fetch_mode = 0,
                     string $query_id = "",
                     array $settings = []);
+
+// Read with external in-memory tables sent alongside the query.
+// Each entry: ['name' => 'ext_x', 'columns' => ['c' => 'Type', ...],
+//              'rows' => [[...], [...], ...]]. The query body references
+// the external table by name (e.g. `WHERE id IN ext_ids`). Keeps the
+// SQL small when filtering by big lists; multiple externals per call.
+$rows = $ch->selectWithExternalData(string $sql,
+                                    array  $externals,
+                                    array  $params = [],
+                                    int    $fetch_mode = 0,
+                                    string $query_id = "",
+                                    array  $settings = []);
 
 // Bulk insert (entire dataset in one call)
 $ch->insert(string $table, array $columns, array $values,

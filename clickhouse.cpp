@@ -38,6 +38,7 @@ extern "C" {
 #include "lib/clickhouse-cpp/clickhouse/error_codes.h"
 #include "lib/clickhouse-cpp/clickhouse/exceptions.h"
 #include "lib/clickhouse-cpp/clickhouse/types/type_parser.h"
+#include "lib/clickhouse-cpp/clickhouse/columns/factory.h"
 #include "typesToPhp.hpp"
 #include <chrono>
 #include <deque>
@@ -310,6 +311,7 @@ extern "C" {
 static PHP_METHOD(ClickHouse, __construct);
 static PHP_METHOD(ClickHouse, __destruct);
 static PHP_METHOD(ClickHouse, select);
+static PHP_METHOD(ClickHouse, selectWithExternalData);
 static PHP_METHOD(ClickHouse, insert);
 static PHP_METHOD(ClickHouse, insertAssoc);
 static PHP_METHOD(ClickHouse, writeStart);
@@ -1634,7 +1636,8 @@ PHP_METHOD(ClickHouse, ping)
 static void do_select_into(zval *out, zval *this_obj,
                            const char *sql, size_t l_sql,
                            zval *params, zend_long fetch_mode,
-                           const std::string &qid, zval *settings)
+                           const std::string &qid, zval *settings,
+                           const ExternalTables *external_tables)
 {
     clickhouse_object *obj = Z_CLICKHOUSE_P(this_obj);
     try
@@ -1767,7 +1770,11 @@ static void do_select_into(zval *out, zval *this_obj,
         });
 
         auto t0 = std::chrono::steady_clock::now();
-        client->Select(query);
+        if (external_tables && !external_tables->empty()) {
+            client->SelectWithExternalData(query, *external_tables);
+        } else {
+            client->Select(query);
+        }
         auto t1 = std::chrono::steady_clock::now();
         obj->stats.elapsed_ms =
             std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -1830,7 +1837,190 @@ PHP_METHOD(ClickHouse, select)
         Z_PARAM_ARRAY(settings)
     ZEND_PARSE_PARAMETERS_END();
     std::string qid = makeQid(query_id);
-    do_select_into(return_value, getThis(), ZSTR_VAL(sql), ZSTR_LEN(sql), params, fetch_mode, qid, settings);
+    do_select_into(return_value, getThis(), ZSTR_VAL(sql), ZSTR_LEN(sql), params, fetch_mode, qid, settings, NULL);
+}
+/* }}} */
+
+/* Forward decls: buildExternalTableBlock reuses the row-shape validator
+ * and per-column packed-array builder that insert() also uses, but they
+ * are defined further down in the file. */
+static void validateRowShapes(HashTable *values_ht, size_t columns_count);
+static void buildSingleColumnZval(HashTable *values_ht, size_t column_index,
+                                  const std::vector<zend_string*> *column_names,
+                                  zval *out);
+
+/*
+ * Build a clickhouse-cpp Block from a single external-table entry of the
+ * shape ['name' => ..., 'columns' => ['col' => 'Type', ...], 'rows' => [...]].
+ * Validates structure and types; throws std::runtime_error on any
+ * malformed shape so the caller's outer try/catch can route it to
+ * ClickHouseException. The block is appended-into via the same
+ * insertColumn() path that insert() uses, so type coverage is identical.
+ */
+static Block buildExternalTableBlock(zval *entry, std::string &name_out)
+{
+    if (Z_TYPE_P(entry) != IS_ARRAY) {
+        throw std::runtime_error("externals must be a list of arrays");
+    }
+    HashTable *ht = Z_ARRVAL_P(entry);
+
+    zval *name_zv    = sc_zend_hash_find(ht, "name", sizeof("name") - 1);
+    zval *columns_zv = sc_zend_hash_find(ht, "columns", sizeof("columns") - 1);
+    zval *rows_zv    = sc_zend_hash_find(ht, "rows", sizeof("rows") - 1);
+
+    if (!name_zv || Z_TYPE_P(name_zv) != IS_STRING) {
+        throw std::runtime_error("external table requires string 'name'");
+    }
+    if (!columns_zv || Z_TYPE_P(columns_zv) != IS_ARRAY) {
+        throw std::runtime_error("external table requires array 'columns'");
+    }
+    if (!rows_zv || Z_TYPE_P(rows_zv) != IS_ARRAY) {
+        throw std::runtime_error("external table requires array 'rows'");
+    }
+
+    validateIdentifier(Z_STRVAL_P(name_zv), Z_STRLEN_P(name_zv),
+                       "external table name", /*allow_dot=*/false);
+    name_out.assign(Z_STRVAL_P(name_zv), Z_STRLEN_P(name_zv));
+
+    HashTable *columns_ht = Z_ARRVAL_P(columns_zv);
+    HashTable *rows_ht    = Z_ARRVAL_P(rows_zv);
+    size_t columns_count  = zend_hash_num_elements(columns_ht);
+    if (columns_count == 0) {
+        throw std::runtime_error("external table '" + name_out + "' has no columns");
+    }
+
+    std::vector<std::string> col_names;
+    std::vector<TypeRef>     col_types;
+    std::vector<zend_string*> col_names_zs;
+    col_names.reserve(columns_count);
+    col_types.reserve(columns_count);
+    col_names_zs.reserve(columns_count);
+    {
+        zend_string *k;
+        zend_ulong   nk;
+        zval        *type_zv;
+        ZEND_HASH_FOREACH_KEY_VAL(columns_ht, nk, k, type_zv) {
+            (void)nk;
+            if (!k) {
+                throw std::runtime_error("external table '" + name_out +
+                    "' columns must be an associative array of name => type");
+            }
+            if (Z_TYPE_P(type_zv) != IS_STRING) {
+                throw std::runtime_error("external table '" + name_out +
+                    "' column '" + std::string(ZSTR_VAL(k), ZSTR_LEN(k)) +
+                    "' type must be a string");
+            }
+            validateIdentifier(ZSTR_VAL(k), ZSTR_LEN(k),
+                               "external column name", /*allow_dot=*/false);
+            std::string type_name(Z_STRVAL_P(type_zv), Z_STRLEN_P(type_zv));
+            ColumnRef templ = CreateColumnByType(type_name);
+            if (!templ) {
+                throw std::runtime_error("external table '" + name_out +
+                    "' column '" + std::string(ZSTR_VAL(k), ZSTR_LEN(k)) +
+                    "' has unsupported type '" + type_name + "'");
+            }
+            col_names.emplace_back(ZSTR_VAL(k), ZSTR_LEN(k));
+            col_types.push_back(templ->Type());
+            col_names_zs.push_back(k);
+        } ZEND_HASH_FOREACH_END();
+    }
+
+    validateRowShapes(rows_ht, columns_count);
+
+    Block block;
+    for (size_t c = 0; c < columns_count; ++c) {
+        zval inner;
+        buildSingleColumnZval(rows_ht, c, &col_names_zs, &inner);
+        ColumnRef column;
+        try {
+            column = insertColumn(col_types[c], &inner);
+        } catch (...) {
+            zval_ptr_dtor(&inner);
+            throw;
+        }
+        zval_ptr_dtor(&inner);
+        block.AppendColumn(col_names[c], column);
+    }
+    return block;
+}
+
+/* {{{ proto mixed selectWithExternalData(string sql, array externals, array params, int mode, string query_id, array settings)
+ *
+ * SELECT with one or more named in-memory tables sent alongside the
+ * query (ClickHouse "external data" feature). Use this to keep the SQL
+ * body small when filtering by a big list — e.g.
+ * `SELECT id, name FROM users WHERE id IN ext_ids` with `ext_ids`
+ * supplied as 50k rows in memory.
+ *
+ * Each entry of `externals`:
+ *   ['name'    => 'ext_ids',
+ *    'columns' => ['id' => 'UInt64'],
+ *    'rows'    => [[1], [2], ...]]
+ *
+ * Multiple externals per call supported; names must appear literally
+ * in the query body. Empty `externals` is rejected — call select()
+ * directly when no external data is needed.
+ */
+PHP_METHOD(ClickHouse, selectWithExternalData)
+{
+    zend_string *sql = NULL;
+    zval *externals = NULL;
+    zval *params = NULL;
+    zend_long fetch_mode = 0;
+    zend_string *query_id = NULL;
+    zval *settings = NULL;
+
+    ZEND_PARSE_PARAMETERS_START(2, 6)
+        Z_PARAM_STR(sql)
+        Z_PARAM_ARRAY(externals)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ARRAY(params)
+        Z_PARAM_LONG(fetch_mode)
+        Z_PARAM_STR(query_id)
+        Z_PARAM_ARRAY(settings)
+    ZEND_PARSE_PARAMETERS_END();
+
+    HashTable *externals_ht = Z_ARRVAL_P(externals);
+    size_t externals_count = zend_hash_num_elements(externals_ht);
+    if (externals_count == 0) {
+        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+            "selectWithExternalData requires at least one external table; "
+            "use select() when no external data is needed", 0);
+        return;
+    }
+
+    /* Build the backing storage for ExternalTable entries. ExternalTable
+     * holds a string_view into the name and a const reference into the
+     * Block; both must outlive the SelectWithExternalData call. Reserve
+     * so push_back never relocates. */
+    std::vector<std::string> ext_names;
+    std::vector<Block>       ext_blocks;
+    ExternalTables           ext_tables;
+    ext_names.reserve(externals_count);
+    ext_blocks.reserve(externals_count);
+    ext_tables.reserve(externals_count);
+
+    try {
+        zval *entry;
+        ZEND_HASH_FOREACH_VAL(externals_ht, entry) {
+            std::string nm;
+            Block blk = buildExternalTableBlock(entry, nm);
+            ext_names.push_back(std::move(nm));
+            ext_blocks.push_back(std::move(blk));
+            ext_tables.push_back(ExternalTable{
+                std::string_view(ext_names.back()),
+                ext_blocks.back()
+            });
+        } ZEND_HASH_FOREACH_END();
+    } catch (const std::exception &e) {
+        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+            e.what(), 0);
+        return;
+    }
+
+    std::string qid = makeQid(query_id);
+    do_select_into(return_value, getThis(), ZSTR_VAL(sql), ZSTR_LEN(sql),
+                   params, fetch_mode, qid, settings, &ext_tables);
 }
 /* }}} */
 
@@ -1862,7 +2052,7 @@ PHP_METHOD(ClickHouse, selectStatement)
     object_init_ex(return_value, clickhouse_statement_ce);
     clickhouse_statement_object *stmt = Z_CLICKHOUSE_STATEMENT_P(return_value);
 
-    do_select_into(&stmt->rows, getThis(), ZSTR_VAL(sql), ZSTR_LEN(sql), params, 0, qid, settings);
+    do_select_into(&stmt->rows, getThis(), ZSTR_VAL(sql), ZSTR_LEN(sql), params, 0, qid, settings, NULL);
     if (EG(exception)) {
         zval_ptr_dtor(return_value);
         ZVAL_UNDEF(return_value);
@@ -2864,7 +3054,7 @@ static void runHelperSelect(zval *return_value, zval *this_obj, const std::strin
 {
     do_select_into(return_value, this_obj, sql.c_str(), sql.size(),
                    /*params=*/NULL, fetch_mode, /*qid=*/std::string(),
-                   /*settings=*/NULL);
+                   /*settings=*/NULL, /*external_tables=*/NULL);
 }
 
 static bool runHelperExec(zval *this_obj, const std::string &sql)
