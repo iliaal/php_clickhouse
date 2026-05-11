@@ -267,6 +267,10 @@ public:
     void SelectWithExternalDataCancelable(const std::string& query, const ExternalTables& external_tables, SelectCancelableCallback cb);
     void SelectWithExternalDataCancelable(const std::string& query, const std::string& query_id, const ExternalTables& external_tables, SelectCancelableCallback cb);
 
+    /// Same as SelectWithExternalData but takes a fully-configured Query
+    /// (settings, params, callbacks, query_id, OnData) instead of a bare string.
+    void SelectWithExternalData(const Query& query, const ExternalTables& external_tables);
+
     /// Alias for Execute.
     void Select(const Query& query);
 

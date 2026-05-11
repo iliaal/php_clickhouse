@@ -78,3 +78,22 @@ BeginInsert(const Query&)`, so the binding can pass a fully
 configured `Query` (settings + params + callbacks + query_id) into
 the streaming insert path. Used by `php_clickhouse` to honor
 `setSettings()` / per-call settings on `insert()` and `writeStart()`.
+
+## clickhouse/client.{h,cpp}: no public `SelectWithExternalData(const Query&, ...)` overload
+
+`Client::Impl::SelectWithExternalData` already takes a `Query`, but
+the public surface only exposes the `std::string` overloads
+(`SelectWithExternalData(string, externals, cb)` and
+`SelectWithExternalData(string, query_id, externals, cb)`). That
+means callers cannot attach per-query settings, server-side params,
+or progress / verbose callbacks to a SELECT-with-external-data, even
+though the impl supports it.
+
+Patch: declare and forward a thin overload,
+`void SelectWithExternalData(const Query& query, const ExternalTables& external_tables);`,
+so the binding can pass a fully configured `Query` (settings + params
++ OnData + query_id + OnProgress) into the external-data SELECT path.
+Used by `php_clickhouse::selectWithExternalData()` to honor
+`setSettings()` / per-call settings and to thread `query_id` through
+`system.query_log`. Exercised by `tests/095.phpt`, `tests/096.phpt`,
+`tests/097.phpt`.

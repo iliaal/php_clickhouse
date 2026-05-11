@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `selectWithExternalData($sql, $externals, ...)` sends one or more
+  named in-memory tables alongside a SELECT (ClickHouse "external
+  data" feature). Lets the query body reference the externals by name
+  (`WHERE id IN ext_ids`) instead of materializing a huge literal `IN
+  (...)` list. Each external is `['name' => ..., 'columns' => ['col'
+  => 'Type', ...], 'rows' => [[...], ...]]`; multiple externals per
+  call supported. Per-call `params`, `fetch_mode`, `query_id`, and
+  `settings` flow through identically to `select()`. Vendored
+  `clickhouse-cpp` patched with a `SelectWithExternalData(const
+  Query&, const ExternalTables&)` overload so settings + query_id
+  propagate (see `lib/clickhouse-cpp/LOCAL_PATCHES.md`).
+- 3 new PHPTs (095–097) cover the basic IN-clause path, multiple
+  externals with mixed column types (`String`, `Date`, `Nullable`,
+  multi-column lookup pairs), and the malformed-input rejection
+  surface (empty externals, missing/wrong keys, bad identifier,
+  unsupported type, row width mismatch, recovery after rejection).
+
 ## [0.8.1] - 2026-05-01
 
 Hardening release covering nine rounds of reviewer-driven fixes

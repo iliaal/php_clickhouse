@@ -1,5 +1,5 @@
 /* This is a generated file, edit clickhouse.stub.php instead.
- * Stub hash: 0540ef51645d51aa12734fa9b708ee7a6d326fa0 */
+ * Stub hash: 2fa3a1f4da0cefd8b230a7d6cd155ea30dd2660a */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_ClickHouse___construct, 0, 0, 1)
 	ZEND_ARG_TYPE_INFO(0, connectParams, IS_ARRAY, 0)
@@ -10,6 +10,15 @@ ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_select, 0, 1, IS_MIXED, 0)
 	ZEND_ARG_TYPE_INFO(0, sql, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, params, IS_ARRAY, 0, "[]")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, fetch_mode, IS_LONG, 0, "0")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, query_id, IS_STRING, 0, "\"\"")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, settings, IS_ARRAY, 0, "[]")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_selectWithExternalData, 0, 2, IS_MIXED, 0)
+	ZEND_ARG_TYPE_INFO(0, sql, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO(0, externals, IS_ARRAY, 0)
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, params, IS_ARRAY, 0, "[]")
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, fetch_mode, IS_LONG, 0, "0")
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, query_id, IS_STRING, 0, "\"\"")
@@ -227,6 +236,7 @@ ZEND_END_ARG_INFO()
 ZEND_METHOD(ClickHouse, __construct);
 ZEND_METHOD(ClickHouse, __destruct);
 ZEND_METHOD(ClickHouse, select);
+ZEND_METHOD(ClickHouse, selectWithExternalData);
 ZEND_METHOD(ClickHouse, insert);
 ZEND_METHOD(ClickHouse, insertAssoc);
 ZEND_METHOD(ClickHouse, writeStart);
@@ -293,6 +303,7 @@ static const zend_function_entry class_ClickHouse_methods[] = {
 	ZEND_ME(ClickHouse, __construct, arginfo_class_ClickHouse___construct, ZEND_ACC_PUBLIC)
 	ZEND_ME(ClickHouse, __destruct, arginfo_class_ClickHouse___destruct, ZEND_ACC_PUBLIC)
 	ZEND_ME(ClickHouse, select, arginfo_class_ClickHouse_select, ZEND_ACC_PUBLIC)
+	ZEND_ME(ClickHouse, selectWithExternalData, arginfo_class_ClickHouse_selectWithExternalData, ZEND_ACC_PUBLIC)
 	ZEND_ME(ClickHouse, insert, arginfo_class_ClickHouse_insert, ZEND_ACC_PUBLIC)
 	ZEND_ME(ClickHouse, insertAssoc, arginfo_class_ClickHouse_insertAssoc, ZEND_ACC_PUBLIC)
 	ZEND_ME(ClickHouse, writeStart, arginfo_class_ClickHouse_writeStart, ZEND_ACC_PUBLIC)

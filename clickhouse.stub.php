@@ -36,6 +36,15 @@ final class ClickHouse
         array $settings = []
     ): mixed {}
 
+    public function selectWithExternalData(
+        string $sql,
+        array $externals,
+        array $params = [],
+        int $fetch_mode = 0,
+        string $query_id = "",
+        array $settings = []
+    ): mixed {}
+
     public function insert(
         string $table,
         array $columns,
