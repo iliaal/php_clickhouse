@@ -1772,10 +1772,20 @@ static void do_select_into(zval *out, zval *this_obj,
         });
 
         auto t0 = std::chrono::steady_clock::now();
-        if (external_tables && !external_tables->empty()) {
-            client->SelectWithExternalData(query, *external_tables);
-        } else {
-            client->Select(query);
+        try {
+            if (external_tables && !external_tables->empty()) {
+                client->SelectWithExternalData(query, *external_tables);
+            } else {
+                client->Select(query);
+            }
+        } catch (...) {
+            /* OnData lambda throws (KEY_PAIR shape mismatch, etc.) bubble
+             * out mid-stream and leave the native client with unread
+             * blocks on the wire. Subsequent queries on the same handle
+             * would then receive the residual data and appear corrupted.
+             * Reset to recover; the original throw still propagates. */
+            try { client->ResetConnection(); } catch (...) {}
+            throw;
         }
         auto t1 = std::chrono::steady_clock::now();
         obj->stats.elapsed_ms =
@@ -2700,6 +2710,10 @@ struct InsertStreamParser {
     std::vector<zval> row_cells;
     bool first_row_skipped = false;
     bool prev_was_cr = false;
+    /* TSV-only: a `\` at the very end of one feed() chunk has to wait
+     * for the next chunk to know what it escapes. Same role prev_was_cr
+     * plays for CRLF straddling a chunk boundary. */
+    bool pending_backslash = false;
 
     /* Owned by the parser between calls; transferred to the caller via
      * finishRow() and consumed there. */
@@ -2746,8 +2760,48 @@ struct InsertStreamParser {
         const bool csv = insertStreamFormatIsCSV(fmt);
         const char cell_sep = csv ? ',' : '\t';
 
+        /* Decode the byte that follows a `\` in a TSV escape. Returns
+         * true when the byte was the escape's second character (caller
+         * should advance past it). Returns false when the byte should
+         * be re-processed as ordinary cell content (the `\` is pushed
+         * literally and the byte falls through to the rest of the
+         * byte-processing loop). Shared between the inline path (both
+         * bytes in this chunk) and the cross-chunk drain at the top of
+         * the loop, so a `\` straddling a feed() boundary decodes the
+         * same way it would inside a single chunk. */
+        auto decode_escape_byte = [&](char n) -> bool {
+            switch (n) {
+                case '\\': cell_buf.push_back('\\'); return true;
+                case 't':  cell_buf.push_back('\t'); return true;
+                case 'n':  cell_buf.push_back('\n'); return true;
+                case 'r':  cell_buf.push_back('\r'); return true;
+                case '0':  cell_buf.push_back('\0'); return true;
+                case 'N':
+                    if (cell_buf.empty()) {
+                        cell_buf.push_back('\\');
+                        cell_buf.push_back('N');
+                        return true;
+                    }
+                    cell_buf.push_back('\\');
+                    return false;
+                default:
+                    cell_buf.push_back('\\');
+                    return false;
+            }
+        };
+
         for (size_t i = 0; i < len; ++i) {
             char c = data[i];
+
+            /* Drain a `\` that hung at the end of the previous chunk:
+             * the byte now in hand is the escape's second character. */
+            if (pending_backslash) {
+                pending_backslash = false;
+                if (state == State::CellStart) state = State::InCell;
+                if (decode_escape_byte(c)) continue;
+                /* else `\` got pushed; fall through and process c as
+                 * ordinary content (cell_sep, row term, or push). */
+            }
 
             /* CSV-only quoted-cell state machine. TSV ignores '"' entirely. */
             if (csv && state == State::InQuoted) {
@@ -2806,28 +2860,25 @@ struct InsertStreamParser {
 
             /* TSV escapes inside an unquoted cell. CSV unquoted cells
              * have no escape syntax. */
-            if (!csv && c == '\\' && i + 1 < len) {
-                char n = data[i + 1];
-                switch (n) {
-                    case '\\': cell_buf.push_back('\\'); ++i; continue;
-                    case 't':  cell_buf.push_back('\t'); ++i; continue;
-                    case 'n':  cell_buf.push_back('\n'); ++i; continue;
-                    case 'r':  cell_buf.push_back('\r'); ++i; continue;
-                    case '0':  cell_buf.push_back('\0'); ++i; continue;
-                    case 'N':
-                        /* Whole-cell NULL marker only at cell start with no other content. */
-                        if (cell_buf.empty()) {
-                            cell_buf.push_back('\\');
-                            cell_buf.push_back('N');
-                            ++i;
-                            continue;
-                        }
-                        cell_buf.push_back('\\');
-                        continue;
-                    default:
-                        cell_buf.push_back('\\');
-                        continue;
+            if (!csv && c == '\\') {
+                if (i + 1 >= len) {
+                    /* `\` is the last byte of this chunk; stash the
+                     * pending state and let the next feed() decode the
+                     * escape from its first byte. Without this, the `\`
+                     * would be pushed as a literal and the next chunk's
+                     * first byte would be treated as ordinary content,
+                     * silently corrupting any escape whose two bytes
+                     * straddle a 64 KiB read boundary. */
+                    pending_backslash = true;
+                    break;
                 }
+                if (decode_escape_byte(data[i + 1])) {
+                    ++i;
+                    continue;
+                }
+                /* `\` was pushed; the second byte falls through to
+                 * normal cell-content handling on the next iteration. */
+                continue;
             }
 
             cell_buf.push_back(c);
@@ -2839,6 +2890,15 @@ struct InsertStreamParser {
      * as a complete row. */
     template<typename RowHandler>
     void finish(RowHandler &on_row) {
+        if (pending_backslash) {
+            /* TSV file ends mid-escape. Treat the dangling `\` as a
+             * literal trailing character of the current cell; matches
+             * how a `\X` at end of a single chunk would have been
+             * handled if the next byte were not an escape letter. */
+            cell_buf.push_back('\\');
+            pending_backslash = false;
+            if (state == State::CellStart) state = State::InCell;
+        }
         if (state == State::QuotePending) {
             /* Closing quote on the final line. */
             state = State::InCell;
