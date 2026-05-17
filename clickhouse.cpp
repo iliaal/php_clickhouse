@@ -3641,17 +3641,18 @@ PHP_METHOD(ClickHouse, setDatabase)
  */
 static bool setCallbackField(zval *target, zval *cb, const char *err_name)
 {
+    bool clear_only = Z_TYPE_P(cb) == IS_NULL;
+    if (!clear_only && !zend_is_callable(cb, 0, NULL)) {
+        std::string msg = std::string(err_name) + " expects a callable or null";
+        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, msg.c_str(), 0);
+        return false;
+    }
     if (Z_TYPE(*target) != IS_UNDEF) {
         zval_ptr_dtor(target);
         ZVAL_UNDEF(target);
     }
-    if (Z_TYPE_P(cb) == IS_NULL) {
+    if (clear_only) {
         return true;
-    }
-    if (!zend_is_callable(cb, 0, NULL)) {
-        std::string msg = std::string(err_name) + " expects a callable or null";
-        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, msg.c_str(), 0);
-        return false;
     }
     ZVAL_COPY(target, cb);
     return true;
@@ -3709,25 +3710,28 @@ PHP_METHOD(ClickHouse, setVerbose)
     ZEND_PARSE_PARAMETERS_END();
     clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
 
-    /* Reset prior state. */
-    if (Z_TYPE(obj->verbose_callback) != IS_UNDEF) {
-        zval_ptr_dtor(&obj->verbose_callback);
-        ZVAL_UNDEF(&obj->verbose_callback);
-    }
-    obj->verbose_to_stderr = false;
+    bool new_verbose_to_stderr = false;
+    bool new_callback = false;
 
     if (Z_TYPE_P(sink) == IS_TRUE) {
-        obj->verbose_to_stderr = true;
+        new_verbose_to_stderr = true;
     } else if (Z_TYPE_P(sink) == IS_FALSE || Z_TYPE_P(sink) == IS_NULL) {
-        /* false / null: already cleared above. Treat null the same as
-         * false to match setProgressCallback / setProfileCallback, both
-         * of which accept null as "remove the callback". */
     } else if (zend_is_callable(sink, 0, NULL)) {
-        ZVAL_COPY(&obj->verbose_callback, sink);
+        new_callback = true;
     } else {
         sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
             "setVerbose expects bool, null, or callable", 0);
         return;
+    }
+
+    if (Z_TYPE(obj->verbose_callback) != IS_UNDEF) {
+        zval_ptr_dtor(&obj->verbose_callback);
+        ZVAL_UNDEF(&obj->verbose_callback);
+    }
+    obj->verbose_to_stderr = new_verbose_to_stderr;
+
+    if (new_callback) {
+        ZVAL_COPY(&obj->verbose_callback, sink);
     }
     RETURN_ZVAL(getThis(), 1, 0);
 }
@@ -4284,7 +4288,12 @@ PHP_METHOD(ClickHouse, selectStream)
         });
 
         auto t0 = std::chrono::steady_clock::now();
-        client->Select(query);
+        try {
+            client->Select(query);
+        } catch (...) {
+            try { client->ResetConnection(); } catch (...) {}
+            throw;
+        }
         auto t1 = std::chrono::steady_clock::now();
         obj->stats.elapsed_ms =
             std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -4398,7 +4407,12 @@ PHP_METHOD(ClickHouse, selectStreamCallback)
         });
 
         auto t0 = std::chrono::steady_clock::now();
-        client->Select(query);
+        try {
+            client->Select(query);
+        } catch (...) {
+            try { client->ResetConnection(); } catch (...) {}
+            throw;
+        }
         auto t1 = std::chrono::steady_clock::now();
         obj->stats.elapsed_ms =
             std::chrono::duration<double, std::milli>(t1 - t0).count();

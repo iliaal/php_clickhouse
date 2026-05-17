@@ -323,6 +323,53 @@ static double strict_zval_double(zval *z, const char *type_label)
     }
 }
 
+static std::string strict_zval_string(zval *z, const char *type_label)
+{
+    if (Z_TYPE_P(z) == IS_NULL) {
+        if (g_allow_null_in_strict > 0) return std::string();
+        throw std::runtime_error(
+            std::string("null cannot be assigned to non-Nullable column ") + type_label);
+    }
+    ZStrGuard sg(z);
+    return std::string(sg.val(), sg.len());
+}
+
+static int uuid_hex_value(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static UUID parseUUIDString(const char *s, size_t len, const char *error_msg)
+{
+    uint64_t high = 0;
+    uint64_t low = 0;
+    size_t digits = 0;
+
+    for (size_t i = 0; i < len; ++i) {
+        if (s[i] == '-') {
+            continue;
+        }
+        int nibble = uuid_hex_value(s[i]);
+        if (nibble < 0 || digits >= 32) {
+            throw std::runtime_error(error_msg);
+        }
+        if (digits < 16) {
+            high = (high << 4) | (uint64_t)nibble;
+        } else {
+            low = (low << 4) | (uint64_t)nibble;
+        }
+        ++digits;
+    }
+
+    if (digits != 32) {
+        throw std::runtime_error(error_msg);
+    }
+    return UUID{high, low};
+}
+
 /*
  * RAII guard that owns a zend_string* obtained from zval_get_string and
  * releases it in the destructor. Used at PHP-to-C boundaries where the
@@ -863,7 +910,7 @@ static ColumnRef appendDateColumn(HashTable *values_ht, bool is_date)
 // parameterizes on the column type and a compile-time `nullable` flag
 // that decides whether IS_NULL maps to std::nullopt.
 template <typename TCol, bool nullable>
-static ColumnRef appendLowCardinalityColumn(HashTable *values_ht, std::shared_ptr<TCol> value)
+static ColumnRef appendLowCardinalityColumn(HashTable *values_ht, std::shared_ptr<TCol> value, const char *type_label)
 {
     zval *array_value;
     ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
@@ -873,8 +920,8 @@ static ColumnRef appendLowCardinalityColumn(HashTable *values_ht, std::shared_pt
                 continue;
             }
         }
-        ZStrGuard sg(array_value);
-        value->Append(std::string_view(sg.val(), sg.len()));
+        std::string s = strict_zval_string(array_value, type_label);
+        value->Append(std::string_view(s.data(), s.size()));
     } ZEND_HASH_FOREACH_END();
     return value;
 }
@@ -926,18 +973,13 @@ static ColumnRef appendMapColumn(HashTable *values_ht, KFn extract_key, VFn extr
 static UUID phpToUUID(zval *zv)
 {
     if (Z_TYPE_P(zv) == IS_NULL) {
+        if (g_allow_null_in_strict <= 0) {
+            throw std::runtime_error("null cannot be assigned to non-Nullable column UUID");
+        }
         return UUID{0, 0};
     }
     ZStrGuard sg(zv);
-    std::string s(sg.val(), sg.len());
-    s.erase(std::remove(s.begin(), s.end(), '-'), s.end());
-    if (s.length() != 32) {
-        throw std::runtime_error("UUID format error");
-    }
-    return UUID{
-        std::stoull(s.substr(0, 16), nullptr, 16),
-        std::stoull(s.substr(16, 16), nullptr, 16),
-    };
+    return parseUUIDString(sg.val(), sg.len(), "UUID format error");
 }
 
 // Second-stage Map dispatch: key column type already resolved at the
@@ -948,8 +990,7 @@ template <typename KCol, typename K, typename KFn>
 static ColumnRef appendMapByValueType(HashTable *values_ht, TypeRef vtype, KFn key_fn)
 {
     auto strVal = [](zval *mv) -> std::string {
-        ZStrGuard sg(mv);
-        return std::string(sg.val(), sg.len());
+        return strict_zval_string(mv, "Map value String");
     };
     /* Narrow-typed int extractors range-check before truncation. The
      * non-Map insert path has had these via appendIntColumn since pass 1;
@@ -1139,8 +1180,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
 
         ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
-            ZStrGuard sg(array_value);
-            value->Append(std::string(sg.val(), sg.len()));
+            value->Append(strict_zval_string(array_value, "String"));
         }
         ZEND_HASH_FOREACH_END();
 
@@ -1152,8 +1192,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
 
         ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
-            ZStrGuard sg(array_value);
-            value->Append(std::string(sg.val(), sg.len()));
+            value->Append(strict_zval_string(array_value, "FixedString"));
         }
         ZEND_HASH_FOREACH_END();
 
@@ -1468,19 +1507,19 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         if (inner->GetCode() == Type::Code::String) {
             if (is_nullable) {
                 return appendLowCardinalityColumn<ColumnLowCardinalityT<ColumnNullableT<ColumnString>>, /*nullable=*/true>(
-                    values_ht, std::make_shared<ColumnLowCardinalityT<ColumnNullableT<ColumnString>>>());
+                    values_ht, std::make_shared<ColumnLowCardinalityT<ColumnNullableT<ColumnString>>>(), "LowCardinality Nullable String");
             }
             return appendLowCardinalityColumn<ColumnLowCardinalityT<ColumnString>, /*nullable=*/false>(
-                values_ht, std::make_shared<ColumnLowCardinalityT<ColumnString>>());
+                values_ht, std::make_shared<ColumnLowCardinalityT<ColumnString>>(), "LowCardinality String");
         }
         if (inner->GetCode() == Type::Code::FixedString) {
             int width = parseFixedStringWidth(inner);
             if (is_nullable) {
                 return appendLowCardinalityColumn<ColumnLowCardinalityT<ColumnNullableT<ColumnFixedString>>, /*nullable=*/true>(
-                    values_ht, std::make_shared<ColumnLowCardinalityT<ColumnNullableT<ColumnFixedString>>>(width));
+                    values_ht, std::make_shared<ColumnLowCardinalityT<ColumnNullableT<ColumnFixedString>>>(width), "LowCardinality Nullable FixedString");
             }
             return appendLowCardinalityColumn<ColumnLowCardinalityT<ColumnFixedString>, /*nullable=*/false>(
-                values_ht, std::make_shared<ColumnLowCardinalityT<ColumnFixedString>>(width));
+                values_ht, std::make_shared<ColumnLowCardinalityT<ColumnFixedString>>(width), "LowCardinality FixedString");
         }
         throw std::runtime_error("LowCardinality only supported over String / FixedString (Nullable allowed)");
     }
@@ -1549,15 +1588,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
             if (!zk) {
                 throw std::runtime_error("Map(UUID, *) row entry must have a string key");
             }
-            std::string s(ZSTR_VAL(zk), ZSTR_LEN(zk));
-            s.erase(std::remove(s.begin(), s.end(), '-'), s.end());
-            if (s.length() != 32) {
-                throw std::runtime_error("UUID key format error");
-            }
-            return UUID{
-                std::stoull(s.substr(0, 16), nullptr, 16),
-                std::stoull(s.substr(16, 16), nullptr, 16),
-            };
+            return parseUUIDString(ZSTR_VAL(zk), ZSTR_LEN(zk), "UUID key format error");
         };
 
         /* Narrow-key wrappers: same range-check the value side gained for

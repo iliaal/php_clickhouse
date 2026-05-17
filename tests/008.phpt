@@ -27,7 +27,7 @@ function testUUID($client, $deleteTable = false) {
         'uuid_c', 'uuid2_c'
     ], [
         ['31249a1b-7b05-4270-9f37-c609b48a9bb2', '31249a1b7b0542709f37c609b48a9bb2'],
-        ['31249a1b-7b05-4270-9f37-c609b48a9bb2', null],
+        ['31249a1b-7b05-4270-9f37-c609b48a9bb2', '00000000-0000-0000-0000-000000000000'],
     ]);
 
     $client->writeStart("test.uuid_test", [
