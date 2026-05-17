@@ -992,6 +992,13 @@ static std::string formatScalarParam(zval *v)
 
 static bool typeNeedsQuoting(const std::string &t)
 {
+    if (t.compare(0, 9, "Nullable(") == 0 && t.back() == ')') {
+        return typeNeedsQuoting(t.substr(9, t.size() - 10));
+    }
+    if (t.compare(0, 15, "LowCardinality(") == 0 && t.back() == ')') {
+        return typeNeedsQuoting(t.substr(15, t.size() - 16));
+    }
+
     /* Inner type for an Array(T) typed param. Numeric and bool parse
      * raw; everything else needs single-quotes around each element.
      * Lengths are baked in so we don't strlen each compile-time literal
@@ -1010,6 +1017,17 @@ static bool typeNeedsQuoting(const std::string &t)
     return true;
 }
 
+static bool typeAllowsNull(const std::string &t)
+{
+    if (t.compare(0, 9, "Nullable(") == 0 && t.back() == ')') {
+        return true;
+    }
+    if (t.compare(0, 15, "LowCardinality(") == 0 && t.back() == ')') {
+        return typeAllowsNull(t.substr(15, t.size() - 16));
+    }
+    return false;
+}
+
 static std::string formatParamValue(zval *v, const std::string &type, bool inside_array)
 {
     if (Z_TYPE_P(v) == IS_NULL) {
@@ -1022,12 +1040,21 @@ static std::string formatParamValue(zval *v, const std::string &type, bool insid
             inner = type.substr(6, type.size() - 7);
         }
         bool quote = inner.empty() ? true : typeNeedsQuoting(inner);
+        bool allow_null = inner.empty() ? false : typeAllowsNull(inner);
         std::string out = "[";
         bool first = true;
         zval *iv;
         ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(v), iv) {
             if (!first) out += ",";
             first = false;
+            if (Z_TYPE_P(iv) == IS_NULL) {
+                if (!allow_null) {
+                    throw std::runtime_error(
+                        "NULL element in non-Nullable Array typed parameter");
+                }
+                out += "NULL";
+                continue;
+            }
             std::string sv = formatScalarParam(iv);
             if (quote) {
                 std::string esc;

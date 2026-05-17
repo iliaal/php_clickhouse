@@ -45,6 +45,38 @@ echo "quote: ",  $res[0]["s"], "\n";
 // Null routed via SetParam(nullopt).
 $res = $c->select("SELECT {x:Nullable(UInt32)} AS x", ["x" => null]);
 var_dump($res[0]["x"]);
+
+// Null elements inside Array(Nullable(T)) must stay NULL, not empty
+// strings or malformed empty numeric tokens.
+$res = $c->select(
+    "SELECT arrayJoin({xs:Array(Nullable(String))}) AS s",
+    ["xs" => ["a", null, ""]]
+);
+foreach ($res as $row) {
+    var_dump($row["s"]);
+}
+
+$res = $c->select(
+    "SELECT arrayJoin({ids:Array(Nullable(UInt32))}) AS id",
+    ["ids" => [1, null, 3]]
+);
+foreach ($res as $row) {
+    var_dump($row["id"]);
+}
+
+try {
+    $c->select(
+        "SELECT arrayJoin({ids:Array(UInt32)}) AS id",
+        ["ids" => [1, null]]
+    );
+    echo "nonnull array null: NO THROW\n";
+} catch (ClickHouseException $e) {
+    echo "nonnull array null: ";
+    echo strpos($e->getMessage(), "NULL element in non-Nullable Array") !== false
+        ? "LOCAL REJECT"
+        : "OTHER REJECT";
+    echo "\n";
+}
 ?>
 --EXPECT--
 scalar n: 42
@@ -54,3 +86,10 @@ array xs: a,b,c
 mix: 7
 quote: it's fine
 NULL
+string(1) "a"
+NULL
+string(0) ""
+int(1)
+NULL
+int(3)
+nonnull array null: LOCAL REJECT
