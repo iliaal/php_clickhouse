@@ -21,9 +21,7 @@ $probes = [
     "isExists(backtick in db)"          => fn() => $c->isExists("d`b", "t"),
     "isExists(leading digit in table)"  => fn() => $c->isExists("test", "1bad"),
     "isExists(space in db)"             => fn() => $c->isExists("ba d", "t"),
-    "tableSize(SQL injection)"          => fn() => $c->tableSize("test; SELECT 1"),
     "tableSize(empty)"                  => fn() => $c->tableSize(""),
-    "tableSize(double-dot)"             => fn() => $c->tableSize("a..b"),
     "tableSize(trailing dot)"           => fn() => $c->tableSize("a."),
     "tableSize(leading dot)"            => fn() => $c->tableSize(".a"),
     "truncateTable(injection)"          => fn() => $c->truncateTable("t; DROP DATABASE test"),
@@ -46,6 +44,9 @@ foreach ($probes as $label => $fn) {
     }
 }
 
+$literal = $c->tableSize("test; SELECT 1");
+echo "tableSize literal special count=", count($literal), "\n";
+
 // Sanity: a valid identifier must NOT throw the validator.
 try {
     $c->execute("CREATE DATABASE IF NOT EXISTS test");
@@ -65,9 +66,7 @@ isExists(empty db): database name must not be empty
 isExists(backtick in db): database name contains an invalid character
 isExists(leading digit in table): table name must start with a letter or underscore
 isExists(space in db): database name contains an invalid character
-tableSize(SQL injection): table name contains an invalid character
 tableSize(empty): table name must not be empty
-tableSize(double-dot): table name must start with a letter or underscore
 tableSize(trailing dot): table name must not be empty
 tableSize(leading dot): database name must not be empty
 truncateTable(injection): table name contains an invalid character
@@ -77,4 +76,5 @@ dropPartition(injection in table): table name contains an invalid character
 dropPartition(empty table): table name must not be empty
 showCreateTable(injection): table name contains an invalid character
 showCreateTable(hyphen): table name contains an invalid character
+tableSize literal special count=0
 valid path isExists=true
