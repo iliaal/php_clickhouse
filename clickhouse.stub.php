@@ -178,7 +178,7 @@ final class ClickHouseRowIterator implements Iterator, Countable
 
     public function valid(): bool {}
 
-    public function current(): array {}
+    public function current(): ?array {}
 
     public function key(): int {}
 

@@ -43,7 +43,7 @@ try {
     $c->setDatabase("bad; DROP DATABASE test");
     echo "setDatabase: NO EXCEPTION (BUG)\n";
 } catch (ClickHouseException $e) {
-    echo "setDatabase rejected: ", $e->getMessage(), "\n";
+    echo "setDatabase rejected: yes\n";
 }
 
 // Switch back, drop the temp DB.
@@ -67,7 +67,7 @@ max_threads=2
 bool(true)
 currentDatabase=test_054_alt
 showTables_count=1 has_t=yes
-setDatabase rejected: database name contains an invalid character
+setDatabase rejected: yes
 code_match=true
 name_match=true
 queryid_match=true

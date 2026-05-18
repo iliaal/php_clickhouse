@@ -1,5 +1,5 @@
 --TEST--
-ClickHouse selectToStream Nullable: \N in TSV, empty in CSV
+ClickHouse selectToStream Nullable: \N in TSV and CSV
 --EXTENSIONS--
 clickhouse
 --SKIPIF--
@@ -30,7 +30,7 @@ rewind($mem);
 echo stream_get_contents($mem);
 fclose($mem);
 
-// CSV: NULL → empty cell.
+// CSV: NULL → \N (raw two bytes, backslash N).
 $mem = fopen("php://memory", "w+b");
 $n = $c->selectToStream(
     "SELECT id, note, v FROM test.stream_nul ORDER BY id",
@@ -52,6 +52,6 @@ tsv rows=4
 4	\N	42
 csv rows=4
 1,alpha,100<CR><LF>
-2,,<CR><LF>
+2,\N,\N<CR><LF>
 3,tab	here,7<CR><LF>
-4,,42<CR><LF>
+4,\N,42<CR><LF>

@@ -116,7 +116,7 @@ foreach ($ch->select("SELECT id, ts, tag FROM events ORDER BY id",
 
 ## 📦 Supported data types
 
-* `Array(T)` (single-level)
+* `Array(T)` including nested server-side placeholder values such as `Array(Array(UInt32))`
 * `Date`, `Date32`, `DateTime`, `DateTime64(N[, timezone])`
 * `Time`, `Time64(N)` (server side requires ClickHouse 25.x or later)
 * `Decimal`, `Decimal32`, `Decimal64`, `Decimal128(P, S)` (read/write as scaled-integer strings)
@@ -379,7 +379,7 @@ $stats = $ch->getStatistics();
 
 ### Query log
 
-`enableLogQueries(true)` turns on a per-client buffer that records each completed `select` / `insert` / `execute` / `writeStart`. Each entry is `{sql, query_id, elapsed_ms, rows_read, bytes_read, error_code, error_message}`. `error_code` is `0` on success, the server error code on a `ServerException`, or `-1` on client/network failure. `getLogQueries()` returns the buffer and clears it.
+`enableLogQueries(true)` turns on a per-client buffer that records each completed `select` / `insert` / `execute` / streaming `writeEnd`. Each entry is `{sql, query_id, elapsed_ms, rows_read, bytes_read, error_code, error_message}`. `sql` is capped before retention. `error_code` is `0` on success, the server error code on a `ServerException`, or `-1` on client/network failure. `getLogQueries()` returns the buffer and clears it.
 
 ```php
 $ch->enableLogQueries(true);

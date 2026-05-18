@@ -110,6 +110,9 @@ struct clickhouse_object {
     zval verbose_callback;         // IS_UNDEF when off or stderr-mode
     bool verbose_to_stderr;        // true when setVerbose(true) was used
     bool log_enabled;
+    std::string insert_sql;
+    std::string insert_query_id;
+    std::chrono::steady_clock::time_point insert_started_at;
     /* deque, not vector, so the cap-overflow path's pop-front is O(1).
      * vector::erase(begin()) on a 1024-entry log shifted ~16 KB on
      * every query past the cap. */
@@ -139,6 +142,9 @@ static zend_object *clickhouse_create_object(zend_class_entry *ce)
     new (&obj->insert_block) Block();
     new (&obj->stats) ClientStats();
     new (&obj->settings) std::unordered_map<std::string, std::string>();
+    new (&obj->insert_sql) std::string();
+    new (&obj->insert_query_id) std::string();
+    new (&obj->insert_started_at) std::chrono::steady_clock::time_point();
     new (&obj->query_log) std::deque<QueryLog>();
     ZVAL_UNDEF(&obj->progress_callback);
     ZVAL_UNDEF(&obj->profile_callback);
@@ -193,6 +199,9 @@ static void clickhouse_free_obj(zend_object *object)
     obj->insert_block.~Block();
     obj->stats.~ClientStats();
     obj->settings.~unordered_map<std::string, std::string>();
+    obj->insert_sql.~basic_string();
+    obj->insert_query_id.~basic_string();
+    obj->insert_started_at.~time_point();
     obj->query_log.~deque<QueryLog>();
 
     zend_object_std_dtor(&obj->std);
@@ -264,6 +273,7 @@ static void clickhouse_iter_free_obj(zend_object *object)
  */
 struct clickhouse_statement_object {
     zval rows;
+    zval positional_rows;
     zval statistics;
     zend_object std;
 };
@@ -281,6 +291,7 @@ static zend_object *clickhouse_statement_create_object(zend_class_entry *ce)
 {
     clickhouse_statement_object *stmt = (clickhouse_statement_object *)zend_object_alloc(sizeof(clickhouse_statement_object), ce);
     ZVAL_UNDEF(&stmt->rows);
+    ZVAL_UNDEF(&stmt->positional_rows);
     ZVAL_UNDEF(&stmt->statistics);
     zend_object_std_init(&stmt->std, ce);
     object_properties_init(&stmt->std, ce);
@@ -292,12 +303,14 @@ static void clickhouse_statement_free_obj(zend_object *object)
 {
     clickhouse_statement_object *stmt = clickhouse_statement_from_obj(object);
     zval_ptr_dtor(&stmt->rows);
+    zval_ptr_dtor(&stmt->positional_rows);
     zval_ptr_dtor(&stmt->statistics);
     zend_object_std_dtor(&stmt->std);
 }
 
 static std::string sanitizeError(const char *what);
 static void throwClickHouseError(const std::exception &e, const std::string &query_id = std::string());
+static std::string currentDatabase(zval *this_obj);
 
 #ifdef COMPILE_DL_CLICKHOUSE
 extern "C" {
@@ -381,6 +394,37 @@ static PHP_METHOD(ClickHouseStatement, fetchColumn);
 
 #include "clickhouse_arginfo.h"
 
+#if PHP_VERSION_ID < 80100
+static int clickhouse_serialize_deny(zval *object, unsigned char **buffer, size_t *buf_len, zend_serialize_data *data)
+{
+    (void)buffer;
+    (void)buf_len;
+    (void)data;
+    zend_throw_exception_ex(NULL, 0, "Serialization of '%s' is not allowed", ZSTR_VAL(Z_OBJCE_P(object)->name));
+    return FAILURE;
+}
+
+static int clickhouse_unserialize_deny(zval *object, zend_class_entry *ce, const unsigned char *buf, size_t buf_len, zend_unserialize_data *data)
+{
+    (void)object;
+    (void)buf;
+    (void)buf_len;
+    (void)data;
+    zend_throw_exception_ex(NULL, 0, "Unserialization of '%s' is not allowed", ZSTR_VAL(ce->name));
+    return FAILURE;
+}
+#endif
+
+static void clickhouse_mark_not_serializable(zend_class_entry *ce)
+{
+#if PHP_VERSION_ID >= 80100
+    ce->ce_flags |= ZEND_ACC_NOT_SERIALIZABLE;
+#else
+    ce->serialize = clickhouse_serialize_deny;
+    ce->unserialize = clickhouse_unserialize_deny;
+#endif
+}
+
 /* {{{ clickhouse_functions[] */
 const zend_function_entry clickhouse_functions[] =
 {
@@ -397,9 +441,7 @@ PHP_MINIT_FUNCTION(clickhouse)
 #endif
 
     clickhouse_ce = register_class_ClickHouse();
-#if PHP_VERSION_ID >= 80100
-    clickhouse_ce->ce_flags |= ZEND_ACC_NOT_SERIALIZABLE;
-#endif
+    clickhouse_mark_not_serializable(clickhouse_ce);
     clickhouse_ce->create_object = clickhouse_create_object;
 #if PHP_VERSION_ID >= 80400
     clickhouse_ce->default_object_handlers = &clickhouse_object_handlers;
@@ -412,9 +454,7 @@ PHP_MINIT_FUNCTION(clickhouse)
     clickhouse_exception_ce = register_class_ClickHouseException(zend_ce_exception);
 
     clickhouse_iter_ce = register_class_ClickHouseRowIterator(zend_ce_iterator, zend_ce_countable);
-#if PHP_VERSION_ID >= 80100
-    clickhouse_iter_ce->ce_flags |= ZEND_ACC_NOT_SERIALIZABLE;
-#endif
+    clickhouse_mark_not_serializable(clickhouse_iter_ce);
     clickhouse_iter_ce->create_object = clickhouse_iter_create_object;
 #if PHP_VERSION_ID >= 80400
     clickhouse_iter_ce->default_object_handlers = &clickhouse_iter_object_handlers;
@@ -425,9 +465,7 @@ PHP_MINIT_FUNCTION(clickhouse)
     clickhouse_iter_object_handlers.free_obj = clickhouse_iter_free_obj;
 
     clickhouse_statement_ce = register_class_ClickHouseStatement(zend_ce_iterator, zend_ce_countable, zend_ce_arrayaccess, php_json_serializable_ce);
-#if PHP_VERSION_ID >= 80100
-    clickhouse_statement_ce->ce_flags |= ZEND_ACC_NOT_SERIALIZABLE;
-#endif
+    clickhouse_mark_not_serializable(clickhouse_statement_ce);
     clickhouse_statement_ce->create_object = clickhouse_statement_create_object;
 #if PHP_VERSION_ID >= 80400
     clickhouse_statement_ce->default_object_handlers = &clickhouse_statement_object_handlers;
@@ -436,6 +474,7 @@ PHP_MINIT_FUNCTION(clickhouse)
     memcpy(&clickhouse_statement_object_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
     clickhouse_statement_object_handlers.offset = offsetof(clickhouse_statement_object, std);
     clickhouse_statement_object_handlers.free_obj = clickhouse_statement_free_obj;
+    clickhouse_statement_object_handlers.clone_obj = NULL;
 
     /* Back-compat aliases for the original SeasClick name. Deprecated;
      * removed in the next major release. */
@@ -492,8 +531,11 @@ PHP_METHOD(ClickHouse, __construct)
 
     zval *this_obj;
     this_obj = getThis();
+    bool host_configured = false;
+    bool port_configured = false;
     if (php_array_get_value(_ht, "host", value))
     {
+        host_configured = true;
         ZStrGuard sg(value);
         sc_zend_update_property_stringl(clickhouse_ce, this_obj, "host", sizeof("host") - 1,
                                         sg.val(), sg.len());
@@ -501,6 +543,7 @@ PHP_METHOD(ClickHouse, __construct)
 
     if (php_array_get_value(_ht, "port", value))
     {
+        port_configured = true;
         zend_long _p = zval_get_long(value);
         if (_p < 1 || _p > 65535) {
             sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
@@ -762,7 +805,12 @@ PHP_METHOD(ClickHouse, __construct)
             }
             eps.push_back(std::move(e));
         } ZEND_HASH_FOREACH_END();
-        if (!eps.empty()) Options = Options.SetEndpoints(eps);
+        if (!eps.empty()) {
+            if (!host_configured && !port_configured) {
+                Options = Options.SetHost(std::string());
+            }
+            Options = Options.SetEndpoints(eps);
+        }
     }
 
     if (php_array_get_value(_ht, "database", value))
@@ -853,6 +901,45 @@ static inline std::string makeQid(zend_string *s)
     return (s && ZSTR_LEN(s) > 0) ? std::string(ZSTR_VAL(s), ZSTR_LEN(s)) : std::string();
 }
 
+static std::string sqlStringLiteral(const std::string &s)
+{
+    std::string out;
+    out.reserve(s.size() + 2);
+    out.push_back('\'');
+    for (char c : s) {
+        switch (c) {
+            case '\'':
+            case '\\':
+                out.push_back('\\');
+                out.push_back(c);
+                break;
+            case '\0':
+                out.append("\\0", 2);
+                break;
+            default:
+                out.push_back(c);
+                break;
+        }
+    }
+    out.push_back('\'');
+    return out;
+}
+
+static std::string sqlQuotedIdentifier(const std::string &s)
+{
+    std::string out;
+    out.reserve(s.size() + 2);
+    out.push_back('`');
+    for (char c : s) {
+        if (c == '`' || c == '\\') {
+            out.push_back('\\');
+        }
+        out.push_back(c);
+    }
+    out.push_back('`');
+    return out;
+}
+
 // Max bytes of an exception message that crosses into userland. Bigger
 // than 1024 because real ClickHouse errors with stack hints can run
 // long, smaller than the few KB that would let a verbose dump leak.
@@ -908,6 +995,58 @@ static Client* getClient(clickhouse_object *obj)
         throw std::runtime_error("ClickHouse client is not initialized");
     }
     return obj->client;
+}
+
+static zend_string *zvalGetStringOrThrow(zval *v)
+{
+    zend_string *s = zval_get_string(v);
+    if (!s || EG(exception)) {
+        if (s) {
+            zend_string_release(s);
+        }
+        throw std::runtime_error("PHP string conversion failed");
+    }
+    return s;
+}
+
+static void setElapsedSince(clickhouse_object *obj,
+                            std::chrono::steady_clock::time_point started_at)
+{
+    auto now = std::chrono::steady_clock::now();
+    obj->stats.elapsed_ms =
+        std::chrono::duration<double, std::milli>(now - started_at).count();
+}
+
+static void clearStreamingInsertState(clickhouse_object *obj)
+{
+    obj->insert_block = Block();
+    obj->has_insert_block = false;
+    obj->insert_blocks_sent = false;
+    obj->insert_sql.clear();
+    obj->insert_query_id.clear();
+    obj->insert_started_at = std::chrono::steady_clock::time_point();
+}
+
+static void resetConnectionReapplyDatabase(zval *this_obj, clickhouse_object *obj,
+                                           bool clear_insert_state)
+{
+    Client *client = getClient(obj);
+    client->ResetConnection();
+    if (clear_insert_state && obj->has_insert_block) {
+        clearStreamingInsertState(obj);
+    }
+    std::string dbname = currentDatabase(this_obj);
+    if (!dbname.empty() && dbname != "default") {
+        client->Execute(Query("USE " + sqlQuotedIdentifier(dbname)));
+    }
+}
+
+static void tryResetConnectionReapplyDatabase(zval *this_obj, clickhouse_object *obj,
+                                              bool clear_insert_state)
+{
+    try {
+        resetConnectionReapplyDatabase(this_obj, obj, clear_insert_state);
+    } catch (...) {}
 }
 
 /*
@@ -982,11 +1121,35 @@ static std::string formatScalarParam(zval *v)
             return std::string(buf);
         }
         default: {
-            zend_string *coerced = zval_get_string(v);
+            zend_string *coerced = zvalGetStringOrThrow(v);
             std::string out(ZSTR_VAL(coerced), ZSTR_LEN(coerced));
             zend_string_release(coerced);
             return out;
         }
+    }
+}
+
+static bool wrappedTypeInner(const std::string &t, const char *prefix, size_t prefix_len, std::string &inner)
+{
+    if (t.size() > prefix_len + 1 &&
+        t.compare(0, prefix_len, prefix) == 0 &&
+        t.back() == ')') {
+        inner = t.substr(prefix_len, t.size() - prefix_len - 1);
+        return true;
+    }
+    return false;
+}
+
+static bool arrayInnerType(const std::string &type, std::string &inner)
+{
+    std::string t = type;
+    for (;;) {
+        if (wrappedTypeInner(t, "LowCardinality(", 15, inner) ||
+            wrappedTypeInner(t, "Nullable(", 9, inner)) {
+            t = inner;
+            continue;
+        }
+        return wrappedTypeInner(t, "Array(", 6, inner);
     }
 }
 
@@ -1036,11 +1199,11 @@ static std::string formatParamValue(zval *v, const std::string &type, bool insid
 
     if (Z_TYPE_P(v) == IS_ARRAY) {
         std::string inner;
-        if (type.compare(0, 6, "Array(") == 0 && type.back() == ')') {
-            inner = type.substr(6, type.size() - 7);
-        }
+        arrayInnerType(type, inner);
         bool quote = inner.empty() ? true : typeNeedsQuoting(inner);
         bool allow_null = inner.empty() ? false : typeAllowsNull(inner);
+        std::string nested_inner;
+        bool nested_array = !inner.empty() && arrayInnerType(inner, nested_inner);
         std::string out = "[";
         bool first = true;
         zval *iv;
@@ -1053,6 +1216,14 @@ static std::string formatParamValue(zval *v, const std::string &type, bool insid
                         "NULL element in non-Nullable Array typed parameter");
                 }
                 out += "NULL";
+                continue;
+            }
+            if (nested_array) {
+                if (Z_TYPE_P(iv) != IS_ARRAY) {
+                    throw std::runtime_error(
+                        "Array typed parameter element must be an array");
+                }
+                out += formatParamValue(iv, inner, true);
                 continue;
             }
             std::string sv = formatScalarParam(iv);
@@ -1319,6 +1490,20 @@ struct QueryActiveGuard {
  * the vector unboundedly (each entry holds two arbitrary-length strings).
  * When the cap is reached we drop the oldest in-place. */
 #define CLICKHOUSE_QUERY_LOG_MAX 1024
+#define CLICKHOUSE_QUERY_LOG_STRING_MAX_BYTES 8192
+
+static std::string queryLogString(const std::string &value)
+{
+    if (value.size() <= CLICKHOUSE_QUERY_LOG_STRING_MAX_BYTES) {
+        return value;
+    }
+    static const char suffix[] = "... (truncated)";
+    constexpr size_t suffix_len = sizeof(suffix) - 1;
+    constexpr size_t prefix_len = CLICKHOUSE_QUERY_LOG_STRING_MAX_BYTES - suffix_len;
+    std::string out(value.data(), prefix_len);
+    out.append(suffix, suffix_len);
+    return out;
+}
 
 static void appendQueryLogCapped(clickhouse_object *obj, QueryLog &&ql)
 {
@@ -1334,8 +1519,8 @@ static QueryLog buildQueryLog(const clickhouse_object *obj,
                               const std::string &sql, const std::string &qid)
 {
     QueryLog ql;
-    ql.sql = sql;
-    ql.query_id = qid;
+    ql.sql = queryLogString(sql);
+    ql.query_id = queryLogString(qid);
     ql.elapsed_ms = obj->stats.elapsed_ms;
     ql.rows_read = obj->stats.rows_read;
     ql.bytes_read = obj->stats.bytes_read;
@@ -1594,7 +1779,7 @@ static void applyPlaceholders(string &sql, HashTable *params_ht, std::vector<Typ
             zval *iv;
             bool first = true;
             ZEND_HASH_FOREACH_VAL(aht, iv) {
-                zend_string *coerced = zval_get_string(iv);
+                zend_string *coerced = zvalGetStringOrThrow(iv);
                 std::string tok;
                 try {
                     tok = validatePlaceholderToken(
@@ -1609,7 +1794,7 @@ static void applyPlaceholders(string &sql, HashTable *params_ht, std::vector<Typ
                 repl += tok;
             } ZEND_HASH_FOREACH_END();
         } else {
-            zend_string *coerced = zval_get_string(pzval);
+            zend_string *coerced = zvalGetStringOrThrow(pzval);
             try {
                 repl = validatePlaceholderToken(
                     ZSTR_VAL(coerced), ZSTR_LEN(coerced), name);
@@ -1666,25 +1851,31 @@ static void do_select_into(zval *out, zval *this_obj,
                            const char *sql, size_t l_sql,
                            zval *params, zend_long fetch_mode,
                            const std::string &qid, zval *settings,
-                           const ExternalTables *external_tables)
+                           const ExternalTables *external_tables,
+                           zval *positional_out = NULL)
 {
     clickhouse_object *obj = Z_CLICKHOUSE_P(this_obj);
+    std::string log_sql(sql, l_sql);
     try
     {
         Client *client = getClient(obj);
         QueryActiveGuard guard(obj);
+
+        resetStats(obj);
+        obj->stats.last_query_id = qid;
 
         if (obj->has_insert_block)
         {
             throw std::runtime_error("The insert operation is now in progress");
         }
 
-        std::string sql_s(sql, l_sql);
+        std::string sql_s = log_sql;
         std::vector<TypedParam> typed_params;
 
         if (params != NULL && Z_TYPE_P(params) == IS_ARRAY)
         {
             applyPlaceholders(sql_s, Z_ARRVAL_P(params), typed_params);
+            log_sql = sql_s;
         } else if (params != NULL && Z_TYPE_P(params) != IS_ARRAY) {
             throw std::runtime_error("The second argument to the select function must be an array");
         }
@@ -1692,8 +1883,6 @@ static void do_select_into(zval *out, zval *this_obj,
         Query query = qid.empty() ? Query(sql_s) : Query(sql_s, qid);
         attachTypedParams(query, typed_params);
         applyMergedSettings(query, obj, settings);
-        resetStats(obj);
-        obj->stats.last_query_id = qid;
         attachProgressAndProfile(query, obj);
         attachVerbose(query, obj);
 
@@ -1709,11 +1898,14 @@ static void do_select_into(zval *out, zval *this_obj,
 
         if (!(fetch_mode & SC_FETCH_ONE)) {
             array_init(out);
+            if (positional_out) {
+                array_init(positional_out);
+            }
         }
 
         size_t verbose_block_idx = 0;
         bool fetched_one = false;
-        query.OnData([out, fetch_mode, &fetched_one, obj, &verbose_block_idx](const Block &block) {
+        query.OnData([out, positional_out, fetch_mode, &fetched_one, obj, &verbose_block_idx](const Block &block) {
             if (verbose_active(obj)) {
                 zval ctx;
                 array_init(&ctx);
@@ -1766,9 +1958,17 @@ static void do_select_into(zval *out, zval *this_obj,
                          * path). The prior convert_to_string mutated
                          * kp_col1 in place; both worked but the new form
                          * keeps the two key-pair paths in lockstep. */
-                        zend_string *coerced = zval_get_string(&kp_col1);
-                        zend_symtable_update(Z_ARRVAL_P(out), coerced, &kp_col2);
-                        zend_string_release(coerced);
+                        zend_string *coerced = NULL;
+                        try {
+                            coerced = zvalGetStringOrThrow(&kp_col1);
+                            zend_symtable_update(Z_ARRVAL_P(out), coerced, &kp_col2);
+                            zend_string_release(coerced);
+                        } catch (...) {
+                            if (coerced) zend_string_release(coerced);
+                            zval_ptr_dtor(&kp_col1);
+                            zval_ptr_dtor(&kp_col2);
+                            throw;
+                        }
                     }
                     zval_ptr_dtor(&kp_col1);
                     continue;
@@ -1781,13 +1981,38 @@ static void do_select_into(zval *out, zval *this_obj,
                 }
 
                 try {
-                    for (size_t column = 0; column < col_count; ++column)
-                    {
-                        if (fetch_mode & SC_FETCH_COLUMN) {
-                            convertToZval(&row_tmp, block[0], row, "", 0, fetch_mode|SC_FETCH_ONE);
-                            break;
-                        } else {
-                            convertToZval(&row_tmp, block[column], row, col_names[column], 0, fetch_mode);
+                    if (positional_out && !(fetch_mode & SC_FETCH_COLUMN)) {
+                        zval pos_tmp;
+                        array_init(&pos_tmp);
+                        try {
+                            for (size_t column = 0; column < col_count; ++column)
+                            {
+                                zval cell;
+                                ZVAL_UNDEF(&cell);
+                                convertToZval(&cell, block[column], row, "", 0, fetch_mode|SC_FETCH_ONE);
+
+                                zval assoc_cell;
+                                ZVAL_COPY(&assoc_cell, &cell);
+                                sc_add_assoc_zval_ex(&row_tmp,
+                                    col_names[column].c_str(),
+                                    col_names[column].length(),
+                                    &assoc_cell);
+                                add_next_index_zval(&pos_tmp, &cell);
+                            }
+                            add_next_index_zval(positional_out, &pos_tmp);
+                        } catch (...) {
+                            zval_ptr_dtor(&pos_tmp);
+                            throw;
+                        }
+                    } else {
+                        for (size_t column = 0; column < col_count; ++column)
+                        {
+                            if (fetch_mode & SC_FETCH_COLUMN) {
+                                convertToZval(&row_tmp, block[0], row, "", 0, fetch_mode|SC_FETCH_ONE);
+                                break;
+                            } else {
+                                convertToZval(&row_tmp, block[column], row, col_names[column], 0, fetch_mode);
+                            }
                         }
                     }
                 } catch (...) {
@@ -1806,12 +2031,13 @@ static void do_select_into(zval *out, zval *this_obj,
                 client->Select(query);
             }
         } catch (...) {
+            setElapsedSince(obj, t0);
             /* OnData lambda throws (KEY_PAIR shape mismatch, etc.) bubble
              * out mid-stream and leave the native client with unread
              * blocks on the wire. Subsequent queries on the same handle
              * would then receive the residual data and appear corrupted.
              * Reset to recover; the original throw still propagates. */
-            try { client->ResetConnection(); } catch (...) {}
+            tryResetConnectionReapplyDatabase(this_obj, obj, false);
             throw;
         }
         auto t1 = std::chrono::steady_clock::now();
@@ -1831,7 +2057,7 @@ static void do_select_into(zval *out, zval *this_obj,
     }
     catch (const std::exception& e)
     {
-        recordQueryError(obj, std::string(sql, l_sql), qid, e);
+        recordQueryError(obj, log_sql, qid, e);
         throwClickHouseError(e, qid);
     }
 }
@@ -2147,11 +2373,12 @@ static void tsvAppendEscaped(smart_str *buf, const char *s, size_t len)
 }
 
 /* RFC 4180-style CSV escape. Cell wrapped in double-quotes if it
- * contains ", ',', '\r', or '\n'; embedded '"' is doubled. Numeric and
- * plain-ASCII cells are emitted verbatim. */
+ * contains ", ',', '\r', or '\n'; embedded '"' is doubled. The literal
+ * non-NULL string "\N" is quoted so insertFromStream() does not read it
+ * back as the NULL marker. */
 static void csvAppendEscaped(smart_str *buf, const char *s, size_t len)
 {
-    bool needs_quoting = false;
+    bool needs_quoting = (len == 2 && s[0] == '\\' && s[1] == 'N');
     for (size_t i = 0; i < len; ++i) {
         char c = s[i];
         if (c == '"' || c == ',' || c == '\n' || c == '\r') {
@@ -2176,13 +2403,12 @@ static void csvAppendEscaped(smart_str *buf, const char *s, size_t len)
 }
 
 /* Append one cell (already-formatted text or IS_NULL) to the per-block
- * buffer. NULL renders as `\N` in TSV and as an empty cell in CSV. */
+ * buffer. NULL renders as `\N` in both TSV and CSV; a non-NULL CSV string
+ * equal to "\N" is quoted by csvAppendEscaped(). */
 static void appendCellForStream(smart_str *buf, zval *cell, StreamFormat fmt)
 {
     if (Z_TYPE_P(cell) == IS_NULL) {
-        if (!streamFormatIsCSV(fmt)) {
-            smart_str_appendl(buf, "\\N", 2);
-        }
+        smart_str_appendl(buf, "\\N", 2);
         return;
     }
     /* Fast path for cells that are already IS_STRING — convertToZval
@@ -2238,19 +2464,24 @@ static zend_long do_select_to_stream(zval *this_obj,
 {
     clickhouse_object *obj = Z_CLICKHOUSE_P(this_obj);
     zend_long total_rows = 0;
+    std::string log_sql(sql, l_sql);
     try
     {
         Client *client = getClient(obj);
         QueryActiveGuard guard(obj);
 
+        resetStats(obj);
+        obj->stats.last_query_id = qid;
+
         if (obj->has_insert_block) {
             throw std::runtime_error("The insert operation is now in progress");
         }
 
-        std::string sql_s(sql, l_sql);
+        std::string sql_s = log_sql;
         std::vector<TypedParam> typed_params;
         if (params != NULL && Z_TYPE_P(params) == IS_ARRAY) {
             applyPlaceholders(sql_s, Z_ARRVAL_P(params), typed_params);
+            log_sql = sql_s;
         } else if (params != NULL && Z_TYPE_P(params) != IS_ARRAY) {
             throw std::runtime_error("The second argument to selectToStream must be an array");
         }
@@ -2258,8 +2489,6 @@ static zend_long do_select_to_stream(zval *this_obj,
         Query query = qid.empty() ? Query(sql_s) : Query(sql_s, qid);
         attachTypedParams(query, typed_params);
         applyMergedSettings(query, obj, settings);
-        resetStats(obj);
-        obj->stats.last_query_id = qid;
         attachProgressAndProfile(query, obj);
         attachVerbose(query, obj);
 
@@ -2328,6 +2557,7 @@ static zend_long do_select_to_stream(zval *this_obj,
         try {
             client->Select(query);
         } catch (...) {
+            setElapsedSince(obj, t0);
             /* OnData lambda throws (unsupported column type, short stream
              * write) bubble out mid-stream and leave the native client
              * with unread blocks on the wire. Subsequent queries on the
@@ -2335,7 +2565,7 @@ static zend_long do_select_to_stream(zval *this_obj,
              * appear corrupted. Reset to recover; the original throw
              * still propagates. */
             smart_str_free(&buf);
-            try { client->ResetConnection(); } catch (...) {}
+            tryResetConnectionReapplyDatabase(this_obj, obj, false);
             throw;
         }
         flushStreamBuf(&buf, stream);
@@ -2347,7 +2577,7 @@ static zend_long do_select_to_stream(zval *this_obj,
     }
     catch (const std::exception &e)
     {
-        recordQueryError(obj, std::string(sql, l_sql), qid, e);
+        recordQueryError(obj, log_sql, qid, e);
         throwClickHouseError(e, qid);
         return 0;
     }
@@ -2445,7 +2675,7 @@ PHP_METHOD(ClickHouse, selectStatement)
     object_init_ex(return_value, clickhouse_statement_ce);
     clickhouse_statement_object *stmt = Z_CLICKHOUSE_STATEMENT_P(return_value);
 
-    do_select_into(&stmt->rows, getThis(), ZSTR_VAL(sql), ZSTR_LEN(sql), params, 0, qid, settings, NULL);
+    do_select_into(&stmt->rows, getThis(), ZSTR_VAL(sql), ZSTR_LEN(sql), params, 0, qid, settings, NULL, &stmt->positional_rows);
     if (EG(exception)) {
         zval_ptr_dtor(return_value);
         ZVAL_UNDEF(return_value);
@@ -2549,6 +2779,9 @@ static void do_insert_into(zval *this_obj, zend_string *table,
         Client *client = getClient(obj);
         QueryActiveGuard guard(obj);
 
+        resetStats(obj);
+        obj->stats.last_query_id = qid;
+
         if (obj->has_insert_block)
         {
             throw std::runtime_error("The insert operation is now in progress");
@@ -2582,8 +2815,6 @@ static void do_insert_into(zval *this_obj, zend_string *table,
 
         Query insertQuery = qid.empty() ? Query(sql) : Query(sql, qid);
         applyMergedSettings(insertQuery, obj, settings);
-        resetStats(obj);
-        obj->stats.last_query_id = qid;
         attachProgressAndProfile(insertQuery, obj);
         attachVerbose(insertQuery, obj);
         /* BeginInsert can throw on server-side schema errors (missing
@@ -2595,10 +2826,12 @@ static void do_insert_into(zval *this_obj, zend_string *table,
          * query while inserting" until userland resetConnection()s by
          * hand. Recover the handle here. */
         Block blockQuery;
+        auto t0 = std::chrono::steady_clock::now();
         try {
             blockQuery = client->BeginInsert(insertQuery);
         } catch (...) {
-            try { client->ResetConnection(); } catch (...) {}
+            setElapsedSince(obj, t0);
+            tryResetConnectionReapplyDatabase(this_obj, obj, false);
             throw;
         }
         bool insert_open = true;
@@ -2625,7 +2858,6 @@ static void do_insert_into(zval *this_obj, zend_string *table,
                 zval_ptr_dtor(&inner);
             }
 
-            auto t0 = std::chrono::steady_clock::now();
             /* Mark the wire dirty before SendInsertBlock so a throw
              * during the call (transport error mid-frame, server
              * pushback packet, etc.) routes the catch path through
@@ -2638,10 +2870,9 @@ static void do_insert_into(zval *this_obj, zend_string *table,
             client->SendInsertBlock(blockInsert);
             client->EndInsert();
             insert_open = false;
-            auto t1 = std::chrono::steady_clock::now();
-            obj->stats.elapsed_ms =
-                std::chrono::duration<double, std::milli>(t1 - t0).count();
+            setElapsedSince(obj, t0);
         } catch (...) {
+            setElapsedSince(obj, t0);
             /* BeginInsert opened the wire. Three cases:
              *   - Pre-send failure (zvalToBlock conversion throw): the
              *     wire is healthy and no rows crossed it; EndInsert()
@@ -2663,7 +2894,7 @@ static void do_insert_into(zval *this_obj, zend_string *table,
              * Reset to recover the handle either way. */
             if (insert_open) {
                 if (block_sent) {
-                    try { client->ResetConnection(); } catch (...) {}
+                    tryResetConnectionReapplyDatabase(this_obj, obj, false);
                 } else {
                     try { client->EndInsert(); } catch (...) {}
                 }
@@ -2764,6 +2995,7 @@ struct InsertStreamParser {
     std::vector<zval> row_cells;
     bool first_row_skipped = false;
     bool prev_was_cr = false;
+    size_t pending_empty_rows = 0;
     /* TSV-only: a `\` at the very end of one feed() chunk has to wait
      * for the next chunk to know what it escapes. Same role prev_was_cr
      * plays for CRLF straddling a chunk boundary. */
@@ -2852,6 +3084,14 @@ struct InsertStreamParser {
             }
         };
 
+        auto flush_pending_empty_rows = [&]() {
+            while (pending_empty_rows > 0) {
+                finishCell();
+                finishRow(on_row);
+                --pending_empty_rows;
+            }
+        };
+
         for (size_t i = 0; i < len; ++i) {
             char c = data[i];
 
@@ -2910,6 +3150,7 @@ struct InsertStreamParser {
                 }
                 /* End of row. Tolerate a trailing blank line at EOF. */
                 if (state == State::CellStart && row_cells.empty() && cell_buf.empty()) {
+                    ++pending_empty_rows;
                     state = State::CellStart;
                     continue;
                 }
@@ -2919,6 +3160,10 @@ struct InsertStreamParser {
                 continue;
             }
             prev_was_cr = false;
+
+            if (pending_empty_rows > 0) {
+                flush_pending_empty_rows();
+            }
 
             /* `\N` at cell start is the whole-cell NULL marker; bytes
              * other than the cell separator or row terminator after it
@@ -2988,6 +3233,7 @@ struct InsertStreamParser {
         if (state == State::InQuoted) {
             throw std::runtime_error("insertFromStream: unterminated quoted CSV cell at EOF");
         }
+        pending_empty_rows = 0;
         /* cell_is_quoted catches the "" no-trailing-newline case: the
          * cell was started by an opening quote and immediately closed,
          * leaving cell_buf and row_cells both empty; without this flag
@@ -3084,6 +3330,9 @@ PHP_METHOD(ClickHouse, insertFromStream)
         Client *client = getClient(obj);
         QueryActiveGuard guard(obj);
 
+        resetStats(obj);
+        obj->stats.last_query_id = qid;
+
         if (obj->has_insert_block) {
             throw std::runtime_error("The insert operation is now in progress");
         }
@@ -3106,16 +3355,16 @@ PHP_METHOD(ClickHouse, insertFromStream)
 
         Query insertQuery = qid.empty() ? Query(sql) : Query(sql, qid);
         applyMergedSettings(insertQuery, obj, settings);
-        resetStats(obj);
-        obj->stats.last_query_id = qid;
         attachProgressAndProfile(insertQuery, obj);
         attachVerbose(insertQuery, obj);
 
         Block blockQuery;
+        auto t0 = std::chrono::steady_clock::now();
         try {
             blockQuery = client->BeginInsert(insertQuery);
         } catch (...) {
-            try { client->ResetConnection(); } catch (...) {}
+            setElapsedSince(obj, t0);
+            tryResetConnectionReapplyDatabase(getThis(), obj, false);
             throw;
         }
 
@@ -3222,11 +3471,13 @@ PHP_METHOD(ClickHouse, insertFromStream)
             flush_batch();
             client->EndInsert();
             insert_open = false;
+            setElapsedSince(obj, t0);
         } catch (...) {
+            setElapsedSince(obj, t0);
             cleanup_col_zvals();
             if (insert_open) {
                 if (block_dirty || total_rows > 0) {
-                    try { client->ResetConnection(); } catch (...) {}
+                    tryResetConnectionReapplyDatabase(getThis(), obj, false);
                 } else {
                     try { client->EndInsert(); } catch (...) {}
                 }
@@ -3273,6 +3524,9 @@ PHP_METHOD(ClickHouse, writeStart)
         Client *client = getClient(obj);
         QueryActiveGuard guard(obj);
 
+        resetStats(obj);
+        obj->stats.last_query_id = qid;
+
         if (obj->has_insert_block)
         {
             throw std::runtime_error("The insert operation is now in progress");
@@ -3282,8 +3536,6 @@ PHP_METHOD(ClickHouse, writeStart)
 
         Query insertQuery = qid.empty() ? Query(sql) : Query(sql, qid);
         applyMergedSettings(insertQuery, obj, settings);
-        resetStats(obj);
-        obj->stats.last_query_id = qid;
         attachProgressAndProfile(insertQuery, obj);
         attachVerbose(insertQuery, obj);
         /* Same recovery pattern as direct insert(): BeginInsert can
@@ -3292,17 +3544,21 @@ PHP_METHOD(ClickHouse, writeStart)
          * so the next call on this handle isn't met with "cannot
          * execute query while inserting". */
         Block blockQuery;
+        auto t0 = std::chrono::steady_clock::now();
         try {
             blockQuery = client->BeginInsert(insertQuery);
         } catch (...) {
-            try { client->ResetConnection(); } catch (...) {}
+            setElapsedSince(obj, t0);
+            tryResetConnectionReapplyDatabase(getThis(), obj, false);
             throw;
         }
 
         obj->insert_block = blockQuery;
         obj->has_insert_block = true;
         obj->insert_blocks_sent = false;
-        recordQuerySuccess(obj, sql, qid);
+        obj->insert_sql = sql;
+        obj->insert_query_id = qid;
+        obj->insert_started_at = t0;
     }
     catch (const std::exception& e)
     {
@@ -3399,17 +3655,23 @@ PHP_METHOD(ClickHouse, write)
          * Swallow secondary failures from the recovery call — we are
          * already throwing the original error to PHP. */
         clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
+        std::string sql = obj->insert_sql;
+        std::string qid = obj->insert_query_id;
+        if (obj->has_insert_block) {
+            setElapsedSince(obj, obj->insert_started_at);
+        }
         if (obj->client && obj->has_insert_block) {
             if (obj->insert_blocks_sent) {
-                try { obj->client->ResetConnection(); } catch (...) {}
+                tryResetConnectionReapplyDatabase(getThis(), obj, false);
             } else {
                 try { obj->client->EndInsert(); } catch (...) {}
             }
         }
-        obj->insert_block = Block();
-        obj->has_insert_block = false;
-        obj->insert_blocks_sent = false;
-        throwClickHouseError(e);
+        if (!sql.empty() || !qid.empty()) {
+            recordQueryError(obj, sql, qid, e);
+        }
+        clearStreamingInsertState(obj);
+        throwClickHouseError(e, qid);
     }
     RETURN_TRUE;
 }
@@ -3420,6 +3682,9 @@ PHP_METHOD(ClickHouse, write)
 PHP_METHOD(ClickHouse, writeEnd)
 {
     clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
+    std::string sql;
+    std::string qid;
+    bool end_insert_started = false;
     try
     {
         Client *client = getClient(obj);
@@ -3428,10 +3693,14 @@ PHP_METHOD(ClickHouse, writeEnd)
             throw std::runtime_error("writeEnd() called without a matching writeStart()");
         }
 
+        sql = obj->insert_sql;
+        qid = obj->insert_query_id;
+        auto started_at = obj->insert_started_at;
+        end_insert_started = true;
         client->EndInsert();
-        obj->insert_block = Block();
-        obj->has_insert_block = false;
-        obj->insert_blocks_sent = false;
+        setElapsedSince(obj, started_at);
+        recordQuerySuccess(obj, sql, qid);
+        clearStreamingInsertState(obj);
     }
     catch (const std::exception& e)
     {
@@ -3444,13 +3713,19 @@ PHP_METHOD(ClickHouse, writeEnd)
          * resetConnection() by hand. Drop the socket and reconnect so
          * the handle stays usable. Swallow secondary failures from the
          * reset — we are already throwing the original error. */
-        if (obj->client) {
-            try { obj->client->ResetConnection(); } catch (...) {}
+        if (obj->has_insert_block) {
+            setElapsedSince(obj, obj->insert_started_at);
         }
-        obj->insert_block = Block();
-        obj->has_insert_block = false;
-        obj->insert_blocks_sent = false;
-        throwClickHouseError(e);
+        if (end_insert_started && obj->client) {
+            tryResetConnectionReapplyDatabase(getThis(), obj, true);
+        }
+        if (!sql.empty() || !qid.empty()) {
+            recordQueryError(obj, sql, qid, e);
+        }
+        if (end_insert_started && obj->has_insert_block) {
+            clearStreamingInsertState(obj);
+        }
+        throwClickHouseError(e, qid);
         return;
     }
     RETURN_TRUE;
@@ -3471,22 +3746,27 @@ static void do_execute_into(zval *this_obj,
                             zval *params, const std::string &qid, zval *settings)
 {
     clickhouse_object *obj = Z_CLICKHOUSE_P(this_obj);
+    std::string log_sql(sql, l_sql);
     try
     {
         Client *client = getClient(obj);
         QueryActiveGuard guard(obj);
+
+        resetStats(obj);
+        obj->stats.last_query_id = qid;
 
         if (obj->has_insert_block)
         {
             throw std::runtime_error("The insert operation is now in progress");
         }
 
-        string sql_s = std::string(sql, l_sql);
+        string sql_s = log_sql;
         std::vector<TypedParam> typed_params;
 
         if (params != NULL && Z_TYPE_P(params) == IS_ARRAY)
         {
             applyPlaceholders(sql_s, Z_ARRVAL_P(params), typed_params);
+            log_sql = sql_s;
         } else if (params != NULL && Z_TYPE_P(params) != IS_ARRAY) {
             throw std::runtime_error("The second argument to execute must be an array");
         }
@@ -3494,8 +3774,6 @@ static void do_execute_into(zval *this_obj,
         Query query = qid.empty() ? Query(sql_s) : Query(sql_s, qid);
         attachTypedParams(query, typed_params);
         applyMergedSettings(query, obj, settings);
-        resetStats(obj);
-        obj->stats.last_query_id = qid;
         attachProgressAndProfile(query, obj);
         attachVerbose(query, obj);
 
@@ -3509,7 +3787,13 @@ static void do_execute_into(zval *this_obj,
         }
 
         auto t0 = std::chrono::steady_clock::now();
-        client->Execute(query);
+        try {
+            client->Execute(query);
+        } catch (...) {
+            setElapsedSince(obj, t0);
+            tryResetConnectionReapplyDatabase(this_obj, obj, false);
+            throw;
+        }
         auto t1 = std::chrono::steady_clock::now();
         obj->stats.elapsed_ms =
             std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -3524,7 +3808,7 @@ static void do_execute_into(zval *this_obj,
     }
     catch (const std::exception& e)
     {
-        recordQueryError(obj, std::string(sql, l_sql), qid, e);
+        recordQueryError(obj, log_sql, qid, e);
         throwClickHouseError(e, qid);
     }
 }
@@ -3631,10 +3915,8 @@ PHP_METHOD(ClickHouse, setDatabase)
     ZEND_PARSE_PARAMETERS_START(1, 1)
         Z_PARAM_STR(db)
     ZEND_PARSE_PARAMETERS_END();
-    try {
-        validateIdentifier(ZSTR_VAL(db), ZSTR_LEN(db), "database name", false);
-    } catch (const std::exception &e) {
-        throwClickHouseError(e);
+    if (ZSTR_LEN(db) == 0) {
+        throwClickHouseError(std::runtime_error("database name must not be empty"));
         return;
     }
     clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
@@ -3644,7 +3926,7 @@ PHP_METHOD(ClickHouse, setDatabase)
     }
     try {
         QueryActiveGuard guard(obj);
-        obj->client->Execute(Query("USE " + std::string(ZSTR_VAL(db), ZSTR_LEN(db))));
+        obj->client->Execute(Query("USE " + sqlQuotedIdentifier(std::string(ZSTR_VAL(db), ZSTR_LEN(db)))));
     } catch (const std::exception &e) {
         throwClickHouseError(e);
         return;
@@ -3774,16 +4056,8 @@ PHP_METHOD(ClickHouse, resetConnection)
 {
     try {
         clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
-        Client *client = getClient(obj);
         QueryActiveGuard guard(obj);
-        client->ResetConnection();
-        /* Drop any half-built insert state. After ResetConnection, the
-         * server-side stream this Block was tied to no longer exists, so
-         * keeping has_insert_block=true would wedge subsequent calls. */
-        if (obj->has_insert_block) {
-            obj->insert_block = Block();
-            obj->has_insert_block = false;
-        }
+        resetConnectionReapplyDatabase(getThis(), obj, true);
     } catch (const std::exception& e) {
         throwClickHouseError(e);
         return;
@@ -4134,31 +4408,10 @@ PHP_METHOD(ClickHouse, showTables)
         Z_PARAM_STR_OR_NULL(like)
     ZEND_PARSE_PARAMETERS_END();
     std::string dbname = (db && ZSTR_LEN(db) > 0) ? std::string(ZSTR_VAL(db), ZSTR_LEN(db)) : currentDatabase(getThis());
-    try {
-        validateIdentifier(dbname.c_str(), dbname.size(), "database name", false);
-    } catch (const std::exception &e) {
-        throwClickHouseError(e);
-        return;
-    }
-    std::string sql = "SELECT name FROM system.tables WHERE database = '" + dbname + "'";
+    std::string sql = "SELECT name FROM system.tables WHERE database = " + sqlStringLiteral(dbname);
     if (like && ZSTR_LEN(like) > 0) {
-        /* Validate the LIKE pattern against the same character set as
-         * placeholder values: identifier chars plus % and _ would be the
-         * minimum, but we already reject quotes/backslashes there so
-         * the only addition is %. */
-        for (size_t i = 0; i < ZSTR_LEN(like); ++i) {
-            unsigned char c = (unsigned char)ZSTR_VAL(like)[i];
-            bool ok =
-                (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-                (c >= '0' && c <= '9') ||
-                c == '_' || c == '.' || c == '%';
-            if (!ok) {
-                sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
-                    "showTables: LIKE pattern contains an unsafe character", 0);
-                return;
-            }
-        }
-        sql += " AND name LIKE '" + std::string(ZSTR_VAL(like), ZSTR_LEN(like)) + "'";
+        sql += " AND name LIKE " +
+            sqlStringLiteral(std::string(ZSTR_VAL(like), ZSTR_LEN(like)));
     }
     sql += " ORDER BY name";
     runHelperSelect(return_value, getThis(), sql, SC_FETCH_COLUMN);
@@ -4189,6 +4442,9 @@ PHP_METHOD(ClickHouse, showCreateTable)
  */
 PHP_METHOD(ClickHouse, getServerUptime)
 {
+    if (zend_parse_parameters_none() == FAILURE) {
+        return;
+    }
     runHelperSelect(return_value, getThis(),
         "SELECT uptime() AS uptime",
         SC_FETCH_ONE | SC_FETCH_COLUMN);
@@ -4274,26 +4530,29 @@ PHP_METHOD(ClickHouse, selectStream)
 
     object_init_ex(return_value, clickhouse_iter_ce);
     clickhouse_iter_object *iter = Z_CLICKHOUSE_ITER_P(return_value);
+    std::string log_sql(ZSTR_VAL(sql), ZSTR_LEN(sql));
 
     try {
         Client *client = getClient(obj);
         QueryActiveGuard guard(obj);
 
+        resetStats(obj);
+        obj->stats.last_query_id = qid;
+
         if (obj->has_insert_block) {
             throw std::runtime_error("The insert operation is now in progress");
         }
 
-        std::string sql_s = std::string(ZSTR_VAL(sql), ZSTR_LEN(sql));
+        std::string sql_s = log_sql;
         std::vector<TypedParam> typed_params;
         if (params != NULL && Z_TYPE_P(params) == IS_ARRAY) {
             applyPlaceholders(sql_s, Z_ARRVAL_P(params), typed_params);
+            log_sql = sql_s;
         }
 
         Query query = qid.empty() ? Query(sql_s) : Query(sql_s, qid);
         attachTypedParams(query, typed_params);
         applyMergedSettings(query, obj, settings);
-        resetStats(obj);
-        obj->stats.last_query_id = qid;
         attachProgressAndProfile(query, obj);
         attachVerbose(query, obj);
 
@@ -4318,7 +4577,8 @@ PHP_METHOD(ClickHouse, selectStream)
         try {
             client->Select(query);
         } catch (...) {
-            try { client->ResetConnection(); } catch (...) {}
+            setElapsedSince(obj, t0);
+            tryResetConnectionReapplyDatabase(getThis(), obj, false);
             throw;
         }
         auto t1 = std::chrono::steady_clock::now();
@@ -4327,7 +4587,7 @@ PHP_METHOD(ClickHouse, selectStream)
         recordQuerySuccess(obj, sql_s, qid);
     }
     catch (const std::exception &e) {
-        recordQueryError(obj, std::string(ZSTR_VAL(sql), ZSTR_LEN(sql)), qid, e);
+        recordQueryError(obj, log_sql, qid, e);
         zval_ptr_dtor(return_value);
         ZVAL_NULL(return_value);
         throwClickHouseError(e, qid);
@@ -4367,26 +4627,29 @@ PHP_METHOD(ClickHouse, selectStreamCallback)
 
     std::string qid = makeQid(query_id);
     clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
+    std::string log_sql(ZSTR_VAL(sql), ZSTR_LEN(sql));
 
     try {
         Client *client = getClient(obj);
         QueryActiveGuard guard(obj);
 
+        resetStats(obj);
+        obj->stats.last_query_id = qid;
+
         if (obj->has_insert_block) {
             throw std::runtime_error("The insert operation is now in progress");
         }
 
-        std::string sql_s = std::string(ZSTR_VAL(sql), ZSTR_LEN(sql));
+        std::string sql_s = log_sql;
         std::vector<TypedParam> typed_params;
         if (params != NULL && Z_TYPE_P(params) == IS_ARRAY) {
             applyPlaceholders(sql_s, Z_ARRVAL_P(params), typed_params);
+            log_sql = sql_s;
         }
 
         Query query = qid.empty() ? Query(sql_s) : Query(sql_s, qid);
         attachTypedParams(query, typed_params);
         applyMergedSettings(query, obj, settings);
-        resetStats(obj);
-        obj->stats.last_query_id = qid;
         attachProgressAndProfile(query, obj);
         attachVerbose(query, obj);
 
@@ -4437,7 +4700,8 @@ PHP_METHOD(ClickHouse, selectStreamCallback)
         try {
             client->Select(query);
         } catch (...) {
-            try { client->ResetConnection(); } catch (...) {}
+            setElapsedSince(obj, t0);
+            tryResetConnectionReapplyDatabase(getThis(), obj, false);
             throw;
         }
         auto t1 = std::chrono::steady_clock::now();
@@ -4446,7 +4710,7 @@ PHP_METHOD(ClickHouse, selectStreamCallback)
         recordQuerySuccess(obj, sql_s, qid);
     }
     catch (const std::exception &e) {
-        recordQueryError(obj, std::string(ZSTR_VAL(sql), ZSTR_LEN(sql)), qid, e);
+        recordQueryError(obj, log_sql, qid, e);
         throwClickHouseError(e, qid);
     }
     RETURN_TRUE;
@@ -4656,8 +4920,9 @@ PHP_METHOD(ClickHouse, tableSize)
     std::string sql =
         "SELECT sum(rows) AS rows, sum(bytes_on_disk) AS bytes_on_disk, "
         "uniqExact(partition) AS partitions, max(modification_time) AS modification_time "
-        "FROM system.parts WHERE active AND database = '" + dbname +
-        "' AND table = '" + tname + "'";
+        "FROM system.parts WHERE active AND database = " + sqlStringLiteral(dbname) +
+        " AND table = " + sqlStringLiteral(tname) +
+        " GROUP BY database, table";
     runHelperSelectFirstRow(return_value, getThis(), sql);
 }
 /* }}} */
@@ -4881,7 +5146,7 @@ PHP_METHOD(ClickHouseStatement, offsetExists)
         RETURN_BOOL(zend_hash_index_exists(ht, Z_LVAL_P(offset)));
     }
     if (Z_TYPE_P(offset) == IS_STRING) {
-        RETURN_BOOL(zend_hash_exists(ht, Z_STR_P(offset)));
+        RETURN_BOOL(zend_symtable_exists(ht, Z_STR_P(offset)));
     }
     RETURN_FALSE;
 }
@@ -4901,7 +5166,7 @@ PHP_METHOD(ClickHouseStatement, offsetGet)
     if (Z_TYPE_P(offset) == IS_LONG) {
         v = zend_hash_index_find(ht, Z_LVAL_P(offset));
     } else if (Z_TYPE_P(offset) == IS_STRING) {
-        v = zend_hash_find(ht, Z_STR_P(offset));
+        v = zend_symtable_find(ht, Z_STR_P(offset));
     }
     if (!v) {
         RETURN_NULL();
@@ -4992,8 +5257,11 @@ PHP_METHOD(ClickHouseStatement, fetchKeyPair)
     if (Z_TYPE(stmt->rows) != IS_ARRAY) {
         return;
     }
+    zval *source_rows = (Z_TYPE(stmt->positional_rows) == IS_ARRAY)
+        ? &stmt->positional_rows
+        : &stmt->rows;
     zval *row;
-    ZEND_HASH_FOREACH_VAL(Z_ARRVAL(stmt->rows), row) {
+    ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(source_rows), row) {
         if (Z_TYPE_P(row) != IS_ARRAY || zend_hash_num_elements(Z_ARRVAL_P(row)) < 2) {
             sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
                 "fetchKeyPair requires each row to have at least 2 columns", 0);
@@ -5038,8 +5306,11 @@ PHP_METHOD(ClickHouseStatement, fetchColumn)
     if (Z_TYPE(stmt->rows) != IS_ARRAY) {
         return;
     }
+    zval *source_rows = (Z_TYPE(stmt->positional_rows) == IS_ARRAY)
+        ? &stmt->positional_rows
+        : &stmt->rows;
     zval *row;
-    ZEND_HASH_FOREACH_VAL(Z_ARRVAL(stmt->rows), row) {
+    ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(source_rows), row) {
         if (Z_TYPE_P(row) != IS_ARRAY) {
             /* Already a flat list of scalars (e.g. FETCH_COLUMN result fed in). */
             zval c;
