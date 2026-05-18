@@ -13,7 +13,8 @@ $c->execute("CREATE DATABASE IF NOT EXISTS test");
 
 $c->execute("DROP DATABASE IF EXISTS `test-hyphen`");
 $c->execute("CREATE DATABASE `test-hyphen`");
-$c->execute("CREATE TABLE `test-hyphen`.t (id UInt8) ENGINE=Memory");
+$c->execute("CREATE TABLE `test-hyphen`.`t-hyphen` (id UInt8) ENGINE=MergeTree ORDER BY id");
+$c->execute("INSERT INTO `test-hyphen`.`t-hyphen` SELECT 1");
 $tables = $c->showTables("test-hyphen");
 echo "hyphen tables=", implode(",", $tables), "\n";
 
@@ -22,6 +23,11 @@ $hyphen->resetConnection();
 echo "hyphen current after reset=", $hyphen->select("SELECT currentDatabase()", [], ClickHouse::FETCH_ONE), "\n";
 $c->setDatabase("test-hyphen");
 echo "hyphen current after setDatabase=", $c->select("SELECT currentDatabase()", [], ClickHouse::FETCH_ONE), "\n";
+echo "hyphen databaseSize rows>=1=", ($c->databaseSize()["rows"] >= 1 ? "yes" : "no"), "\n";
+$hyphenTablesSize = $c->tablesSize();
+echo "hyphen tablesSize has_t=", (in_array("t-hyphen", array_column($hyphenTablesSize, "table")) ? "yes" : "no"), "\n";
+echo "hyphen tableSize rows=", $c->tableSize("t-hyphen")["rows"], "\n";
+echo "hyphen partitions rows=", count($c->partitions("t-hyphen")), "\n";
 $c->setDatabase("test");
 
 $c->execute("CREATE DATABASE IF NOT EXISTS test_reset_db");
@@ -53,9 +59,13 @@ try {
 }
 ?>
 --EXPECT--
-hyphen tables=t
+hyphen tables=t-hyphen
 hyphen current after reset=test-hyphen
 hyphen current after setDatabase=test-hyphen
+hyphen databaseSize rows>=1=yes
+hyphen tablesSize has_t=yes
+hyphen tableSize rows=1
+hyphen partitions rows=1
 current after reset=test_reset_db
 failed insert: REJECTED
 current after failed insert=test_reset_db

@@ -1049,6 +1049,13 @@ static void tryResetConnectionReapplyDatabase(zval *this_obj, clickhouse_object 
     } catch (...) {}
 }
 
+static void validateMetadataFilterName(const std::string &s, const char *what)
+{
+    if (s.empty()) {
+        throw std::runtime_error(std::string(what) + " must not be empty");
+    }
+}
+
 /*
  * Central thrower. Replaces every catch-block sc_zend_throw call so the
  * server fields land on the exception in one place. ServerException is
@@ -3859,20 +3866,25 @@ PHP_METHOD(ClickHouse, setSettings)
     zval *vz;
     zend_string *zk;
     zend_ulong nk;
-    ZEND_HASH_FOREACH_KEY_VAL(ht, nk, zk, vz) {
-        (void)nk;
-        if (!zk) {
-            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
-                "setting keys must be strings", 0);
-            return;
-        }
-        if (ZSTR_LEN(zk) == 0) {
-            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
-                "setting key must not be empty", 0);
-            return;
-        }
-        m[std::string(ZSTR_VAL(zk), ZSTR_LEN(zk))] = formatScalarParam(vz);
-    } ZEND_HASH_FOREACH_END();
+    try {
+        ZEND_HASH_FOREACH_KEY_VAL(ht, nk, zk, vz) {
+            (void)nk;
+            if (!zk) {
+                sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                    "setting keys must be strings", 0);
+                return;
+            }
+            if (ZSTR_LEN(zk) == 0) {
+                sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                    "setting key must not be empty", 0);
+                return;
+            }
+            m[std::string(ZSTR_VAL(zk), ZSTR_LEN(zk))] = formatScalarParam(vz);
+        } ZEND_HASH_FOREACH_END();
+    } catch (const std::exception &e) {
+        throwClickHouseError(e);
+        return;
+    }
     obj->settings = std::move(m);
     RETURN_ZVAL(getThis(), 1, 0);
 }
@@ -3897,7 +3909,12 @@ PHP_METHOD(ClickHouse, setSetting)
         return;
     }
     clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
-    obj->settings[std::string(ZSTR_VAL(key), ZSTR_LEN(key))] = formatScalarParam(value);
+    try {
+        obj->settings[std::string(ZSTR_VAL(key), ZSTR_LEN(key))] = formatScalarParam(value);
+    } catch (const std::exception &e) {
+        throwClickHouseError(e);
+        return;
+    }
     RETURN_ZVAL(getThis(), 1, 0);
 }
 /* }}} */
@@ -4326,14 +4343,14 @@ PHP_METHOD(ClickHouse, databaseSize)
     ZEND_PARSE_PARAMETERS_END();
     std::string dbname = (db && ZSTR_LEN(db) > 0) ? std::string(ZSTR_VAL(db), ZSTR_LEN(db)) : currentDatabase(getThis());
     try {
-        validateIdentifier(dbname.c_str(), dbname.size(), "database name", false);
+        validateMetadataFilterName(dbname, "database name");
     } catch (const std::exception &e) {
         throwClickHouseError(e);
         return;
     }
     std::string sql =
         "SELECT sum(bytes_on_disk) AS bytes_on_disk, sum(rows) AS rows "
-        "FROM system.parts WHERE active AND database = '" + dbname + "'";
+        "FROM system.parts WHERE active AND database = " + sqlStringLiteral(dbname);
     runHelperSelectFirstRow(return_value, getThis(), sql);
 }
 /* }}} */
@@ -4349,7 +4366,7 @@ PHP_METHOD(ClickHouse, tablesSize)
     ZEND_PARSE_PARAMETERS_END();
     std::string dbname = (db && ZSTR_LEN(db) > 0) ? std::string(ZSTR_VAL(db), ZSTR_LEN(db)) : currentDatabase(getThis());
     try {
-        validateIdentifier(dbname.c_str(), dbname.size(), "database name", false);
+        validateMetadataFilterName(dbname, "database name");
     } catch (const std::exception &e) {
         throwClickHouseError(e);
         return;
@@ -4357,7 +4374,7 @@ PHP_METHOD(ClickHouse, tablesSize)
     std::string sql =
         "SELECT table, sum(bytes_on_disk) AS bytes_on_disk, sum(rows) AS rows, "
         "max(modification_time) AS modification_time "
-        "FROM system.parts WHERE active AND database = '" + dbname + "' "
+        "FROM system.parts WHERE active AND database = " + sqlStringLiteral(dbname) + " "
         "GROUP BY table ORDER BY table";
     runHelperSelect(return_value, getThis(), sql, 0);
 }
@@ -4380,8 +4397,8 @@ PHP_METHOD(ClickHouse, partitions)
         tname = tname.substr(dot + 1);
     }
     try {
-        validateIdentifier(dbname.c_str(), dbname.size(), "database name", false);
-        validateIdentifier(tname.c_str(), tname.size(), "table name", false);
+        validateMetadataFilterName(dbname, "database name");
+        validateMetadataFilterName(tname, "table name");
     } catch (const std::exception &e) {
         throwClickHouseError(e);
         return;
@@ -4390,8 +4407,8 @@ PHP_METHOD(ClickHouse, partitions)
         "SELECT partition, count() AS parts, sum(rows) AS rows, "
         "sum(bytes_on_disk) AS bytes_on_disk, "
         "min(min_time) AS min_time, max(max_time) AS max_time "
-        "FROM system.parts WHERE active AND database = '" + dbname + "' "
-        "AND table = '" + tname + "' "
+        "FROM system.parts WHERE active AND database = " + sqlStringLiteral(dbname) + " "
+        "AND table = " + sqlStringLiteral(tname) + " "
         "GROUP BY partition ORDER BY partition";
     runHelperSelect(return_value, getThis(), sql, 0);
 }
@@ -4911,8 +4928,8 @@ PHP_METHOD(ClickHouse, tableSize)
         tname = tname.substr(dot + 1);
     }
     try {
-        validateIdentifier(dbname.c_str(), dbname.size(), "database name", false);
-        validateIdentifier(tname.c_str(), tname.size(), "table name", false);
+        validateMetadataFilterName(dbname, "database name");
+        validateMetadataFilterName(tname, "table name");
     } catch (const std::exception &e) {
         throwClickHouseError(e);
         return;

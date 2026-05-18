@@ -15,15 +15,23 @@ require __DIR__ . "/_clickhouse.inc";
 
 $c = new ClickHouse(clickhouse_test_config());
 
+class ThrowingSettingString {
+    public function __toString(): string {
+        throw new RuntimeException("setting conversion failed");
+    }
+}
+
 $probes = [
     "singular: empty key" => fn() => $c->setSetting("", "1"),
     "bulk: empty key"     => fn() => $c->setSettings(["" => "1"]),
     "bulk: numeric key"   => fn() => $c->setSettings([0 => "1", 1 => "2"]),
     "bulk: mixed numeric" => fn() => $c->setSettings(["max_threads" => "1", 5 => "x"]),
+    "singular: throwing value" => fn() => $c->setSetting("max_threads", new ThrowingSettingString()),
+    "bulk: throwing value" => fn() => $c->setSettings(["max_threads" => new ThrowingSettingString()]),
 ];
 foreach ($probes as $label => $fn) {
     try { $fn(); echo "$label: NO THROW\n"; }
-    catch (ClickHouseException $e) { echo "$label: REJECTED — ", $e->getMessage(), "\n"; }
+    catch (Throwable $e) { echo "$label: REJECTED — ", $e->getMessage(), "\n"; }
 }
 
 // Sanity: well-formed key sets still work via both entry points.
@@ -36,4 +44,6 @@ singular: empty key: REJECTED — setting key must not be empty
 bulk: empty key: REJECTED — setting key must not be empty
 bulk: numeric key: REJECTED — setting keys must be strings
 bulk: mixed numeric: REJECTED — setting keys must be strings
+singular: throwing value: REJECTED — setting conversion failed
+bulk: throwing value: REJECTED — setting conversion failed
 ok
