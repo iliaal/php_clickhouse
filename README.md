@@ -36,6 +36,8 @@ With TLS support:
 pie install iliaal/php_clickhouse --enable-clickhouse-openssl
 ```
 
+> Bare `php:X.Y-cli` Docker images lack `/usr/bin/unzip`, which composer needs to extract PIE's prebuilt `.so` zip. Run `apt-get install -y unzip` before `pie install`, otherwise composer falls back to PHP's ZipArchive and PIE fails with `ExtensionBinaryNotFound`. Host installs that already have `unzip` are fine.
+
 Building from source:
 
 ```sh
