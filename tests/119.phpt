@@ -51,12 +51,17 @@ echo "missing tableSize count=", count($missing), "\n";
 
 $c->execute("DROP DATABASE `test-hyphen`");
 
+// PHP 8 throws ArgumentCountError on extra args; PHP 7.4 only emits a
+// Warning and returns NULL, so promote that Warning to a throw for the
+// duration of the call to keep the catch arm uniform across the matrix.
+set_error_handler(function ($_n, $msg) { throw new RuntimeException($msg); });
 try {
     $c->getServerUptime("extra");
     echo "uptime extra: NO THROW\n";
 } catch (Throwable $e) {
     echo "uptime extra: REJECTED\n";
 }
+restore_error_handler();
 ?>
 --EXPECT--
 hyphen tables=t-hyphen
