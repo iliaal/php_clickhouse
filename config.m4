@@ -88,18 +88,18 @@ if test "$PHP_CLICKHOUSE" != "no"; then
         lib/clickhouse-cpp/contrib/zstd/zstd/decompress/zstd_decompress.c \
         lib/clickhouse-cpp/contrib/zstd/zstd/decompress/zstd_decompress_block.c"
 
-  THIS_DIR=`dirname $0`
-  PHP_ADD_INCLUDE($THIS_DIR/lib/clickhouse-cpp)
-  PHP_ADD_INCLUDE($THIS_DIR/lib/clickhouse-cpp/contrib)
-  PHP_ADD_INCLUDE($THIS_DIR/lib/clickhouse-cpp/contrib/absl)
-  PHP_ADD_INCLUDE($THIS_DIR/lib/clickhouse-cpp/contrib/cityhash)
-  PHP_ADD_INCLUDE($THIS_DIR/lib/clickhouse-cpp/contrib/cityhash/cityhash)
-  PHP_ADD_INCLUDE($THIS_DIR/lib/clickhouse-cpp/contrib/lz4)
-  PHP_ADD_INCLUDE($THIS_DIR/lib/clickhouse-cpp/contrib/lz4/lz4)
-  PHP_ADD_INCLUDE($THIS_DIR/lib/clickhouse-cpp/contrib/zstd/zstd)
-  PHP_ADD_INCLUDE($THIS_DIR/lib/clickhouse-cpp/contrib/zstd/zstd/common)
-
   PHP_NEW_EXTENSION(clickhouse, $clickhouse_source_file, $ext_shared,,-DZEND_ENABLE_STATIC_TSRMLS_CACHE=1)
+
+  PHP_ADD_INCLUDE($ext_srcdir/lib/clickhouse-cpp)
+  PHP_ADD_INCLUDE($ext_srcdir/lib/clickhouse-cpp/contrib)
+  PHP_ADD_INCLUDE($ext_srcdir/lib/clickhouse-cpp/contrib/absl)
+  PHP_ADD_INCLUDE($ext_srcdir/lib/clickhouse-cpp/contrib/cityhash)
+  PHP_ADD_INCLUDE($ext_srcdir/lib/clickhouse-cpp/contrib/cityhash/cityhash)
+  PHP_ADD_INCLUDE($ext_srcdir/lib/clickhouse-cpp/contrib/lz4)
+  PHP_ADD_INCLUDE($ext_srcdir/lib/clickhouse-cpp/contrib/lz4/lz4)
+  PHP_ADD_INCLUDE($ext_srcdir/lib/clickhouse-cpp/contrib/zstd/zstd)
+  PHP_ADD_INCLUDE($ext_srcdir/lib/clickhouse-cpp/contrib/zstd/zstd/common)
+
   PHP_ADD_EXTENSION_DEP(clickhouse, json)
   PHP_ADD_BUILD_DIR($ext_builddir/lib/clickhouse-cpp)
   PHP_ADD_BUILD_DIR($ext_builddir/lib/clickhouse-cpp/clickhouse)
