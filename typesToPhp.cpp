@@ -2131,9 +2131,14 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         int64_t scale = 1;
         for (size_t i = 0; i < precision; ++i) scale *= 10;
         int64_t raw = col->At(row);
-        std::time_t whole = (std::time_t)(raw / scale);
+        /* Floor division: C++ integer division truncates toward zero, so a
+         * pre-epoch raw like -5 (1969-... .5s) would split to whole=0,frac=5
+         * and render as 1970-...,.5 — an hour/second ahead of the truth.
+         * Carry the borrow so the fraction stays in [0, scale). */
+        int64_t whole_i = raw / scale;
         int64_t frac = raw % scale;
-        if (frac < 0) { frac = -frac; }
+        if (frac < 0) { frac += scale; --whole_i; }
+        std::time_t whole = (std::time_t)whole_i;
 
         if (fetch_mode & SC_FETCH_DATE_AS_STRINGS) {
             char buffer[64];
@@ -2223,13 +2228,17 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         for (size_t i = 0; i < precision; ++i) scale *= 10;
         int64_t raw = col->At(row);
         if (fetch_mode & SC_FETCH_DATE_AS_STRINGS) {
-            int64_t whole = raw / scale;
-            int64_t frac = raw % scale;
-            if (frac < 0) frac = -frac;
-            int64_t abs_whole = whole < 0 ? -whole : whole;
+            /* Time64 is a signed sign-magnitude duration. Take the sign from
+             * raw, not from `whole`: a sub-second negative like -0.5s has
+             * whole==0, so `whole < 0` would drop the leading '-' and render
+             * "00:00:00.5" instead of "-00:00:00.5". */
+            bool neg = raw < 0;
+            int64_t araw = neg ? -raw : raw;
+            int64_t abs_whole = araw / scale;
+            int64_t frac = araw % scale;
             char buffer[64];
             int l = snprintf(buffer, sizeof(buffer), "%s%02lld:%02lld:%02lld",
-                             whole < 0 ? "-" : "",
+                             neg ? "-" : "",
                              (long long)(abs_whole / 3600),
                              (long long)((abs_whole / 60) % 60),
                              (long long)(abs_whole % 60));

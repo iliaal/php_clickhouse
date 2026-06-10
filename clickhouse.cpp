@@ -882,7 +882,11 @@ PHP_METHOD(ClickHouse, __construct)
                 "endpoints was provided but contained no usable entries", 0);
             return;
         }
-        if (!host_configured && !port_configured) {
+        /* clickhouse-cpp prepends {host,port} as the first endpoint whenever
+         * host is non-empty (modifyClientOptions). Unless the caller set host
+         * explicitly, clear it so a default/port-only config doesn't inject a
+         * phantom localhost endpoint ahead of the real endpoints list. */
+        if (!host_configured) {
             Options = Options.SetHost(std::string());
         }
         Options = Options.SetEndpoints(eps);
@@ -1043,16 +1047,23 @@ static std::string sanitizeError(const char *what)
         "in query: ",
         "while processing",
     };
+    /* Cut at the EARLIEST marker, not the first one in array order: a later
+     * array entry can match nearer the start of the message, and stopping at
+     * the array-order-first match would leave the SQL between the two markers
+     * in the message. */
+    std::string::size_type cut = std::string::npos;
     for (const char *marker : sql_markers) {
         std::string::size_type pos = lower.find(marker);
-        if (pos != std::string::npos) {
-            msg.erase(pos);
-            // Drop trailing whitespace/punct left from the cut.
-            while (!msg.empty() && (msg.back() == ' ' || msg.back() == ',' ||
-                                     msg.back() == ':' || msg.back() == '.')) {
-                msg.pop_back();
-            }
-            break;
+        if (pos != std::string::npos && (cut == std::string::npos || pos < cut)) {
+            cut = pos;
+        }
+    }
+    if (cut != std::string::npos) {
+        msg.erase(cut);
+        // Drop trailing whitespace/punct left from the cut.
+        while (!msg.empty() && (msg.back() == ' ' || msg.back() == ',' ||
+                                 msg.back() == ':' || msg.back() == '.')) {
+            msg.pop_back();
         }
     }
     if (msg.size() > CLICKHOUSE_ERROR_MAX_LEN) {
@@ -1297,6 +1308,7 @@ static std::string formatParamValue(zval *v, const std::string &type, bool insid
         bool first = true;
         zval *iv;
         ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(v), iv) {
+            ZVAL_DEREF(iv);
             if (!first) out += ",";
             first = false;
             if (Z_TYPE_P(iv) == IS_NULL) {
@@ -1849,6 +1861,12 @@ static void applyPlaceholders(string &sql, HashTable *params_ht, std::vector<Typ
         if (!zk) {
             throw std::runtime_error("Placeholder array keys must be strings");
         }
+        if (ZSTR_LEN(zk) == 0) {
+            throw std::runtime_error("Placeholder array keys must be non-empty");
+        }
+        /* A by-ref param can carry IS_REFERENCE; deref so the IS_NULL and
+         * IS_ARRAY shape checks below see the underlying value. */
+        ZVAL_DEREF(pzval);
         std::string name(ZSTR_VAL(zk), ZSTR_LEN(zk));
 
         /* Detect the {name:Type} server-side form. We scan the SQL for
@@ -2888,6 +2906,13 @@ static void buildSingleColumnZval(HashTable *values_ht, size_t column_index,
         zval *pzval, *fzval;
         ZEND_HASH_FOREACH_VAL(values_ht, pzval) {
             ZVAL_DEREF(pzval);
+            /* A by-ref row can be reassigned to a non-array mid-iteration
+             * (e.g. a cell's __toString rewrites $rows[0] through the same
+             * reference). Without this recheck Z_ARRVAL_P would read garbage. */
+            if (Z_TYPE_P(pzval) != IS_ARRAY) {
+                throw std::runtime_error(
+                    "The insert function needs to pass in a two-dimensional array");
+            }
             fzval = sc_zend_hash_index_find(Z_ARRVAL_P(pzval), column_index);
             if (!fzval && column_names) {
                 zend_string *col = (*column_names)[column_index];
@@ -3063,7 +3088,16 @@ static void do_insert_into(zval *this_obj, zend_string *table,
                 if (block_sent) {
                     tryResetConnectionReapplyDatabase(this_obj, obj, false);
                 } else {
-                    try { client->EndInsert(); } catch (...) {}
+                    /* EndInsert closes the empty insert and clears the
+                     * vendored inserting_ flag on the healthy-wire path. If it
+                     * itself throws, the flag stays set and every later query
+                     * fails with "cannot execute query while inserting" — reset
+                     * to recover the handle. */
+                    try {
+                        client->EndInsert();
+                    } catch (...) {
+                        tryResetConnectionReapplyDatabase(this_obj, obj, false);
+                    }
                 }
             }
             throw;
@@ -3287,7 +3321,7 @@ struct InsertStreamParser {
              * cell_sep / row-terminator branches: otherwise a leading
              * separator on the next row appends an empty cell into row_cells
              * before the blank row is replayed, merging the two. */
-            if (pending_empty_rows > 0) {
+            if (pending_empty_rows > 0 && !(prev_was_cr && c == '\n')) {
                 flush_pending_empty_rows();
             }
 
@@ -3670,7 +3704,14 @@ PHP_METHOD(ClickHouse, insertFromStream)
                 if (block_dirty || total_rows > 0) {
                     tryResetConnectionReapplyDatabase(getThis(), obj, false);
                 } else {
-                    try { client->EndInsert(); } catch (...) {}
+                    /* Empty-insert close on the healthy-wire path; if EndInsert
+                     * throws, the vendored inserting_ flag stays set and later
+                     * queries fail. Reset to recover the handle. */
+                    try {
+                        client->EndInsert();
+                    } catch (...) {
+                        tryResetConnectionReapplyDatabase(getThis(), obj, false);
+                    }
                 }
             }
             throw;
@@ -3787,7 +3828,11 @@ PHP_METHOD(ClickHouse, write)
 
         HashTable *values_ht = Z_ARRVAL_P(values);
         if (zend_hash_num_elements(values_ht) == 0) {
-            throw std::runtime_error("Empty rows array passed to write()");
+            /* Appending zero rows is a no-op, not an error. Throwing here
+             * sent the catch path through ResetConnection whenever a prior
+             * write() had already sent blocks (insert_blocks_sent), tearing
+             * down the in-flight insert over a benign empty batch. */
+            RETURN_TRUE;
         }
 
         /* The native block was prepared by BeginInsert() with one column
@@ -4908,8 +4953,26 @@ PHP_METHOD(ClickHouse, selectStreamCallback)
         attachProgressAndProfile(query, obj);
         attachVerbose(query, obj);
 
-        query.OnData([cb](const Block &block) {
+        if (verbose_active(obj)) {
+            zval ctx;
+            array_init(&ctx);
+            add_assoc_stringl(&ctx, "sql", (char*)sql_s.data(), sql_s.size());
+            add_assoc_stringl(&ctx, "query_id", (char*)qid.data(), qid.size());
+            add_assoc_long(&ctx, "settings_count", (zend_long)obj->settings.size());
+            emitVerbose(obj, "select_start", &ctx);
+        }
+
+        size_t verbose_block_idx = 0;
+        query.OnData([cb, obj, &verbose_block_idx](const Block &block) {
             if (block.GetRowCount() == 0 || block.GetColumnCount() == 0) return;
+            if (verbose_active(obj)) {
+                zval ctx;
+                array_init(&ctx);
+                add_assoc_long(&ctx, "rows", (zend_long)block.GetRowCount());
+                add_assoc_long(&ctx, "columns", (zend_long)block.GetColumnCount());
+                add_assoc_long(&ctx, "block_index", (zend_long)verbose_block_idx++);
+                emitVerbose(obj, "data_block", &ctx);
+            }
             /* Hoist column names out of the row loop. clickhouse-cpp returns
              * a fresh std::string per GetColumnName call but the names are
              * stable across all rows of a block. */
@@ -4963,6 +5026,16 @@ PHP_METHOD(ClickHouse, selectStreamCallback)
         obj->stats.elapsed_ms =
             std::chrono::duration<double, std::milli>(t1 - t0).count();
         recordQuerySuccess(obj, sql_s, qid);
+
+        if (verbose_active(obj)) {
+            zval ctx;
+            array_init(&ctx);
+            add_assoc_double(&ctx, "elapsed_ms", obj->stats.elapsed_ms);
+            add_assoc_long(&ctx, "rows_read", (zend_long)obj->stats.rows_read);
+            add_assoc_long(&ctx, "bytes_read", (zend_long)obj->stats.bytes_read);
+            add_assoc_long(&ctx, "blocks", (zend_long)verbose_block_idx);
+            emitVerbose(obj, "select_finish", &ctx);
+        }
     }
     catch (const std::exception &e) {
         recordQueryError(obj, log_sql, qid, e);
