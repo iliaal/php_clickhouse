@@ -136,12 +136,9 @@ struct ColumnString::Block
     std::string_view AppendUnsafe(std::string_view str) {
         const auto pos = &data_[size];
 
-        // memcpy declares the source pointer with __attribute__((nonnull)),
-        // so calling it with str.data() == NULL is undefined behavior under
-        // UBSan even when str.size() is 0 (empty string_view from an
-        // empty std::string is allowed to expose a null data pointer).
-        // Guard with a zero-size short-circuit so the column code can keep
-        // appending empty strings without tripping the sanitizer.
+        // memcpy's source pointer is declared nonnull regardless of the
+        // size argument, so an empty string_view backed by std::string()
+        // (where data() may be null) trips UBSan on every empty append.
         if (str.size() > 0) {
             memcpy(pos, str.data(), str.size());
             size += str.size();

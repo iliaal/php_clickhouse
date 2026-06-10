@@ -36,6 +36,7 @@ if test "$PHP_CLICKHOUSE" != "no"; then
         lib/clickhouse-cpp/clickhouse/base/socket.cpp \
         lib/clickhouse-cpp/clickhouse/base/wire_format.cpp \
         lib/clickhouse-cpp/clickhouse/columns/array.cpp \
+        lib/clickhouse-cpp/clickhouse/columns/bool.cpp \
         lib/clickhouse-cpp/clickhouse/columns/column.cpp \
         lib/clickhouse-cpp/clickhouse/columns/date.cpp \
         lib/clickhouse-cpp/clickhouse/columns/decimal.cpp \
@@ -45,6 +46,7 @@ if test "$PHP_CLICKHOUSE" != "no"; then
         lib/clickhouse-cpp/clickhouse/columns/ip4.cpp \
         lib/clickhouse-cpp/clickhouse/columns/ip6.cpp \
         lib/clickhouse-cpp/clickhouse/columns/itemview.cpp \
+        lib/clickhouse-cpp/clickhouse/columns/json.cpp \
         lib/clickhouse-cpp/clickhouse/columns/lowcardinality.cpp \
         lib/clickhouse-cpp/clickhouse/columns/map.cpp \
         lib/clickhouse-cpp/clickhouse/columns/nullable.cpp \

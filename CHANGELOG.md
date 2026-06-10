@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Vendored `clickhouse-cpp` bumped from v2.6.1 to v2.6.2.
+- The `memcpy(NULL, 0)` UBSan guard in `ColumnString::AppendUnsafe` (empty `string_view`) is no longer carried as a local patch — it is now present upstream.
+- The remaining five local patches were re-applied (one required adaptation for the `inserting_` → `state_` refactor). See `lib/clickhouse-cpp/LOCAL_PATCHES.md` for the current list and notes on which changes are good candidates to propose upstream.
+
 ### Fixed
 
 - `clone` of `ClickHouse` / `ClickHouseRowIterator` corrupted the heap; cloning

@@ -24,6 +24,7 @@ extern "C" {
 #include "php_ini.h"
 #include "ext/standard/info.h"
 #include "php7_wrapper.h"
+#include "main/snprintf.h"  // php_gcvt: locale-independent double formatter for Map float keys (CR-507)
 };
 
 #include "php_clickhouse.h"
@@ -2650,7 +2651,8 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             } else {
                 char kbuf[64];
                 int klen = fmtFloatKey(dk, kbuf, sizeof(kbuf));
-                sc_add_assoc_stringl_ex(map_zv, kbuf, klen, vptr, vlen, 1);
+                std::string key(kbuf, klen);
+                sc_add_assoc_stringl_ex(map_zv, key.c_str(), key.length(), vptr, vlen, 1);
             }
         };
         auto addLong = [&](int kkind, const std::string &sb, zend_long lk, double dk, zend_long lv) {
@@ -2661,7 +2663,8 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             } else {
                 char kbuf[64];
                 int klen = fmtFloatKey(dk, kbuf, sizeof(kbuf));
-                add_assoc_long_ex(map_zv, kbuf, klen, lv);
+                std::string key(kbuf, klen);
+                add_assoc_long_ex(map_zv, key.c_str(), key.length(), lv);
             }
         };
         auto addDbl = [&](int kkind, const std::string &sb, zend_long lk, double dk, double dv) {
@@ -2672,7 +2675,8 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             } else {
                 char kbuf[64];
                 int klen = fmtFloatKey(dk, kbuf, sizeof(kbuf));
-                add_assoc_double_ex(map_zv, kbuf, klen, dv);
+                std::string key(kbuf, klen);
+                add_assoc_double_ex(map_zv, key.c_str(), key.length(), dv);
             }
         };
 
@@ -2737,10 +2741,18 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
 
         if (is_array) {
             add_next_index_zval(arr, map_zv);
+            /* The add performed a ZVAL_COPY (inc ref). Release the temporary's
+             * hold so the array is not stranded with an extra ref (which would
+             * leak under LSAN at shutdown). */
+            if (Z_REFCOUNTED_P(map_zv)) Z_DELREF_P(map_zv);
+            ZVAL_UNDEF(map_zv);
         } else if (fetch_mode & SC_FETCH_ONE) {
             ZVAL_COPY_VALUE(arr, map_zv);
+            ZVAL_UNDEF(map_zv);
         } else {
             sc_add_assoc_zval_ex(arr, column_name.c_str(), column_name.length(), map_zv);
+            if (Z_REFCOUNTED_P(map_zv)) Z_DELREF_P(map_zv);
+            ZVAL_UNDEF(map_zv);
         }
         break;
     }

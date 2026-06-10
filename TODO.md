@@ -20,7 +20,7 @@ Scope: large. Likely a separate `ClickHouseCluster` class on top of N `ClickHous
 
 ### Totals / Extremes capture
 
-`SELECT ... WITH TOTALS` and `SETTINGS extremes=1` currently throw `unimplemented 7` / `unimplemented 8` from the vendored library. clickhouse-cpp v2.6.1 doesn't dispatch the Totals / Extremes packet types ([upstream issue #297](https://github.com/ClickHouse/clickhouse-cpp/issues/297)).
+`SELECT ... WITH TOTALS` and `SETTINGS extremes=1` currently throw `unimplemented 7` / `unimplemented 8` from the vendored library. clickhouse-cpp (through at least v2.6.2) doesn't dispatch the Totals / Extremes packet types ([upstream issue #297](https://github.com/ClickHouse/clickhouse-cpp/issues/297)).
 
 Scope: vendor blocker. Two paths:
 

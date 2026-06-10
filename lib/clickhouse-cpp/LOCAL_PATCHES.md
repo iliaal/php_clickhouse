@@ -1,7 +1,13 @@
-# Local patches against vendored clickhouse-cpp v2.6.1
+# Local patches against vendored clickhouse-cpp v2.6.2
 
 Anything listed here must be re-applied (or upstreamed and dropped)
 when the vendored library is bumped.
+
+## Obsoleted in 2.6.2 (no longer needed)
+
+- `clickhouse/columns/string.cpp`: `memcpy(NULL, 0)` UB guard in `AppendUnsafe`.
+  Upstream now includes the `if (str.size() > 0)` short-circuit (with essentially
+  the same comment). Dropped from this list.
 
 ## clickhouse/client.cpp: `Client::Impl::BeginInsert` drops `query_id`
 
@@ -20,27 +26,6 @@ Patch: change `SendQuery(query.GetText())` to `SendQuery(query)` in
 
 This is exercised by `tests/028.phpt` (writeStart query_id propagation).
 
-## clickhouse/columns/string.cpp: `memcpy(NULL, 0)` UB on empty string_view
-
-`StringBlock::AppendUnsafe` calls `memcpy(pos, str.data(), str.size())`
-unconditionally. When `str` was constructed from an empty
-`std::string`, `str.data()` is allowed to be `NULL`, and libc's memcpy
-declares argument 2 with `__attribute__((nonnull))` regardless of the
-size. UBSan flags every empty append as undefined behavior:
-
-```
-runtime error: null pointer passed as argument 2,
-  which is declared to never be null
-```
-
-Every libc no-ops `memcpy(_, NULL, 0)` in practice, so the bug is
-benign on real workloads, but the false-positive UBSan trip noised the
-extension's ASan job and obscured real findings.
-
-Patch: guard the `memcpy` with `if (str.size() > 0)`. This is
-exercised by `tests/018.phpt` (LowCardinality(String) with empty
-values).
-
 ## contrib/cityhash/cityhash/city.cc: unconditional `#include "config.h"`
 
 The vendored cityhash drop ships an unguarded `#include "config.h"`
@@ -53,7 +38,7 @@ clickhouse-cpp does not generate one for vendored use, and PHP's
 build system does not put a compatible `config.h` on the include
 path on Windows (autotools does on Linux only by accident, where
 the include resolves but the file's contents end up irrelevant).
-The Windows CI build failed with:
+The Windows CI build fails with:
 
 ```
 contrib/cityhash/cityhash/city.cc(30): fatal error C1083:
@@ -98,19 +83,23 @@ Used by `php_clickhouse::selectWithExternalData()` to honor
 `system.query_log`. Exercised by `tests/095.phpt`, `tests/096.phpt`,
 `tests/097.phpt`.
 
-## clickhouse/client.cpp: `Client::Impl::ResetConnection` clears `inserting_` too late
+## clickhouse/client.cpp: `Client::Impl::ResetConnection` clears insert state too late
 
-`ResetConnection()` set `inserting_ = false` only *after*
-`socket_factory_->connect(...)` returned. When the reconnect throws
-(server at `max_connections`, ephemeral-port exhaustion, DNS blip —
-all cases where the original dirty socket may still be healthy),
-`inserting_` stayed true. The very next `delete client` runs
-`Client::Impl::~Impl()`, which calls `EndInsert()` — sending the
-terminating empty block down the still-dirty wire and silently
-committing a partially-streamed insert that the caller never finished
-with `writeEnd()`.
+`ResetConnection()` performs the socket connect *before* clearing the
+inserting / Inserting state. When the reconnect throws (server at
+`max_connections`, ephemeral-port exhaustion, DNS blip — all cases
+where the original dirty socket may still be healthy), the state
+remains Inserting. The very next `delete client` (or ~Impl) runs
+`EndInsert()` — sending the terminating empty block down the still-dirty
+wire and silently committing a partially-streamed insert that the
+caller never finished with `writeEnd()`.
 
-Patch: move `inserting_ = false;` to the first line of
-`ResetConnection()`, before the `connect()` call, so a failed
-reconnect still neutralizes the destructor's implicit `EndInsert()`.
+(Note: 2.6.x refactored the old `bool inserting_` to a `State` machine
+with `State::Inserting`; the logical issue is identical.)
+
+Patch: set `state_ = State::Idle;` (or equivalent) at the very first
+line of `ResetConnection()`, before the `connect()` / `InitializeStreams()`
+call, so a failed reconnect still neutralizes the destructor's implicit
+`EndInsert()`.
+
 Exercised by `tests/123.phpt` (dirty-insert reconnect-failure recovery).

@@ -47,7 +47,7 @@ if (PHP_CLICKHOUSE != "no") {
 
     ADD_SOURCES(ch_root + "\\clickhouse",            "block.cpp client.cpp query.cpp",                                                                                                                                                                                                                              "clickhouse");
     ADD_SOURCES(ch_root + "\\clickhouse\\base",      "compressed.cpp endpoints_iterator.cpp input.cpp output.cpp platform.cpp socket.cpp wire_format.cpp " + clickhouse_ssl_src,                                                                                                                                    "clickhouse");
-    ADD_SOURCES(ch_root + "\\clickhouse\\columns",   "array.cpp column.cpp date.cpp decimal.cpp enum.cpp factory.cpp geo.cpp ip4.cpp ip6.cpp itemview.cpp lowcardinality.cpp map.cpp nullable.cpp numeric.cpp string.cpp time.cpp tuple.cpp uuid.cpp",                                                              "clickhouse");
+    ADD_SOURCES(ch_root + "\\clickhouse\\columns",   "array.cpp bool.cpp column.cpp date.cpp decimal.cpp enum.cpp factory.cpp geo.cpp ip4.cpp ip6.cpp itemview.cpp json.cpp lowcardinality.cpp map.cpp nullable.cpp numeric.cpp string.cpp time.cpp tuple.cpp uuid.cpp",                                                              "clickhouse");
     ADD_SOURCES(ch_root + "\\clickhouse\\types",     "type_parser.cpp types.cpp",                                                                                                                                                                                                                                   "clickhouse");
 
     // Vendored dependencies (pure C/C++; built into the same module).
