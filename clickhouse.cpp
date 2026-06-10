@@ -265,16 +265,21 @@ static void clickhouse_iter_free_obj(zend_object *object)
 /*
  * Materialized result wrapper, returned by selectStatement(). The rows
  * zval is a PHP array built once at construction time; iteration uses
- * the HashTable's internal pointer, so a single foreach is the supported
- * mode (nested foreach on the same Statement would fight over one
- * cursor). The statistics zval is a per-call snapshot of obj->stats at
- * the moment selectStatement returned, so callers can stash a Statement
- * across other queries without losing its stats.
+ * the per-object pos cursor, not the HashTable's internal pointer —
+ * toArray()/jsonSerialize() hand the same zend_array out to userland
+ * (refcount > 1), and writing the shared internal pointer would trip
+ * ZEND_DEBUG's HT_ASSERT and perturb the caller's copy. pos is still
+ * one cursor per Statement, so a single foreach is the supported mode
+ * (nested foreach on the same Statement would fight over it). The
+ * statistics zval is a per-call snapshot of obj->stats at the moment
+ * selectStatement returned, so callers can stash a Statement across
+ * other queries without losing its stats.
  */
 struct clickhouse_statement_object {
     zval rows;
     zval positional_rows;
     zval statistics;
+    HashPosition pos;
     zend_object std;
 };
 
@@ -293,6 +298,7 @@ static zend_object *clickhouse_statement_create_object(zend_class_entry *ce)
     ZVAL_UNDEF(&stmt->rows);
     ZVAL_UNDEF(&stmt->positional_rows);
     ZVAL_UNDEF(&stmt->statistics);
+    stmt->pos = 0;
     zend_object_std_init(&stmt->std, ce);
     object_properties_init(&stmt->std, ce);
     stmt->std.handlers = &clickhouse_statement_object_handlers;
@@ -450,6 +456,10 @@ PHP_MINIT_FUNCTION(clickhouse)
     memcpy(&clickhouse_object_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
     clickhouse_object_handlers.offset = offsetof(clickhouse_object, std);
     clickhouse_object_handlers.free_obj = clickhouse_free_obj;
+    /* The std clone handler allocates a bare zend_object with no room
+     * for the C++ prefix; free_obj on that clone then frees a pointer
+     * offset bytes before the allocation. Refuse cloning instead. */
+    clickhouse_object_handlers.clone_obj = NULL;
 
     clickhouse_exception_ce = register_class_ClickHouseException(zend_ce_exception);
 
@@ -463,6 +473,7 @@ PHP_MINIT_FUNCTION(clickhouse)
     memcpy(&clickhouse_iter_object_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
     clickhouse_iter_object_handlers.offset = offsetof(clickhouse_iter_object, std);
     clickhouse_iter_object_handlers.free_obj = clickhouse_iter_free_obj;
+    clickhouse_iter_object_handlers.clone_obj = NULL;
 
     clickhouse_statement_ce = register_class_ClickHouseStatement(zend_ce_iterator, zend_ce_countable, zend_ce_arrayaccess, php_json_serializable_ce);
     clickhouse_mark_not_serializable(clickhouse_statement_ce);
@@ -2706,6 +2717,9 @@ static void validateRowShapes(HashTable *values_ht, size_t columns_count)
 {
     zval *pzval;
     ZEND_HASH_FOREACH_VAL(values_ht, pzval) {
+        /* foreach ($rows as &$row) leaves IS_REFERENCE buckets behind;
+         * deref before type checks or valid rows get rejected. */
+        ZVAL_DEREF(pzval);
         if (Z_TYPE_P(pzval) != IS_ARRAY) {
             throw std::runtime_error(
                 "The insert function needs to pass in a two-dimensional array");
@@ -2744,6 +2758,7 @@ static void buildSingleColumnZval(HashTable *values_ht, size_t column_index,
     try {
         zval *pzval, *fzval;
         ZEND_HASH_FOREACH_VAL(values_ht, pzval) {
+            ZVAL_DEREF(pzval);
             fzval = sc_zend_hash_index_find(Z_ARRVAL_P(pzval), column_index);
             if (!fzval && column_names) {
                 zend_string *col = (*column_names)[column_index];
@@ -2754,6 +2769,9 @@ static void buildSingleColumnZval(HashTable *values_ht, size_t column_index,
                 throw std::runtime_error(
                     "The number of parameters inserted per line is inconsistent");
             }
+            /* Cell-level deref so the strict Z_TYPE checks in
+             * insertColumn see the underlying value, not IS_REFERENCE. */
+            ZVAL_DEREF(fzval);
             sc_zval_add_ref(fzval);
             add_next_index_zval(out, fzval);
         } ZEND_HASH_FOREACH_END();
@@ -2808,6 +2826,7 @@ static void do_insert_into(zval *this_obj, zend_string *table,
         {
             zval *cz;
             ZEND_HASH_FOREACH_VAL(columns_ht, cz) {
+                ZVAL_DEREF(cz);
                 if (Z_TYPE_P(cz) != IS_STRING) {
                     throw std::runtime_error(
                         "The columns array must be a list of column-name strings");
@@ -3350,6 +3369,7 @@ PHP_METHOD(ClickHouse, insertFromStream)
         {
             zval *cz;
             ZEND_HASH_FOREACH_VAL(columns_ht, cz) {
+                ZVAL_DEREF(cz);
                 if (Z_TYPE_P(cz) != IS_STRING) {
                     throw std::runtime_error(
                         "insertFromStream: columns must be a list of column-name strings");
@@ -3586,6 +3606,7 @@ PHP_METHOD(ClickHouse, write)
         Z_PARAM_ARRAY(values)
     ZEND_PARSE_PARAMETERS_END();
 
+    bool session_owned = false;
     try
     {
         /* Acquire the reentry guard before any heavy lifting. Fail-fast
@@ -3594,6 +3615,7 @@ PHP_METHOD(ClickHouse, write)
         clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
         Client *client = getClient(obj);
         QueryActiveGuard guard(obj);
+        session_owned = true;
 
         if (!obj->has_insert_block) {
             throw std::runtime_error("write() called without a matching writeStart()");
@@ -3660,8 +3682,19 @@ PHP_METHOD(ClickHouse, write)
          *     reason. insert_blocks_sent is set true before
          *     SendInsertBlock so this case lands here too.
          * Swallow secondary failures from the recovery call — we are
-         * already throwing the original error to PHP. */
+         * already throwing the original error to PHP.
+         *
+         * All of that recovery presumes this call owns the wire. When
+         * QueryActiveGuard (or getClient) threw, it doesn't: the
+         * streaming-insert flags consulted below belong to an outer
+         * in-progress operation, and resetting the connection here
+         * would yank the socket out from under that operation's packet
+         * loop (same gate writeEnd() keeps via end_insert_started). */
         clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
+        if (!session_owned) {
+            throwClickHouseError(e, std::string());
+            return;
+        }
         std::string sql = obj->insert_sql;
         std::string qid = obj->insert_query_id;
         if (obj->has_insert_block) {
@@ -4183,6 +4216,9 @@ PHP_METHOD(ClickHouse, insertAssoc)
                 break;
             } ZEND_HASH_FOREACH_END();
         }
+        if (first) {
+            ZVAL_DEREF(first);
+        }
         if (!first || Z_TYPE_P(first) != IS_ARRAY) {
             throw std::runtime_error("insertAssoc: each row must be an associative array");
         }
@@ -4223,6 +4259,7 @@ PHP_METHOD(ClickHouse, insertAssoc)
          * from the first row's set. */
         zval *row_zv;
         ZEND_HASH_FOREACH_VAL(rows_ht, row_zv) {
+            ZVAL_DEREF(row_zv);
             if (Z_TYPE_P(row_zv) != IS_ARRAY) {
                 zval_ptr_dtor(&columns_zv);
                 throw std::runtime_error("insertAssoc: each row must be an associative array");
@@ -5093,7 +5130,7 @@ PHP_METHOD(ClickHouseStatement, rewind)
     if (zend_parse_parameters_none() == FAILURE) return;
     clickhouse_statement_object *stmt = Z_CLICKHOUSE_STATEMENT_P(getThis());
     if (Z_TYPE(stmt->rows) == IS_ARRAY) {
-        zend_hash_internal_pointer_reset(Z_ARRVAL(stmt->rows));
+        zend_hash_internal_pointer_reset_ex(Z_ARRVAL(stmt->rows), &stmt->pos);
     }
 }
 
@@ -5104,7 +5141,7 @@ PHP_METHOD(ClickHouseStatement, valid)
     if (Z_TYPE(stmt->rows) != IS_ARRAY) {
         RETURN_FALSE;
     }
-    RETURN_BOOL(zend_hash_get_current_data(Z_ARRVAL(stmt->rows)) != NULL);
+    RETURN_BOOL(zend_hash_get_current_data_ex(Z_ARRVAL(stmt->rows), &stmt->pos) != NULL);
 }
 
 PHP_METHOD(ClickHouseStatement, current)
@@ -5114,7 +5151,7 @@ PHP_METHOD(ClickHouseStatement, current)
     if (Z_TYPE(stmt->rows) != IS_ARRAY) {
         RETURN_NULL();
     }
-    zval *cur = zend_hash_get_current_data(Z_ARRVAL(stmt->rows));
+    zval *cur = zend_hash_get_current_data_ex(Z_ARRVAL(stmt->rows), &stmt->pos);
     if (!cur) {
         RETURN_NULL();
     }
@@ -5130,7 +5167,7 @@ PHP_METHOD(ClickHouseStatement, key)
     }
     zend_string *str_key;
     zend_ulong num_key;
-    int t = zend_hash_get_current_key(Z_ARRVAL(stmt->rows), &str_key, &num_key);
+    int t = zend_hash_get_current_key_ex(Z_ARRVAL(stmt->rows), &str_key, &num_key, &stmt->pos);
     if (t == HASH_KEY_IS_STRING) {
         RETURN_STR_COPY(str_key);
     } else if (t == HASH_KEY_IS_LONG) {
@@ -5144,7 +5181,7 @@ PHP_METHOD(ClickHouseStatement, next)
     if (zend_parse_parameters_none() == FAILURE) return;
     clickhouse_statement_object *stmt = Z_CLICKHOUSE_STATEMENT_P(getThis());
     if (Z_TYPE(stmt->rows) == IS_ARRAY) {
-        zend_hash_move_forward(Z_ARRVAL(stmt->rows));
+        zend_hash_move_forward_ex(Z_ARRVAL(stmt->rows), &stmt->pos);
     }
 }
 

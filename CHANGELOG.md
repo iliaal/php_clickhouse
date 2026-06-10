@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `clone` of `ClickHouse` / `ClickHouseRowIterator` corrupted the heap; cloning
+  now throws `Error`, matching `ClickHouseStatement`.
+- Iterating a `ClickHouseStatement` after `toArray()` / `jsonSerialize()`
+  aborted debug builds and moved the array cursor the caller's copy observes;
+  iteration now uses a per-object cursor.
+- `insert()`, `insertAssoc()`, `write()`, and `insertFromStream()` rejected
+  rows, cells, and column names left as references by `foreach (... as &$x)`.
+
 ## [0.8.5] - 2026-05-11
 
 ### Added
