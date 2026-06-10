@@ -117,6 +117,13 @@ struct clickhouse_object {
      * vector::erase(begin()) on a 1024-entry log shifted ~16 KB on
      * every query past the cap. */
     std::deque<QueryLog> query_log;
+    /* The exact ClientOptions the live Client was built with. setDatabase()
+     * rebuilds the Client from these (with default_database swapped) rather
+     * than issuing a session `USE`, so the new database survives every
+     * reconnect — including clickhouse-cpp's internal RetryGuard reconnect
+     * (ping_before_query) which the extension never sees and could not
+     * re-apply a USE to. */
+    ClientOptions client_options;
     zend_object std;
 };
 
@@ -146,6 +153,7 @@ static zend_object *clickhouse_create_object(zend_class_entry *ce)
     new (&obj->insert_query_id) std::string();
     new (&obj->insert_started_at) std::chrono::steady_clock::time_point();
     new (&obj->query_log) std::deque<QueryLog>();
+    new (&obj->client_options) ClientOptions();
     ZVAL_UNDEF(&obj->progress_callback);
     ZVAL_UNDEF(&obj->profile_callback);
     ZVAL_UNDEF(&obj->verbose_callback);
@@ -203,8 +211,35 @@ static void clickhouse_free_obj(zend_object *object)
     obj->insert_query_id.~basic_string();
     obj->insert_started_at.~time_point();
     obj->query_log.~deque<QueryLog>();
+    obj->client_options.~ClientOptions();
 
     zend_object_std_dtor(&obj->std);
+}
+
+/*
+ * The progress / profile / verbose callbacks are stored as zvals on the
+ * C struct, not in the property table, so the default get_gc never sees
+ * them. A closure that captures the client — setProgressCallback(fn()
+ * use ($ch){}) — then forms a cycle (client -> closure -> client) the
+ * cycle collector can't break, leaking the object, its Client*, and the
+ * open socket until request shutdown. Expose the three zvals so the
+ * collector can traverse and reclaim the cycle (then free_obj runs).
+ */
+static HashTable *clickhouse_get_gc(zend_object *object, zval **table, int *n)
+{
+    clickhouse_object *obj = clickhouse_from_obj(object);
+    zend_get_gc_buffer *buf = zend_get_gc_buffer_create();
+    if (Z_TYPE(obj->progress_callback) != IS_UNDEF) {
+        zend_get_gc_buffer_add_zval(buf, &obj->progress_callback);
+    }
+    if (Z_TYPE(obj->profile_callback) != IS_UNDEF) {
+        zend_get_gc_buffer_add_zval(buf, &obj->profile_callback);
+    }
+    if (Z_TYPE(obj->verbose_callback) != IS_UNDEF) {
+        zend_get_gc_buffer_add_zval(buf, &obj->verbose_callback);
+    }
+    zend_get_gc_buffer_use(buf, table, n);
+    return zend_std_get_properties(object);
 }
 
 /*
@@ -456,6 +491,7 @@ PHP_MINIT_FUNCTION(clickhouse)
     memcpy(&clickhouse_object_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
     clickhouse_object_handlers.offset = offsetof(clickhouse_object, std);
     clickhouse_object_handlers.free_obj = clickhouse_free_obj;
+    clickhouse_object_handlers.get_gc = clickhouse_get_gc;
     /* The std clone handler allocates a bare zend_object with no room
      * for the C++ prefix; free_obj on that clone then frees a pointer
      * offset bytes before the allocation. Refuse cloning instead. */
@@ -628,13 +664,17 @@ PHP_METHOD(ClickHouse, __construct)
         } else if (EG(exception)) { return; }
     }
 
-    zval *host = sc_zend_read_property(clickhouse_ce, this_obj, "host", sizeof("host") - 1, 0);
-    zval *port = sc_zend_read_property(clickhouse_ce, this_obj, "port", sizeof("port") - 1, 0);
-    zval *compression = sc_zend_read_property(clickhouse_ce, this_obj, "compression", sizeof("compression") - 1, 0);
-    zval *retry_timeout = sc_zend_read_property(clickhouse_ce, this_obj, "retry_timeout", sizeof("retry_timeout") - 1, 0);
-    zval *retry_count = sc_zend_read_property(clickhouse_ce, this_obj, "retry_count", sizeof("retry_count") - 1, 0);
-    zval *receive_timeout = sc_zend_read_property(clickhouse_ce, this_obj, "receive_timeout", sizeof("receive_timeout") - 1, 0);
-    zval *connect_timeout = sc_zend_read_property(clickhouse_ce, this_obj, "connect_timeout", sizeof("connect_timeout") - 1, 0);
+    /* These are all declared, immediately-written properties, so the read
+     * returns the property slot (not rv); the shared rv is never populated.
+     * Pass it anyway to satisfy the rv-owning signature. */
+    zval _rv;
+    zval *host = sc_zend_read_property(clickhouse_ce, this_obj, "host", sizeof("host") - 1, 0, &_rv);
+    zval *port = sc_zend_read_property(clickhouse_ce, this_obj, "port", sizeof("port") - 1, 0, &_rv);
+    zval *compression = sc_zend_read_property(clickhouse_ce, this_obj, "compression", sizeof("compression") - 1, 0, &_rv);
+    zval *retry_timeout = sc_zend_read_property(clickhouse_ce, this_obj, "retry_timeout", sizeof("retry_timeout") - 1, 0, &_rv);
+    zval *retry_count = sc_zend_read_property(clickhouse_ce, this_obj, "retry_count", sizeof("retry_count") - 1, 0, &_rv);
+    zval *receive_timeout = sc_zend_read_property(clickhouse_ce, this_obj, "receive_timeout", sizeof("receive_timeout") - 1, 0, &_rv);
+    zval *connect_timeout = sc_zend_read_property(clickhouse_ce, this_obj, "connect_timeout", sizeof("connect_timeout") - 1, 0, &_rv);
 
     ClientOptions Options = ClientOptions()
                             .SetHost(std::string(Z_STRVAL_P(host), Z_STRLEN_P(host)))
@@ -790,16 +830,37 @@ PHP_METHOD(ClickHouse, __construct)
     }
 #endif
 
-    if (php_array_get_value(_ht, "endpoints", value) && Z_TYPE_P(value) == IS_ARRAY) {
+    if (php_array_get_value(_ht, "endpoints", value)) {
+        /* Every other config key surfaces malformed input as an exception;
+         * 'endpoints' used to silently skip bad entries and, if all were
+         * skipped, fall back to 127.0.0.1:9000 — so a single typo
+         * ('hosts' => ...) connected to localhost instead of the intended
+         * cluster with no diagnostic. Validate strictly to match. */
+        if (Z_TYPE_P(value) != IS_ARRAY) {
+            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                "endpoints must be a list of [host, port] arrays", 0);
+            return;
+        }
         std::vector<Endpoint> eps;
         HashTable *eps_ht = Z_ARRVAL_P(value);
         zval *ep_zv;
         ZEND_HASH_FOREACH_VAL(eps_ht, ep_zv) {
-            if (Z_TYPE_P(ep_zv) != IS_ARRAY) continue;
+            ZVAL_DEREF(ep_zv);
+            if (Z_TYPE_P(ep_zv) != IS_ARRAY) {
+                sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                    "each endpoints entry must be an array with a 'host' key", 0);
+                return;
+            }
             HashTable *eh = Z_ARRVAL_P(ep_zv);
             zval *hz = sc_zend_hash_find(eh, (char*)"host", 4);
             zval *pz = sc_zend_hash_find(eh, (char*)"port", 4);
-            if (!hz) continue;
+            if (hz) ZVAL_DEREF(hz);
+            if (pz) ZVAL_DEREF(pz);
+            if (!hz || Z_TYPE_P(hz) == IS_NULL) {
+                sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                    "each endpoints entry requires a non-null 'host'", 0);
+                return;
+            }
             Endpoint e;
             {
                 ZStrGuard host_sg(hz);
@@ -816,12 +877,15 @@ PHP_METHOD(ClickHouse, __construct)
             }
             eps.push_back(std::move(e));
         } ZEND_HASH_FOREACH_END();
-        if (!eps.empty()) {
-            if (!host_configured && !port_configured) {
-                Options = Options.SetHost(std::string());
-            }
-            Options = Options.SetEndpoints(eps);
+        if (eps.empty()) {
+            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                "endpoints was provided but contained no usable entries", 0);
+            return;
         }
+        if (!host_configured && !port_configured) {
+            Options = Options.SetHost(std::string());
+        }
+        Options = Options.SetEndpoints(eps);
     }
 
     if (php_array_get_value(_ht, "database", value))
@@ -853,6 +917,7 @@ PHP_METHOD(ClickHouse, __construct)
             throw std::runtime_error("ClickHouse object is already constructed");
         }
         obj->client = new Client(Options);
+        obj->client_options = Options;
     }
     catch (const std::exception& e)
     {
@@ -967,13 +1032,19 @@ static std::string sqlQuotedIdentifier(const std::string &s)
 static std::string sanitizeError(const char *what)
 {
     std::string msg(what ? what : "");
+    /* Case-insensitive search: ClickHouse 26.x emits lowercase
+     * "while executing 'FUNCTION ...'", which a case-sensitive match
+     * missed, leaking the bound literal (e.g. a password) the marker
+     * is meant to strip. */
+    std::string lower(msg);
+    for (char &ch : lower) { if (ch >= 'A' && ch <= 'Z') ch = (char)(ch + 32); }
     static const char *sql_markers[] = {
-        "While executing",
+        "while executing",
         "in query: ",
-        "While processing",
+        "while processing",
     };
     for (const char *marker : sql_markers) {
-        std::string::size_type pos = msg.find(marker);
+        std::string::size_type pos = lower.find(marker);
         if (pos != std::string::npos) {
             msg.erase(pos);
             // Drop trailing whitespace/punct left from the cut.
@@ -1299,7 +1370,17 @@ static void applyMergedSettings(Query &q, clickhouse_object *obj, zval *per_call
     zend_ulong nk;
     ZEND_HASH_FOREACH_KEY_VAL(ht, nk, zk, vz) {
         (void)nk;
-        if (!zk) continue;
+        /* Match setSettings()/setSetting() validation. A numeric (non-string)
+         * key was silently dropped; an empty-string key is the wire-level
+         * terminator of the native-protocol settings section, so letting it
+         * through desynced the connection (server saw an empty query) and
+         * could smuggle bytes into the query-text position. */
+        if (!zk) {
+            throw std::runtime_error("setting keys must be strings");
+        }
+        if (ZSTR_LEN(zk) == 0) {
+            throw std::runtime_error("setting key must not be empty");
+        }
         std::string sval = formatScalarParam(vz);
         merged[std::string(ZSTR_VAL(zk), ZSTR_LEN(zk))] = sval;
     } ZEND_HASH_FOREACH_END();
@@ -1335,7 +1416,16 @@ static void attachProgressAndProfile(Query &q, clickhouse_object *obj)
             add_assoc_long(&args[0], "total_rows", (zend_long)p.total_rows);
             add_assoc_long(&args[0], "written_rows", (zend_long)p.written_rows);
             add_assoc_long(&args[0], "written_bytes", (zend_long)p.written_bytes);
-            call_user_function(NULL, NULL, &obj->progress_callback, &retval, 1, args);
+            /* Copy the callable before invoking it. A callback that
+             * unregisters or replaces itself (setProgressCallback(null))
+             * would dtor obj->progress_callback mid-call; for an array
+             * callable [new Handler, 'm'] holding the last ref to the
+             * handler, that frees $this under the executing method. The
+             * local copy pins the callable and its bound object. */
+            zval cb_copy;
+            ZVAL_COPY(&cb_copy, &obj->progress_callback);
+            call_user_function(NULL, NULL, &cb_copy, &retval, 1, args);
+            zval_ptr_dtor(&cb_copy);
             zval_ptr_dtor(&args[0]);
             zval_ptr_dtor(&retval);
             /* If the user callback raised, propagate to the packet loop
@@ -1369,7 +1459,11 @@ static void attachProgressAndProfile(Query &q, clickhouse_object *obj)
             add_assoc_long(&args[0], "rows_before_limit", (zend_long)pr.rows_before_limit);
             add_assoc_bool(&args[0], "applied_limit", pr.applied_limit ? 1 : 0);
             add_assoc_bool(&args[0], "calculated_rows_before_limit", pr.calculated_rows_before_limit ? 1 : 0);
-            call_user_function(NULL, NULL, &obj->profile_callback, &retval, 1, args);
+            /* Pin the callable across the call; see the OnProgress note. */
+            zval cb_copy;
+            ZVAL_COPY(&cb_copy, &obj->profile_callback);
+            call_user_function(NULL, NULL, &cb_copy, &retval, 1, args);
+            zval_ptr_dtor(&cb_copy);
             zval_ptr_dtor(&args[0]);
             zval_ptr_dtor(&retval);
             if (EG(exception)) {
@@ -1422,7 +1516,13 @@ static void emitVerbose(clickhouse_object *obj, const char *event, zval *ctx)
         ZVAL_NULL(&retval);
         ZVAL_STRING(&args[0], event);
         ZVAL_COPY(&args[1], &payload);
-        call_user_function(NULL, NULL, &obj->verbose_callback, &retval, 2, args);
+        /* Pin the callable across the call; a verbose sink that calls
+         * setVerbose(null) on the same client would otherwise free the
+         * executing callable (and its bound object) mid-call. */
+        zval cb_copy;
+        ZVAL_COPY(&cb_copy, &obj->verbose_callback);
+        call_user_function(NULL, NULL, &cb_copy, &retval, 2, args);
+        zval_ptr_dtor(&cb_copy);
         zval_ptr_dtor(&args[0]);
         zval_ptr_dtor(&args[1]);
         zval_ptr_dtor(&retval);
@@ -1846,6 +1946,7 @@ static void attachTypedParams(Query &q, const std::vector<TypedParam> &params)
  */
 PHP_METHOD(ClickHouse, ping)
 {
+    if (zend_parse_parameters_none() == FAILURE) return;
     try {
         clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
         Client *client = getClient(obj);
@@ -1968,6 +2069,13 @@ static void do_select_into(zval *out, zval *this_obj,
                         throw;
                     }
 
+                    if (Z_TYPE(kp_col1) == IS_ARRAY || Z_TYPE(kp_col1) == IS_OBJECT) {
+                        /* Composite key column would stringify to "Array";
+                         * reject so the result isn't silently collapsed. */
+                        zval_ptr_dtor(&kp_col1);
+                        zval_ptr_dtor(&kp_col2);
+                        throw std::runtime_error("Key pair mode requires a scalar key column");
+                    }
                     if (Z_TYPE(kp_col1) == IS_LONG) {
                          sc_zend_hash_index_update(Z_ARRVAL_P(out), Z_LVAL(kp_col1), &kp_col2);
                     } else {
@@ -2142,6 +2250,10 @@ static void buildSingleColumnZval(HashTable *values_ht, size_t column_index,
  */
 static Block buildExternalTableBlock(zval *entry, std::string &name_out)
 {
+    /* foreach ($externals as &$e) leaves IS_REFERENCE buckets behind;
+     * deref the entry and its members before any type check so valid
+     * by-ref input is not rejected (matches the insert() paths). */
+    ZVAL_DEREF(entry);
     if (Z_TYPE_P(entry) != IS_ARRAY) {
         throw std::runtime_error("externals must be a list of arrays");
     }
@@ -2150,6 +2262,9 @@ static Block buildExternalTableBlock(zval *entry, std::string &name_out)
     zval *name_zv    = sc_zend_hash_find(ht, "name", sizeof("name") - 1);
     zval *columns_zv = sc_zend_hash_find(ht, "columns", sizeof("columns") - 1);
     zval *rows_zv    = sc_zend_hash_find(ht, "rows", sizeof("rows") - 1);
+    if (name_zv)    ZVAL_DEREF(name_zv);
+    if (columns_zv) ZVAL_DEREF(columns_zv);
+    if (rows_zv)    ZVAL_DEREF(rows_zv);
 
     if (!name_zv || Z_TYPE_P(name_zv) != IS_STRING) {
         throw std::runtime_error("external table requires string 'name'");
@@ -2188,6 +2303,7 @@ static Block buildExternalTableBlock(zval *entry, std::string &name_out)
                 throw std::runtime_error("external table '" + name_out +
                     "' columns must be an associative array of name => type");
             }
+            ZVAL_DEREF(type_zv);
             if (Z_TYPE_P(type_zv) != IS_STRING) {
                 throw std::runtime_error("external table '" + name_out +
                     "' column '" + std::string(ZSTR_VAL(k), ZSTR_LEN(k)) +
@@ -2456,9 +2572,22 @@ static void appendCellForStream(smart_str *buf, zval *cell, StreamFormat fmt)
 
 /* Flush the per-block buffer to the PHP stream and reset it. Throws on
  * short-write so the caller's catch path can map to ClickHouseException. */
-static void flushStreamBuf(smart_str *buf, php_stream *stream)
+static void flushStreamBuf(smart_str *buf, zval *stream_zv)
 {
     if (!buf->s || ZSTR_LEN(buf->s) == 0) return;
+    /* Re-resolve the stream from its zval on every flush rather than
+     * caching the php_stream*. The Select() packet loop runs userland
+     * progress/profile callbacks; one that fclose()s this resource would
+     * leave a cached pointer dangling and the next write a use-after-free.
+     * After fclose, the resource is invalidated and this returns NULL. */
+    /* Silent fetch (NULL type name): php_stream_from_zval_no_verify passes
+     * "stream" and would raise a TypeError on a closed resource, which we'd
+     * rather surface as a clean ClickHouseException. */
+    php_stream *stream = (php_stream*)zend_fetch_resource2_ex(
+        stream_zv, NULL, php_file_le_stream(), php_file_le_pstream());
+    if (!stream) {
+        throw std::runtime_error("selectToStream: stream was closed during the query");
+    }
     size_t n = ZSTR_LEN(buf->s);
     ssize_t w = php_stream_write(stream, ZSTR_VAL(buf->s), n);
     if (w < 0 || (size_t)w != n) {
@@ -2476,7 +2605,7 @@ static void flushStreamBuf(smart_str *buf, php_stream *stream)
  */
 static zend_long do_select_to_stream(zval *this_obj,
                                      const char *sql, size_t l_sql,
-                                     zval *params, php_stream *stream,
+                                     zval *params, zval *stream_zv,
                                      StreamFormat fmt,
                                      const std::string &qid, zval *settings)
 {
@@ -2568,7 +2697,7 @@ static zend_long do_select_to_stream(zval *this_obj,
                 ++total_rows;
             }
 
-            flushStreamBuf(&buf, stream);
+            flushStreamBuf(&buf, stream_zv);
         });
 
         auto t0 = std::chrono::steady_clock::now();
@@ -2586,7 +2715,7 @@ static zend_long do_select_to_stream(zval *this_obj,
             tryResetConnectionReapplyDatabase(this_obj, obj, false);
             throw;
         }
-        flushStreamBuf(&buf, stream);
+        flushStreamBuf(&buf, stream_zv);
         smart_str_free(&buf);
         auto t1 = std::chrono::steady_clock::now();
         obj->stats.elapsed_ms =
@@ -2659,7 +2788,7 @@ PHP_METHOD(ClickHouse, selectToStream)
 
     std::string qid = makeQid(query_id);
     zend_long n = do_select_to_stream(getThis(), ZSTR_VAL(sql), ZSTR_LEN(sql),
-                                      params, stream, fmt, qid, settings);
+                                      params, stream_zv, fmt, qid, settings);
     if (EG(exception)) return;
     RETURN_LONG(n);
 }
@@ -2823,6 +2952,17 @@ static void do_insert_into(zval *this_obj, zend_string *table,
          * is the safe substitute. */
         std::vector<zend_string*> column_names;
         column_names.reserve(columns_count);
+        /* Pin the column-name strings for the whole call. buildSingleColumnZval
+         * dereferences these zend_string* in the per-column loop below, which
+         * runs after BeginInsert and interleaves with user PHP (a cell's
+         * __toString, a progress/profile callback). That code can reach into a
+         * by-ref element of $columns and drop the original string; without an
+         * addref the pointer would dangle. Released on scope exit (normal or
+         * exception unwind). */
+        struct ColNameGuard {
+            std::vector<zend_string*> &v;
+            ~ColNameGuard() { for (zend_string *s : v) zend_string_release(s); }
+        } col_name_guard{column_names};
         {
             zval *cz;
             ZEND_HASH_FOREACH_VAL(columns_ht, cz) {
@@ -2831,6 +2971,7 @@ static void do_insert_into(zval *this_obj, zend_string *table,
                     throw std::runtime_error(
                         "The columns array must be a list of column-name strings");
                 }
+                zend_string_addref(Z_STR_P(cz));
                 column_names.push_back(Z_STR_P(cz));
             } ZEND_HASH_FOREACH_END();
         }
@@ -3095,6 +3236,10 @@ struct InsertStreamParser {
                 case 'n':  cell_buf.push_back('\n'); return true;
                 case 'r':  cell_buf.push_back('\r'); return true;
                 case '0':  cell_buf.push_back('\0'); return true;
+                case 'b':  cell_buf.push_back('\b'); return true;
+                case 'f':  cell_buf.push_back('\f'); return true;
+                case 'a':  cell_buf.push_back('\a'); return true;
+                case 'v':  cell_buf.push_back('\v'); return true;
                 case 'N':
                     if (cell_buf.empty()) {
                         cell_buf.push_back('\\');
@@ -3105,8 +3250,13 @@ struct InsertStreamParser {
                     cell_buf.push_back('\\');
                     return false;
                 default:
-                    cell_buf.push_back('\\');
-                    return false;
+                    /* ClickHouse TabSeparated folds an unrecognized escape
+                     * to the escaped character itself: `\'` -> `'`, `\"` ->
+                     * `"`, `\/` -> `/`. The writer escapes apostrophes as
+                     * `\'`, so keeping the backslash here corrupted every
+                     * round-tripped value with a quote. */
+                    cell_buf.push_back(n);
+                    return true;
             }
         };
 
@@ -3129,6 +3279,16 @@ struct InsertStreamParser {
                 if (decode_escape_byte(c)) continue;
                 /* else `\` got pushed; fall through and process c as
                  * ordinary content (cell_sep, row term, or push). */
+            }
+
+            /* Any byte in hand proves the deferred blank line(s) were not
+             * the trailing-at-EOF blank, so materialize them in input order
+             * BEFORE this byte's row is built. Must run ahead of the
+             * cell_sep / row-terminator branches: otherwise a leading
+             * separator on the next row appends an empty cell into row_cells
+             * before the blank row is replayed, merging the two. */
+            if (pending_empty_rows > 0) {
+                flush_pending_empty_rows();
             }
 
             /* CSV-only quoted-cell state machine. TSV ignores '"' entirely. */
@@ -3176,6 +3336,14 @@ struct InsertStreamParser {
                 }
                 /* End of row. Tolerate a trailing blank line at EOF. */
                 if (state == State::CellStart && row_cells.empty() && cell_buf.empty()) {
+                    /* A blank line cannot stand in for the header row of a
+                     * *WithNames stream; rejecting here keeps the real
+                     * header from being consumed as the skipped row and
+                     * then inserted as data. */
+                    if (streamFormatHasHeader(fmt) && !first_row_skipped) {
+                        throw std::runtime_error(
+                            "insertFromStream: blank line before header row");
+                    }
                     ++pending_empty_rows;
                     state = State::CellStart;
                     continue;
@@ -3186,10 +3354,6 @@ struct InsertStreamParser {
                 continue;
             }
             prev_was_cr = false;
-
-            if (pending_empty_rows > 0) {
-                flush_pending_empty_rows();
-            }
 
             /* `\N` at cell start is the whole-cell NULL marker; bytes
              * other than the cell separator or row terminator after it
@@ -3976,7 +4140,29 @@ PHP_METHOD(ClickHouse, setDatabase)
     }
     try {
         QueryActiveGuard guard(obj);
-        obj->client->Execute(Query("USE " + sqlQuotedIdentifier(std::string(ZSTR_VAL(db), ZSTR_LEN(db)))));
+        if (obj->has_insert_block) {
+            throw std::runtime_error("The insert operation is now in progress");
+        }
+        /* Rebuild the Client with default_database set to the new database
+         * instead of issuing a session `USE`. A session USE is lost on any
+         * reconnect that reuses the constructor-time default_database — both
+         * the extension's own ResetConnection recovery and clickhouse-cpp's
+         * internal RetryGuard reconnect (ping_before_query), the latter
+         * invisible to the extension. Carrying the database in the options
+         * makes every reconnect handshake into the right database.
+         *
+         * Build the new Client first; only swap it in once the connect
+         * succeeds, so a failed switch leaves the existing client usable. */
+        std::string new_db(ZSTR_VAL(db), ZSTR_LEN(db));
+        /* Copy first, then mutate the copy: the DECLARE_FIELD setters
+         * modify *this in place, so operating on obj->client_options
+         * directly would corrupt the stored options if new Client throws. */
+        ClientOptions new_opts = obj->client_options;
+        new_opts.SetDefaultDatabase(new_db);
+        Client *new_client = new Client(new_opts);
+        delete obj->client;
+        obj->client = new_client;
+        obj->client_options = new_opts;
     } catch (const std::exception &e) {
         throwClickHouseError(e);
         return;
@@ -4104,6 +4290,7 @@ PHP_METHOD(ClickHouse, setVerbose)
  */
 PHP_METHOD(ClickHouse, resetConnection)
 {
+    if (zend_parse_parameters_none() == FAILURE) return;
     try {
         clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
         QueryActiveGuard guard(obj);
@@ -4124,6 +4311,7 @@ PHP_METHOD(ClickHouse, resetConnection)
  */
 PHP_METHOD(ClickHouse, getServerInfo)
 {
+    if (zend_parse_parameters_none() == FAILURE) return;
     try {
         clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
         Client *client = getClient(obj);
@@ -4152,6 +4340,7 @@ PHP_METHOD(ClickHouse, getServerInfo)
  */
 PHP_METHOD(ClickHouse, getCurrentEndpoint)
 {
+    if (zend_parse_parameters_none() == FAILURE) return;
     try {
         clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
         Client *client = getClient(obj);
@@ -4176,6 +4365,7 @@ PHP_METHOD(ClickHouse, getCurrentEndpoint)
  */
 PHP_METHOD(ClickHouse, getStatistics)
 {
+    if (zend_parse_parameters_none() == FAILURE) return;
     clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
     buildStatsArray(return_value, obj->stats);
 }
@@ -4334,7 +4524,9 @@ static bool runHelperExec(zval *this_obj, const std::string &sql)
 
 static std::string currentDatabase(zval *this_obj)
 {
-    zval *db = sc_zend_read_property(clickhouse_ce, this_obj, "database", sizeof("database") - 1, 0);
+    zval rv;
+    zval *db = sc_zend_read_property(clickhouse_ce, this_obj, "database", sizeof("database") - 1, 0, &rv);
+    if (db) ZVAL_DEREF(db);
     if (db && Z_TYPE_P(db) == IS_STRING) {
         return std::string(Z_STRVAL_P(db), Z_STRLEN_P(db));
     }
@@ -4348,8 +4540,16 @@ static std::string currentDatabase(zval *this_obj)
 static void runHelperSelectFirstRow(zval *return_value, zval *this_obj, const std::string &sql)
 {
     zval rows;
+    ZVAL_UNDEF(&rows);
     runHelperSelect(&rows, this_obj, sql, 0);
     if (EG(exception)) {
+        /* do_select_into array_init's the out zval before dispatching the
+         * query, so a mid-stream failure leaves an initialized (possibly
+         * populated) array that the early return would otherwise leak in a
+         * long-running worker. Pre-array_init throws leave rows IS_UNDEF. */
+        if (Z_TYPE(rows) != IS_UNDEF) {
+            zval_ptr_dtor(&rows);
+        }
         return;
     }
     if (Z_TYPE(rows) == IS_ARRAY && zend_hash_num_elements(Z_ARRVAL(rows)) > 0) {
@@ -4533,6 +4733,7 @@ PHP_METHOD(ClickHouse, enableLogQueries)
  */
 PHP_METHOD(ClickHouse, getLogQueries)
 {
+    if (zend_parse_parameters_none() == FAILURE) return;
     clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
     array_init(return_value);
     for (const auto &ql : obj->query_log) {
@@ -5071,7 +5272,9 @@ PHP_METHOD(ClickHouseException, getServerCode)
     if (zend_parse_parameters_none() == FAILURE) {
         return;
     }
-    zval *p = sc_zend_read_property(clickhouse_exception_ce, getThis(), "server_code", sizeof("server_code") - 1, 0);
+    zval rv;
+    zval *p = sc_zend_read_property(clickhouse_exception_ce, getThis(), "server_code", sizeof("server_code") - 1, 0, &rv);
+    if (p) ZVAL_DEREF(p);
     if (p && Z_TYPE_P(p) == IS_LONG) {
         RETURN_LONG(Z_LVAL_P(p));
     }
@@ -5083,7 +5286,9 @@ PHP_METHOD(ClickHouseException, getServerName)
     if (zend_parse_parameters_none() == FAILURE) {
         return;
     }
-    zval *p = sc_zend_read_property(clickhouse_exception_ce, getThis(), "server_name", sizeof("server_name") - 1, 0);
+    zval rv;
+    zval *p = sc_zend_read_property(clickhouse_exception_ce, getThis(), "server_name", sizeof("server_name") - 1, 0, &rv);
+    if (p) ZVAL_DEREF(p);
     if (p && Z_TYPE_P(p) == IS_STRING) {
         RETURN_STRINGL(Z_STRVAL_P(p), Z_STRLEN_P(p));
     }
@@ -5095,7 +5300,9 @@ PHP_METHOD(ClickHouseException, getQueryId)
     if (zend_parse_parameters_none() == FAILURE) {
         return;
     }
-    zval *p = sc_zend_read_property(clickhouse_exception_ce, getThis(), "query_id", sizeof("query_id") - 1, 0);
+    zval rv;
+    zval *p = sc_zend_read_property(clickhouse_exception_ce, getThis(), "query_id", sizeof("query_id") - 1, 0, &rv);
+    if (p) ZVAL_DEREF(p);
     if (p && Z_TYPE_P(p) == IS_STRING) {
         RETURN_STRINGL(Z_STRVAL_P(p), Z_STRLEN_P(p));
     }
@@ -5289,10 +5496,25 @@ PHP_METHOD(ClickHouseStatement, fetchOne)
     if (!first) {
         RETURN_NULL();
     }
-    /* If the row is itself an assoc array with a single column, return
-     * the scalar value (smi2 fetchOne semantics). Otherwise return the
-     * full row. */
-    if (Z_TYPE_P(first) == IS_ARRAY && zend_hash_num_elements(Z_ARRVAL_P(first)) == 1) {
+    /* Decide scalar-unwrap from the TRUE column count. The assoc rows
+     * collapse duplicate column names (SELECT number, number), so counting
+     * elements of the assoc row would misclassify a genuine multi-column
+     * result as single-column and wrongly unwrap it to a scalar. The
+     * positional rows preserve every column; consult them when present
+     * (fetchKeyPair / fetchColumn use the same source-selection). */
+    size_t col_count = (Z_TYPE_P(first) == IS_ARRAY)
+        ? zend_hash_num_elements(Z_ARRVAL_P(first)) : 0;
+    if (Z_TYPE(stmt->positional_rows) == IS_ARRAY) {
+        HashPosition ppos;
+        zend_hash_internal_pointer_reset_ex(Z_ARRVAL(stmt->positional_rows), &ppos);
+        zval *pfirst = zend_hash_get_current_data_ex(Z_ARRVAL(stmt->positional_rows), &ppos);
+        if (pfirst && Z_TYPE_P(pfirst) == IS_ARRAY) {
+            col_count = zend_hash_num_elements(Z_ARRVAL_P(pfirst));
+        }
+    }
+    /* Single column: return the scalar value (smi2 fetchOne semantics).
+     * Otherwise return the full assoc row. */
+    if (Z_TYPE_P(first) == IS_ARRAY && col_count == 1) {
         zend_hash_internal_pointer_reset_ex(Z_ARRVAL_P(first), &pos);
         zval *only = zend_hash_get_current_data_ex(Z_ARRVAL_P(first), &pos);
         if (only) {
@@ -5330,6 +5552,17 @@ PHP_METHOD(ClickHouseStatement, fetchKeyPair)
         zval *vv = zend_hash_get_current_data_ex(Z_ARRVAL_P(row), &pos);
         if (!kv || !vv) continue;
 
+        if (Z_TYPE_P(kv) == IS_ARRAY || Z_TYPE_P(kv) == IS_OBJECT) {
+            /* A composite key column (Array/Tuple/Map) would coerce to the
+             * literal string "Array" with an E_WARNING, collapsing every
+             * row onto one key. Reject instead, matching the <2-columns
+             * contract below. */
+            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                "fetchKeyPair requires a scalar key column", 0);
+            zend_array_destroy(Z_ARR_P(return_value));
+            ZVAL_UNDEF(return_value);
+            return;
+        }
         zval val_copy;
         ZVAL_COPY(&val_copy, vv);
         if (Z_TYPE_P(kv) == IS_LONG) {

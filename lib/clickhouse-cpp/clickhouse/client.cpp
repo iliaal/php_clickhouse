@@ -499,8 +499,12 @@ void Client::Impl::Ping() {
 }
 
 void Client::Impl::ResetConnection() {
-    InitializeStreams(socket_factory_->connect(options_, current_endpoint_.value()));
+    // Clear the insert flag BEFORE attempting to reconnect. If connect()
+    // throws (server at max_connections, port exhaustion, DNS blip), a
+    // still-true inserting_ would make ~Impl's automatic EndInsert() fire
+    // on the old dirty wire and commit a partially-streamed insert.
     inserting_ = false;
+    InitializeStreams(socket_factory_->connect(options_, current_endpoint_.value()));
 
     if (!Handshake()) {
         throw ProtocolError("fail to connect to " + options_.host);

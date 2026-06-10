@@ -16,6 +16,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   iteration now uses a per-object cursor.
 - `insert()`, `insertAssoc()`, `write()`, and `insertFromStream()` rejected
   rows, cells, and column names left as references by `foreach (... as &$x)`.
+- A `ClickHouse` whose progress/profile/verbose callback captures the client is
+  now reclaimed by the cycle collector (added a `get_gc` handler); previously
+  the object and its connection leaked until request shutdown.
+- A progress/profile/verbose callback that unregisters or replaces itself
+  mid-call no longer frees the executing callable; the callable is pinned for
+  the duration of the call.
+- `selectToStream()` re-resolves the destination stream on each block flush, so
+  a callback that `fclose()`s it raises a clean exception instead of writing
+  through a dangling pointer.
+- `setDatabase()` now rebuilds the connection with the new default database, so
+  the switch survives reconnects (explicit `resetConnection()` and the native
+  client's internal ping-before-query retry) instead of silently reverting to
+  the constructor database.
+- `fetchOne()` returns the full row for a multi-column result whose columns
+  share a name (e.g. `SELECT a, a`) instead of unwrapping it to a scalar.
+- `fetchKeyPair()` and `select(..., FETCH_KEY_PAIR)` reject a composite
+  (Array/Tuple/Map) key column instead of collapsing every row onto `"Array"`.
+- `Int128` / `UInt128` string inserts reject out-of-range values instead of
+  silently wrapping (the 128-bit overflow check now runs before the multiply).
+- `insertFromStream()` errors on an interior blank line instead of silently
+  merging it with the next row, rejects a blank line before a `*WithNames`
+  header, and decodes ClickHouse TabSeparated escapes (`\'`, `\b`, `\f`, and
+  unknown `\c` → `c`) correctly.
+- `selectWithExternalData()` accepts external-table entries left as references
+  by `foreach (... as &$e)`.
+- Per-call settings (`select`/`insert`/`execute`/`writeStart`) reject empty and
+  non-string keys, matching `setSettings()`; an empty key previously desynced
+  the native-protocol settings section.
+- Malformed `endpoints` config (a key typo, a non-array entry, a null host)
+  throws instead of silently connecting to `127.0.0.1:9000`.
+- Server error messages strip the trailing SQL fragment case-insensitively, so
+  a bound literal echoed in ClickHouse 26.x's lowercase `while executing ...`
+  suffix no longer leaks into the message or the query log.
+- `ClickHouseException::getServerCode()` / `getServerName()` / `getQueryId()`
+  dereference a property held as a reference and read into caller-owned storage
+  (no dangling read when a subclass routes the property through `__get`).
+- `getServerInfo()`, `getCurrentEndpoint()`, `getStatistics()`,
+  `getLogQueries()`, `ping()`, and `resetConnection()` enforce zero-argument
+  arity (`ArgumentCountError` instead of a silently-ignored argument, or an
+  arginfo/zpp fatal on debug builds).
 
 ## [0.8.5] - 2026-05-11
 
