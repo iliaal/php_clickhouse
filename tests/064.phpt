@@ -35,12 +35,16 @@ $probe = sprintf('%g', 1.5);
 echo "php sprintf 1.5 under locale: ", $probe, "\n";
 
 // Server-side typed Float64 round-trip. With the prior bug this throws
-// because "1,5" is not a valid Float64 literal.
+// because "1,5" is not a valid Float64 literal. Compare the returned
+// value numerically rather than echoing it: PHP < 8.0 renders a float
+// through LC_NUMERIC (so `echo 1.5` is "1,5" under de_DE), which would
+// mask the wire-format fix this test targets behind an unrelated
+// engine behavior. The numeric compare is locale- and version-neutral.
 $res = $c->select("SELECT {x:Float64} AS x", ["x" => 1.5], ClickHouse::FETCH_ONE);
-echo "float64 1.5 round-trip: ", $res, "\n";
+echo "float64 1.5 round-trip: ", ($res === 1.5 ? "1.5" : "WRONG ($res)"), "\n";
 
 $res = $c->select("SELECT {x:Float64} AS x", ["x" => 0.1], ClickHouse::FETCH_ONE);
-echo "float64 0.1 round-trip: ", $res, "\n";
+echo "float64 0.1 round-trip: ", ($res === 0.1 ? "0.1" : "WRONG ($res)"), "\n";
 
 // Restore locale before exit so other tests aren't affected.
 setlocale(LC_NUMERIC, $prev);
