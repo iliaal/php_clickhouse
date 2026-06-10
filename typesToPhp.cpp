@@ -2741,17 +2741,12 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
 
         if (is_array) {
             add_next_index_zval(arr, map_zv);
-            /* The add performed a ZVAL_COPY (inc ref). Release the temporary's
-             * hold so the array is not stranded with an extra ref (which would
-             * leak under LSAN at shutdown). */
-            if (Z_REFCOUNTED_P(map_zv)) Z_DELREF_P(map_zv);
             ZVAL_UNDEF(map_zv);
         } else if (fetch_mode & SC_FETCH_ONE) {
             ZVAL_COPY_VALUE(arr, map_zv);
             ZVAL_UNDEF(map_zv);
         } else {
             sc_add_assoc_zval_ex(arr, column_name.c_str(), column_name.length(), map_zv);
-            if (Z_REFCOUNTED_P(map_zv)) Z_DELREF_P(map_zv);
             ZVAL_UNDEF(map_zv);
         }
         break;
