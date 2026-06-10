@@ -30,13 +30,19 @@
 #define sc_add_assoc_stringl_ex(a, b, c, d, e, f)               add_assoc_stringl_ex(a, b, c, d, e)
 #define sc_add_assoc_null_ex(a, b, c)               add_assoc_null_ex(a, b, c)
 
-static inline zval* sc_zend_read_property(zend_class_entry *class_ptr, zval *obj, const char *s, int len, int silent)
+/*
+ * rv must be a caller-owned zval that outlives the use of the returned
+ * pointer. zend_read_property returns a pointer INTO rv whenever the read
+ * is satisfied by a magic __get rather than a declared property slot, so a
+ * function-local rv (the previous design) left the caller dereferencing an
+ * expired stack frame for any subclass that defines __get.
+ */
+static inline zval* sc_zend_read_property(zend_class_entry *class_ptr, zval *obj, const char *s, int len, int silent, zval *rv)
 {
-    zval rv;
 #if PHP_VERSION_ID < 80000
-    return zend_read_property(class_ptr, obj, s, len, silent, &rv);
+    return zend_read_property(class_ptr, obj, s, len, silent, rv);
 #else
-    return zend_read_property(class_ptr, Z_OBJ_P(obj), s, len, silent, &rv);
+    return zend_read_property(class_ptr, Z_OBJ_P(obj), s, len, silent, rv);
 #endif
 }
 

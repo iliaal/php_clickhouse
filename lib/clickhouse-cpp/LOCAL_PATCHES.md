@@ -97,3 +97,20 @@ Used by `php_clickhouse::selectWithExternalData()` to honor
 `setSettings()` / per-call settings and to thread `query_id` through
 `system.query_log`. Exercised by `tests/095.phpt`, `tests/096.phpt`,
 `tests/097.phpt`.
+
+## clickhouse/client.cpp: `Client::Impl::ResetConnection` clears `inserting_` too late
+
+`ResetConnection()` set `inserting_ = false` only *after*
+`socket_factory_->connect(...)` returned. When the reconnect throws
+(server at `max_connections`, ephemeral-port exhaustion, DNS blip —
+all cases where the original dirty socket may still be healthy),
+`inserting_` stayed true. The very next `delete client` runs
+`Client::Impl::~Impl()`, which calls `EndInsert()` — sending the
+terminating empty block down the still-dirty wire and silently
+committing a partially-streamed insert that the caller never finished
+with `writeEnd()`.
+
+Patch: move `inserting_ = false;` to the first line of
+`ResetConnection()`, before the `connect()` call, so a failed
+reconnect still neutralizes the destructor's implicit `EndInsert()`.
+Exercised by `tests/123.phpt` (dirty-insert reconnect-failure recovery).

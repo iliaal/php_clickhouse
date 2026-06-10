@@ -94,16 +94,23 @@ static absl::uint128 parse_uint128_dec(const char *s, size_t len, const char *ou
     if (len == 0 || len > 39) {
         throw std::runtime_error(std::string(out_label) + " string is empty or too long");
     }
+    /* Check overflow BEFORE the multiply. The old post-multiply `next < v`
+     * test misses wraparound: `v * 10` can overflow past 2^128 and still
+     * land above the previous v, so a 39-digit value in [2^128, 10^39)
+     * slipped through wrapped (uint128 max is itself 39 digits). */
+    const absl::uint128 umax = ~absl::uint128(0);
+    const absl::uint128 umax_div10 = umax / 10;
+    const unsigned umax_mod10 = (unsigned)(umax % 10);
     absl::uint128 v = 0;
     for (size_t i = 0; i < len; ++i) {
         if (s[i] < '0' || s[i] > '9') {
             throw std::runtime_error(std::string(out_label) + " string contains non-digit characters");
         }
-        absl::uint128 next = v * 10 + absl::uint128((unsigned)(s[i] - '0'));
-        if (next < v) {
+        unsigned d = (unsigned)(s[i] - '0');
+        if (v > umax_div10 || (v == umax_div10 && d > umax_mod10)) {
             throw std::runtime_error(std::string(out_label) + " string overflows the 128-bit range");
         }
-        v = next;
+        v = v * 10 + absl::uint128(d);
     }
     return v;
 }
