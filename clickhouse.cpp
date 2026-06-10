@@ -124,6 +124,11 @@ struct clickhouse_object {
      * (ping_before_query) which the extension never sees and could not
      * re-apply a USE to. */
     ClientOptions client_options;
+#if PHP_VERSION_ID < 80000
+    /* PHP 7.4 has no zend_get_gc_buffer; get_gc must point *table at a
+     * buffer that outlives the call. Three slots for the three callbacks. */
+    zval gc_buf[3];
+#endif
     zend_object std;
 };
 
@@ -225,6 +230,7 @@ static void clickhouse_free_obj(zend_object *object)
  * open socket until request shutdown. Expose the three zvals so the
  * collector can traverse and reclaim the cycle (then free_obj runs).
  */
+#if PHP_VERSION_ID >= 80000
 static HashTable *clickhouse_get_gc(zend_object *object, zval **table, int *n)
 {
     clickhouse_object *obj = clickhouse_from_obj(object);
@@ -241,6 +247,29 @@ static HashTable *clickhouse_get_gc(zend_object *object, zval **table, int *n)
     zend_get_gc_buffer_use(buf, table, n);
     return zend_std_get_properties(object);
 }
+#else
+/* PHP 7.4: object passed as zval*, no zend_get_gc_buffer. Fill the
+ * per-object gc_buf (which outlives the call) and point *table at it.
+ * ZVAL_COPY_VALUE without an addref matches the 8.x buffer semantics:
+ * the collector only traverses the pointers, it doesn't own them. */
+static HashTable *clickhouse_get_gc(zval *object, zval **table, int *n)
+{
+    clickhouse_object *obj = Z_CLICKHOUSE_P(object);
+    int i = 0;
+    if (Z_TYPE(obj->progress_callback) != IS_UNDEF) {
+        ZVAL_COPY_VALUE(&obj->gc_buf[i++], &obj->progress_callback);
+    }
+    if (Z_TYPE(obj->profile_callback) != IS_UNDEF) {
+        ZVAL_COPY_VALUE(&obj->gc_buf[i++], &obj->profile_callback);
+    }
+    if (Z_TYPE(obj->verbose_callback) != IS_UNDEF) {
+        ZVAL_COPY_VALUE(&obj->gc_buf[i++], &obj->verbose_callback);
+    }
+    *table = obj->gc_buf;
+    *n = i;
+    return zend_std_get_properties(object);
+}
+#endif
 
 /*
  * Streaming row iterator state. blocks accumulate via OnData during
@@ -579,7 +608,6 @@ PHP_METHOD(ClickHouse, __construct)
     zval *this_obj;
     this_obj = getThis();
     bool host_configured = false;
-    bool port_configured = false;
     if (php_array_get_value(_ht, "host", value))
     {
         host_configured = true;
@@ -590,7 +618,6 @@ PHP_METHOD(ClickHouse, __construct)
 
     if (php_array_get_value(_ht, "port", value))
     {
-        port_configured = true;
         zend_long _p = zval_get_long(value);
         if (_p < 1 || _p > 65535) {
             sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
