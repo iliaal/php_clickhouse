@@ -6,17 +6,6 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 clickhouse_skip_if_no_server();
-// PHP 8.1+ deprecates implicit float→int coercion in array keys
-// (`[1.5 => "a"]`). The original test was authored under pre-8.1
-// semantics and the EXPECTF assumes keys round-trip as 0.1 / 1.5,
-// which never matched the coerced-to-int reality. Skip until the
-// test is rewritten to construct float keys via raw SQL map() and
-// the EXPECTF is updated to match the Float64 precision php_gcvt
-// actually emits.
-if (PHP_VERSION_ID >= 80100) {
-    echo "skip needs rewrite for PHP 8.1+ float-key deprecation semantics";
-    exit;
-}
 $prev = setlocale(LC_NUMERIC, 0);
 $got = setlocale(LC_NUMERIC, 'de_DE.UTF-8', 'de_DE.utf8', 'de_DE');
 setlocale(LC_NUMERIC, $prev);
@@ -46,11 +35,15 @@ $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
 $c->execute("DROP TABLE IF EXISTS test.fmap_t");
 $c->execute("CREATE TABLE test.fmap_t (m Map(Float64, String)) ENGINE = Memory");
-$c->insert("test.fmap_t", ["m"], [[[1.5 => "a", 0.1 => "b"]]]);
+// Build the float keys server-side via map(): a PHP array literal
+// `[1.5 => "a"]` coerces the float key to int (silently < 8.1, deprecated
+// after), so the keys must originate on the server to exercise the
+// Float64-key read decoder this test targets.
+$c->execute("INSERT INTO test.fmap_t VALUES (map(1.5, 'a', 0.1, 'b'))");
 
 $rows = $c->select("SELECT m FROM test.fmap_t");
 $keys = array_keys($rows[0]["m"]);
-sort($keys);
+sort($keys, SORT_STRING);
 echo "key 0: ", $keys[0], "\n";
 echo "key 1: ", $keys[1], "\n";
 
@@ -60,5 +53,5 @@ $c->execute("DROP TABLE test.fmap_t");
 --EXPECTF--
 locale: %s
 php sprintf 1.5: %s
-key 0: 0.1
+key 0: 0.10000000000000001
 key 1: 1.5
