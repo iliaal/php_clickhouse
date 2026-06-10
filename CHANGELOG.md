@@ -56,6 +56,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `getLogQueries()`, `ping()`, and `resetConnection()` enforce zero-argument
   arity (`ArgumentCountError` instead of a silently-ignored argument, or an
   arginfo/zpp fatal on debug builds).
+- `insert()` no longer crashes when a row passed by reference is reassigned to
+  a non-array mid-conversion (e.g. by a cell's `__toString`); the per-row build
+  rechecks the value is still an array and throws `ClickHouseException`.
+- `insertFromStream()` tolerates a trailing blank line terminated by CRLF
+  instead of materializing it as a spurious zero-column row and failing the
+  row-width check.
+- Server-side typed placeholder values passed by reference are dereferenced: a
+  by-ref `null` now reaches the server NULL sentinel instead of an empty string,
+  and a by-ref array is formatted as a list instead of stringified.
+- Placeholder arrays reject an empty-string key up front instead of falling
+  through to a confusing "does not appear in the SQL" error or building a
+  nameless server parameter.
+- `endpoints` config no longer injects a phantom `127.0.0.1:port` endpoint
+  (from the default `host` property) ahead of the supplied list when `host` is
+  left unset; the endpoints list is authoritative.
+- `write([])` is a no-op that leaves the open streaming insert intact, instead
+  of throwing and tearing down the connection (discarding already-sent blocks)
+  whenever a prior `write()` had marked the session dirty.
+- `selectStreamCallback()` emits the same `select_start` / `data_block` /
+  `select_finish` verbose events as `select()`; previously a verbose sink saw
+  nothing for streamed reads.
+- `DateTime64` and `Time64` render negative (pre-epoch / sub-second) values with
+  floor semantics: `DateTime64(-0.5)` is `1969-12-31 23:59:59.5` (not
+  `1970-01-01 00:00:00.5`), and `Time64(-0.5)` keeps its leading `-`.
+- Server error sanitization cuts at the earliest SQL marker rather than the
+  first one checked, closing a gap where a bound literal between two markers
+  could leak into the message.
+- A failed empty-insert close (`EndInsert()` itself throwing on the healthy-wire
+  recovery path in `insert()` / `insertFromStream()`) now falls back to a
+  connection reset instead of leaving the native client wedged in inserting
+  state.
 
 ## [0.8.5] - 2026-05-11
 

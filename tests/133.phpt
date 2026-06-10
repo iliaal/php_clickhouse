@@ -13,20 +13,26 @@ $ch = new ClickHouse(clickhouse_test_config());
 /* These zero-arg methods previously skipped zend_parse_parameters_none:
  * on a release build the extra arg was silently ignored, and on a debug
  * build the call aborted with an "Arginfo / zpp mismatch" fatal. They
- * must raise a catchable ArgumentCountError instead. */
+ * must now reject the extra arg.
+ *
+ * PHP 8 throws ArgumentCountError; PHP 7.4 only emits a Warning and
+ * returns NULL, so promote that Warning to a throw for the duration of
+ * the call to keep the catch arm uniform across the matrix. */
+set_error_handler(function ($_n, $msg) { throw new RuntimeException($msg); });
 foreach (["getServerInfo", "getCurrentEndpoint", "getStatistics", "getLogQueries", "ping", "resetConnection"] as $m) {
     try {
         $ch->$m("extra");
         echo "$m: no throw\n";
-    } catch (ArgumentCountError $e) {
-        echo "$m: ArgumentCountError\n";
+    } catch (Throwable $e) {
+        echo "$m: REJECTED\n";
     }
 }
+restore_error_handler();
 ?>
 --EXPECT--
-getServerInfo: ArgumentCountError
-getCurrentEndpoint: ArgumentCountError
-getStatistics: ArgumentCountError
-getLogQueries: ArgumentCountError
-ping: ArgumentCountError
-resetConnection: ArgumentCountError
+getServerInfo: REJECTED
+getCurrentEndpoint: REJECTED
+getStatistics: REJECTED
+getLogQueries: REJECTED
+ping: REJECTED
+resetConnection: REJECTED
