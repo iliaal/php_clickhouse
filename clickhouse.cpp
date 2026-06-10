@@ -2209,8 +2209,30 @@ static void do_select_into(zval *out, zval *this_obj,
              * would then receive the residual data and appear corrupted.
              * Reset to recover; the original throw still propagates. */
             tryResetConnectionReapplyDatabase(this_obj, obj, false);
+            /* Clear any callbacks (which captured stack locals from this frame)
+             * before the local Query is destroyed and the stack unwinds. */
+            query.OnData(SelectCallback{});
+            query.OnDataCancelable(SelectCancelableCallback{});
+            query.OnException(ExceptionCallback{});
+            query.OnProgress(ProgressCallback{});
+            query.OnServerLog(SelectServerLogCallback{});
+            query.OnProfileEvents(ProfileEventsCallback{});
+            query.OnProfile(ProfileCallback{});
             throw;
         }
+        /* Detach callbacks that captured stack variables (the OnData lambda
+         * captures 'out', local counters, etc. by reference). Clearing them
+         * before the local Query goes out of scope prevents the closures from
+         * being held (or potentially invoked) with dangling references after
+         * we return from this function. This avoids UAF-like issues visible
+         * under sanitizers at script shutdown or on subsequent client use. */
+        query.OnData(SelectCallback{});
+        query.OnDataCancelable(SelectCancelableCallback{});
+        query.OnException(ExceptionCallback{});
+        query.OnProgress(ProgressCallback{});
+        query.OnServerLog(SelectServerLogCallback{});
+        query.OnProfileEvents(ProfileEventsCallback{});
+        query.OnProfile(ProfileCallback{});
         auto t1 = std::chrono::steady_clock::now();
         obj->stats.elapsed_ms =
             std::chrono::duration<double, std::milli>(t1 - t0).count();
