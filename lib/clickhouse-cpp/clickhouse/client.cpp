@@ -132,13 +132,26 @@ namespace {
 // unpacked using the old and simple `switch` statement. While the standard way of doing do is
 // std::visit, using it is very inconvenient, it's semantics are often unclear and it lead to
 // bizarre and hard to parse errors.
-template <typename T>
-struct VariantIndexTag {};
+// Compute the index of T within the variant's alternatives without
+// constructing a std::variant in a constexpr non-type template argument.
+// MSVC 14.29 (VS2019, the toolset PHP 8.3 Windows builds use) rejects the
+// `std::variant<...>{Tag}.index()` aggregate form with C2440; a fold over
+// std::is_same_v is portable across GCC/Clang/MSVC.
+template <typename T, typename... Ts>
+constexpr size_t variant_index_of() {
+    constexpr bool matches[] = {std::is_same_v<T, Ts>...};
+    for (size_t i = 0; i < sizeof...(Ts); ++i) {
+        if (matches[i]) {
+            return i;
+        }
+    }
+    return sizeof...(Ts);
+}
 template <typename T, typename V>
 struct VariantIndex;
 template <typename T, typename... Ts>
 struct VariantIndex<T, std::variant<Ts...>>
-    : std::integral_constant<size_t, std::variant<VariantIndexTag<Ts>...>{VariantIndexTag<T>{}}.index()>
+    : std::integral_constant<size_t, variant_index_of<T, Ts...>()>
 {
 };
 

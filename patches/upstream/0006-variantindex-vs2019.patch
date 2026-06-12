@@ -1,0 +1,61 @@
+From: Ilia Alshanetsky <ilia@ilia.ws>
+Date: $(date +%Y-%m-%d)
+Subject: [PATCH 6/6] client: compute VariantIndex without aggregate std::variant construction (VS2019)
+
+The 2.6.2 `VariantIndex` trait derives its value from
+`std::variant<VariantIndexTag<Ts>...>{VariantIndexTag<T>{}}.index()` -- an
+aggregate-style construction of a `std::variant` evaluated as a constexpr
+non-type template argument.
+
+MSVC 14.29 (Visual Studio 2019, the toolset the PHP 8.3 Windows lane uses)
+rejects this with `C2440: cannot convert from 'initializer list' to
+'std::variant<...>'`, failing the whole extension build. VS2022 (PHP
+8.4/8.5) and GCC/Clang accept it, so the break only surfaced on the 8.3
+Windows binaries -- after the 0.8.6 tag was already published.
+
+Replace the construction with a `variant_index_of<T, Ts...>()` helper that
+folds over `std::is_same_v` and returns the first matching index. No
+std::variant is constructed; the result is identical and portable across
+GCC, Clang, and MSVC 14.29/14.3x. The now-unused `VariantIndexTag` helper
+is removed.
+
+Good candidate to propose upstream.
+
+---
+ clickhouse/client.cpp | 21 +++++++++++++++++----
+ 1 file changed, 17 insertions(+), 4 deletions(-)
+
+diff --git a/clickhouse/client.cpp b/clickhouse/client.cpp
+index 04d958b..1d9657f 100644
+--- a/clickhouse/client.cpp
++++ b/clickhouse/client.cpp
+@@ -132,13 +132,26 @@ namespace {
+ // unpacked using the old and simple `switch` statement. While the standard way of doing do is
+ // std::visit, using it is very inconvenient, it's semantics are often unclear and it lead to
+ // bizarre and hard to parse errors.
+-template <typename T>
+-struct VariantIndexTag {};
++// Compute the index of T within the variant's alternatives without
++// constructing a std::variant in a constexpr non-type template argument.
++// MSVC 14.29 (VS2019, the toolset PHP 8.3 Windows builds use) rejects the
++// `std::variant<...>{Tag}.index()` aggregate form with C2440; a fold over
++// std::is_same_v is portable across GCC/Clang/MSVC.
++template <typename T, typename... Ts>
++constexpr size_t variant_index_of() {
++    constexpr bool matches[] = {std::is_same_v<T, Ts>...};
++    for (size_t i = 0; i < sizeof...(Ts); ++i) {
++        if (matches[i]) {
++            return i;
++        }
++    }
++    return sizeof...(Ts);
++}
+ template <typename T, typename V>
+ struct VariantIndex;
+ template <typename T, typename... Ts>
+ struct VariantIndex<T, std::variant<Ts...>>
+-    : std::integral_constant<size_t, std::variant<VariantIndexTag<Ts>...>{VariantIndexTag<T>{}}.index()>
++    : std::integral_constant<size_t, variant_index_of<T, Ts...>()>
+ {
+ };
+ 
