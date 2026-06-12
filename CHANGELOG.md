@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.6] - 2026-06-11
+
 ### Changed
 
 - Vendored `clickhouse-cpp` bumped from v2.6.1 to v2.6.2.
@@ -93,6 +95,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recovery path in `insert()` / `insertFromStream()`) now falls back to a
   connection reset instead of leaving the native client wedged in inserting
   state.
+- Reading a `Map` column no longer leaves the result row holding a freed array:
+  an erroneous `Z_DELREF` after the row array took ownership of the map could
+  free it early, crashing (heap-use-after-free) when the row was later iterated,
+  `json_encode`d, or otherwise destroyed.
 
 ## [0.8.5] - 2026-05-11
 
@@ -781,7 +787,8 @@ own way.
   emits a clear "unsupported" warning. Full Windows build of the
   vendored zstd + absl + lz4 + cityhash is a separate project.
 
-[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.8.5...HEAD
+[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.8.6...HEAD
+[0.8.6]: https://github.com/iliaal/php_clickhouse/releases/tag/0.8.6
 [0.8.5]: https://github.com/iliaal/php_clickhouse/releases/tag/0.8.5
 [0.8.1]: https://github.com/iliaal/php_clickhouse/releases/tag/0.8.1
 [0.8.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.8.0
