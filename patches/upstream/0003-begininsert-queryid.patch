@@ -1,0 +1,29 @@
+From: Ilia Alshanetsky <ilia@ilia.ws>
+Date: $(date +%Y-%m-%d)
+Subject: [PATCH 3/5] client: pass full Query to SendQuery in BeginInsert (preserve query_id)
+
+`Client::Impl::BeginInsert(Query query)` was calling `SendQuery(query.GetText())`.
+
+The string constructor gives an empty default query id, so any id the caller supplied (via the two-argument form or by building a Query with settings/params) was lost. The INSERT would appear in `system.query_log` with an auto-generated id.
+
+The one-shot `Insert()` path was unaffected because it already passed the full Query object.
+
+Fix is a one-line change to preserve the caller's Query object.
+
+---
+ clickhouse/client.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/clickhouse/client.cpp b/clickhouse/client.cpp
+index 8e8e0f0..e0e0e0e 100644
+--- a/clickhouse/client.cpp
++++ b/clickhouse/client.cpp
+@@ -546,7 +546,7 @@ Block Client::Impl::BeginInsert(Query query) {
+         return true;
+     });
+
+-    SendQuery(query.GetText());
++    SendQuery(query);
+
+     // Wait for a data packet and return
+     uint64_t server_packet = 0;
