@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.7] - 2026-06-11
+
 ### Fixed
 
 - PHP 8.3 Windows builds: the vendored `clickhouse-cpp` 2.6.2 `VariantIndex`
@@ -802,7 +804,8 @@ own way.
   emits a clear "unsupported" warning. Full Windows build of the
   vendored zstd + absl + lz4 + cityhash is a separate project.
 
-[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.8.6...HEAD
+[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.8.7...HEAD
+[0.8.7]: https://github.com/iliaal/php_clickhouse/releases/tag/0.8.7
 [0.8.6]: https://github.com/iliaal/php_clickhouse/releases/tag/0.8.6
 [0.8.5]: https://github.com/iliaal/php_clickhouse/releases/tag/0.8.5
 [0.8.1]: https://github.com/iliaal/php_clickhouse/releases/tag/0.8.1
