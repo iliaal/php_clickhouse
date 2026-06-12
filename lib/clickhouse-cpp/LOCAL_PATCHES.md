@@ -103,3 +103,29 @@ call, so a failed reconnect still neutralizes the destructor's implicit
 `EndInsert()`.
 
 Exercised by `tests/123.phpt` (dirty-insert reconnect-failure recovery).
+
+## clickhouse/client.cpp: `VariantIndex` aggregate `std::variant` construction breaks VS2019
+
+The 2.6.2 `VariantIndex` trait computes its value from
+`std::variant<VariantIndexTag<Ts>...>{VariantIndexTag<T>{}}.index()` —
+an aggregate-style construction of a `std::variant` evaluated as a
+constexpr non-type template argument.
+
+MSVC 14.29 (Visual Studio 2019, the toolset the **PHP 8.3** Windows lane
+uses) rejects it with `C2440: cannot convert from 'initializer list' to
+'std::variant<...>'`, failing the whole extension build. VS2022 (PHP
+8.4/8.5) and GCC/Clang accept it, so the break surfaced only on the 8.3
+Windows binaries — and only in the `release-windows.yml` lane, which runs
+after the tag is published. 0.8.6 shipped with no PHP 8.3 Windows DLLs as
+a result.
+
+Patch: replace the construction with a `variant_index_of<T, Ts...>()`
+helper that folds over `std::is_same_v` and returns the first matching
+index. No `std::variant` is constructed; the result is identical and
+portable across GCC, Clang, and MSVC 14.29/14.3x. The now-unused
+`VariantIndexTag` helper is removed. Good candidate to propose upstream.
+
+The pre-tag gate now mirrors the release Windows matrix (`tests.yml`
+`windows-matrix` builds 8.3/8.4/8.5), so a vs16-only break blocks the
+release instead of surfacing post-tag. Exercised implicitly by every
+packet-loop test (`select`, `insert`, `ping`).

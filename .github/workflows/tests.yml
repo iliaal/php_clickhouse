@@ -204,7 +204,13 @@ jobs:
       - id: matrix
         uses: php/php-windows-builder/extension-matrix@v1
         with:
-          php-version-list: '8.4'
+          # Mirror the release-windows.yml matrix so the pre-tag gate builds
+          # every toolset we ship. PHP 8.3 pins the VS2019 (vs16) toolset;
+          # 8.4/8.5 use VS2022 (vs17). A clickhouse-cpp 2.6.2 construct that
+          # compiled only under vs17 shipped a Windows-binary-less 0.8.6
+          # because this gate built 8.4 alone -- keep all three so vs16
+          # breakage blocks the release instead of surfacing post-tag.
+          php-version-list: '8.3, 8.4, 8.5'
 
   windows:
     name: Windows ${{ matrix.php-version }} ${{ matrix.ts }} ${{ matrix.arch }}

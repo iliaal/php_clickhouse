@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- PHP 8.3 Windows builds: the vendored `clickhouse-cpp` 2.6.2 `VariantIndex`
+  trait constructed a `std::variant` inside a constexpr template argument,
+  which MSVC 14.29 (Visual Studio 2019, the PHP 8.3 Windows toolset) rejects
+  (`C2440`). It is now computed with a `std::is_same_v` fold that compiles
+  identically across GCC, Clang, and both MSVC toolsets, restoring the PHP 8.3
+  Windows DLLs that 0.8.6 shipped without.
+
+### Changed
+
+- CI: the pre-tag Windows gate now builds PHP 8.3/8.4/8.5, mirroring the
+  release Windows matrix, so a toolset-specific compile break blocks the
+  release instead of surfacing only after the tag is published.
+
 ## [0.8.6] - 2026-06-11
 
 ### Changed
