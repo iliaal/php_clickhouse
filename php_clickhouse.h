@@ -43,6 +43,14 @@ extern zend_module_entry clickhouse_module_entry;
 #define SC_FETCH_JSON_AS_ARRAY 16
 #define SC_FETCH_JSON_AS_OBJECT 32
 
+/* Per-cell value-shaping flags (how a single cell is rendered), as opposed
+ * to the result-shape flags (FETCH_ONE / KEY_PAIR / COLUMN) that restructure
+ * the whole result. The row-iterator and per-row callback always build an
+ * assoc row, so only the value-shaping subset is meaningful there; passing a
+ * shape flag to the per-cell convertToZval would corrupt the row (e.g.
+ * FETCH_ONE makes it emit a scalar). */
+#define SC_FETCH_VALUE_FLAGS (SC_FETCH_DATE_AS_STRINGS | SC_FETCH_JSON_AS_ARRAY | SC_FETCH_JSON_AS_OBJECT)
+
 #define CLICKHOUSE_RES_NAME "ClickHouse"
 #define CLICKHOUSE_EXCEPTION_NAME "ClickHouseException"
 

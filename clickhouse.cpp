@@ -589,6 +589,17 @@ PHP_METHOD(ClickHouse, __construct)
 
     zval *this_obj;
     this_obj = getThis();
+
+    /* Reject a re-run on an already-constructed object up front, before any
+     * property is written. An explicit second __construct() call (PHP allows
+     * it) used to overwrite host/port/database/user/compression and only then
+     * throw, leaving the live object's config mutated but its client stale. */
+    if (Z_CLICKHOUSE_P(this_obj)->client) {
+        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+            "ClickHouse object is already constructed", 0);
+        return;
+    }
+
     bool host_configured = false;
     if (php_array_get_value(_ht, "host", value))
     {
@@ -1924,6 +1935,18 @@ static void applyPlaceholders(string &sql, HashTable *params_ht, std::vector<Typ
             zval *iv;
             bool first = true;
             ZEND_HASH_FOREACH_VAL(aht, iv) {
+                ZVAL_DEREF(iv);
+                /* A nested array element would otherwise stringify to "Array"
+                 * (with a PHP notice) and slip through validatePlaceholderToken
+                 * as a bogus "Array" identifier. Reject arrays explicitly.
+                 * Objects are left to zvalGetStringOrThrow, which honors a
+                 * __toString() (and surfaces a throwing one), so Stringable
+                 * list elements still work. */
+                if (Z_TYPE_P(iv) == IS_ARRAY) {
+                    throw std::runtime_error(
+                        "Placeholder value for {" + name +
+                        "} is invalid: a list element must not be an array");
+                }
                 zend_string *coerced = zvalGetStringOrThrow(iv);
                 std::string tok;
                 try {
@@ -2637,10 +2660,20 @@ static void flushStreamBuf(smart_str *buf, zval *stream_zv)
     if (!stream) {
         throw std::runtime_error("selectToStream: stream was closed during the query");
     }
+    /* Resume on a short write rather than aborting the whole export: a
+     * stream wrapper can legitimately accept fewer bytes than requested in
+     * one call. Keep writing the remainder as long as each call makes
+     * forward progress; a non-positive return means no progress (real error
+     * or a would-block we can't satisfy here), so fail then. */
+    const char *data = ZSTR_VAL(buf->s);
     size_t n = ZSTR_LEN(buf->s);
-    ssize_t w = php_stream_write(stream, ZSTR_VAL(buf->s), n);
-    if (w < 0 || (size_t)w != n) {
-        throw std::runtime_error("selectToStream: short write to PHP stream");
+    size_t off = 0;
+    while (off < n) {
+        ssize_t w = php_stream_write(stream, data + off, n - off);
+        if (w <= 0) {
+            throw std::runtime_error("selectToStream: write to PHP stream failed");
+        }
+        off += (size_t)w;
     }
     smart_str_free(buf);
 }
@@ -5029,7 +5062,8 @@ PHP_METHOD(ClickHouse, selectStreamCallback)
                  * partially-built row_zv HashTable. */
                 try {
                     for (size_t col = 0; col < col_count; ++col) {
-                        convertToZval(&row_zv, block[col], row, col_names[col], 0, fetch_mode);
+                        convertToZval(&row_zv, block[col], row, col_names[col], 0,
+                                      fetch_mode & SC_FETCH_VALUE_FLAGS);
                     }
                 } catch (...) {
                     zval_ptr_dtor(&row_zv);
@@ -5128,7 +5162,8 @@ PHP_METHOD(ClickHouseRowIterator, current)
             const std::string &name = (col < iter->column_names.size())
                 ? iter->column_names[col]
                 : empty_name;
-            convertToZval(return_value, block[col], iter->row_idx, name, 0, iter->fetch_mode);
+            convertToZval(return_value, block[col], iter->row_idx, name, 0,
+                          iter->fetch_mode & SC_FETCH_VALUE_FLAGS);
         }
     } catch (const std::exception &e) {
         zval_ptr_dtor(return_value);
