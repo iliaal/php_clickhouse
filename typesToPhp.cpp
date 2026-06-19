@@ -164,6 +164,7 @@ struct AllowNullGuard {
 };
 static zend_long strict_zval_long(zval *z, const char *type_label)
 {
+    ZVAL_DEREF(z);
     switch (Z_TYPE_P(z)) {
         case IS_LONG:  return Z_LVAL_P(z);
         case IS_TRUE:  return 1;
@@ -222,6 +223,7 @@ static zend_long strict_zval_long(zval *z, const char *type_label)
  * range and an additional `0x` hex form. */
 static uint64_t strict_zval_u64(zval *z, const char *type_label)
 {
+    ZVAL_DEREF(z);
     switch (Z_TYPE_P(z)) {
         case IS_LONG: {
             zend_long n = Z_LVAL_P(z);
@@ -295,6 +297,7 @@ static uint64_t strict_zval_u64(zval *z, const char *type_label)
 
 static double strict_zval_double(zval *z, const char *type_label)
 {
+    ZVAL_DEREF(z);
     switch (Z_TYPE_P(z)) {
         case IS_LONG:  return (double)Z_LVAL_P(z);
         case IS_TRUE:  return 1.0;
@@ -337,12 +340,13 @@ static double strict_zval_double(zval *z, const char *type_label)
 
 static std::string strict_zval_string(zval *z, const char *type_label)
 {
+    ZVAL_DEREF(z);
     if (Z_TYPE_P(z) == IS_NULL) {
         if (g_allow_null_in_strict > 0) return std::string();
         throw std::runtime_error(
             std::string("null cannot be assigned to non-Nullable column ") + type_label);
     }
-    ZStrGuard sg(z);
+    ZStrGuard sg(z);  // throws if a __toString() left EG(exception) pending
     return std::string(sg.val(), sg.len());
 }
 
@@ -1253,14 +1257,28 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 value->Append(std::string(ZSTR_VAL(buf.s), ZSTR_LEN(buf.s)));
                 smart_str_free(&buf);
             } else if (Z_TYPE_P(v) == IS_STRING) {
-                /* Validate without keeping the decoded value. */
+                /* Validate the raw JSON text client-side so a malformed
+                 * string fails here with a clear error instead of mid-stream
+                 * in the server block parse. php_json_validate (8.3+) checks
+                 * without materializing the value tree; older PHP decodes and
+                 * discards. Clear any pending error state defensively (we pass
+                 * no THROW_ON_ERROR, so none is expected). */
+#if PHP_VERSION_ID >= 80300
+                if (!php_json_validate_ex(Z_STRVAL_P(v), Z_STRLEN_P(v), 0,
+                                          PHP_JSON_PARSER_DEFAULT_DEPTH)) {
+                    if (EG(exception)) zend_clear_exception();
+                    throw std::runtime_error("JSON insert: string value is not valid JSON");
+                }
+#else
                 zval probe;
                 if (php_json_decode(&probe, Z_STRVAL_P(v), Z_STRLEN_P(v),
                                     /*assoc=*/true, PHP_JSON_PARSER_DEFAULT_DEPTH) == FAILURE) {
                     zval_ptr_dtor(&probe);
+                    if (EG(exception)) zend_clear_exception();
                     throw std::runtime_error("JSON insert: string value is not valid JSON");
                 }
                 zval_ptr_dtor(&probe);
+#endif
                 value->Append(std::string(Z_STRVAL_P(v), Z_STRLEN_P(v)));
             } else if (Z_TYPE_P(v) == IS_NULL) {
                 value->Append(std::string("{}"));
@@ -1304,13 +1322,28 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
             ZVAL_DEREF(v);
             if (Z_TYPE_P(v) == IS_NULL && g_allow_null_in_strict > 0) {
                 value->Append(std::string("0.0.0.0"));
-            } else if (Z_TYPE_P(v) == IS_LONG) {
+            } else if (Z_TYPE_P(v) == IS_LONG || Z_TYPE_P(v) == IS_DOUBLE) {
                 /* Integer input matches ClickHouse's toIPv4(N): the value is
                  * the IP with the most-significant byte as the first octet
                  * (16909060 -> 1.2.3.4). Format to dotted-quad and reuse the
                  * validated string path rather than ColumnIPv4::Append(uint32),
-                 * whose host/network byte-order handling differs. */
-                zend_long n = Z_LVAL_P(v);
+                 * whose host/network byte-order handling differs. An integral
+                 * float is accepted too (consistent with the integer columns,
+                 * which take int + integral-double); a fractional float is
+                 * rejected. A string is always treated as a textual IP. */
+                zend_long n;
+                if (Z_TYPE_P(v) == IS_DOUBLE) {
+                    double d = Z_DVAL_P(v), intpart;
+                    if (std::isnan(d) || std::isinf(d) || std::modf(d, &intpart) != 0.0) {
+                        throw std::runtime_error("IPv4 float input must be an integral value");
+                    }
+                    if (d < 0.0 || d > (double)UINT32_MAX) {
+                        throw std::runtime_error("IPv4 integer out of range (0 .. 4294967295)");
+                    }
+                    n = (zend_long)d;
+                } else {
+                    n = Z_LVAL_P(v);
+                }
                 if (n < 0 || (uint64_t)n > UINT32_MAX) {
                     throw std::runtime_error("IPv4 integer out of range (0 .. 4294967295)");
                 }
@@ -1364,26 +1397,43 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     case Type::Code::DateTime64:
     {
         size_t precision = type->As<DateTime64Type>()->GetPrecision();
+        /* Bound the server-supplied precision before the scale loop: a
+         * precision >= 19 overflows the signed int64 scale (UB), and the
+         * read path already rejects precision > 9. */
+        if (precision > 9) {
+            throw std::runtime_error("DateTime64 precision out of spec range (0..9)");
+        }
         auto value = std::make_shared<ColumnDateTime64>(precision);
         int64_t scale = 1;
         for (size_t i = 0; i < precision; ++i) scale *= 10;
 
         ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
+            zval *v = array_value;
+            ZVAL_DEREF(v);
             /* Any string is treated as a formatted timestamp; the prior
              * dash-only gate let "abc" fall through zval_get_long to 0
              * (epoch). to_time_t_with_frac validates fully. Numeric
              * inputs go through strict_zval_long / strict_zval_double. */
-            if (Z_TYPE_P(array_value) == IS_STRING) {
+            if (Z_TYPE_P(v) == IS_STRING) {
                 auto [whole, frac] = to_time_t_with_frac(
-                    std::string(Z_STRVAL_P(array_value), Z_STRLEN_P(array_value)),
+                    std::string(Z_STRVAL_P(v), Z_STRLEN_P(v)),
                     precision, scale);
                 value->Append((int64_t)whole * scale + frac);
-            } else if (Z_TYPE_P(array_value) == IS_DOUBLE) {
-                double d = strict_zval_double(array_value, "DateTime64");
+            } else if (Z_TYPE_P(v) == IS_DOUBLE) {
+                /* A double's 52-bit mantissa cannot hold epoch * 10^precision
+                 * exactly once precision >= 7 (e.g. nanoseconds since 1970
+                 * exceed 2^52), so a float would silently round. Require the
+                 * integer-ticks or string form for sub-microsecond precision. */
+                if (precision >= 7) {
+                    throw std::runtime_error(
+                        "DateTime64 precision >= 7 cannot be set from a float without "
+                        "precision loss; pass an integer ticks value or a formatted string");
+                }
+                double d = strict_zval_double(v, "DateTime64");
                 value->Append((int64_t)(d * scale));
             } else {
-                value->Append((int64_t)strict_zval_long(array_value, "DateTime64") * scale);
+                value->Append((int64_t)strict_zval_long(v, "DateTime64") * scale);
             }
         }
         ZEND_HASH_FOREACH_END();
@@ -1417,21 +1467,31 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     case Type::Code::Time64:
     {
         size_t precision = type->As<Time64Type>()->GetPrecision();
+        if (precision > 9) {
+            throw std::runtime_error("Time64 precision out of spec range (0..9)");
+        }
         auto value = std::make_shared<ColumnTime64>(precision);
         int64_t scale = 1;
         for (size_t i = 0; i < precision; ++i) scale *= 10;
         ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
-            if (Z_TYPE_P(array_value) == IS_STRING) {
+            zval *v = array_value;
+            ZVAL_DEREF(v);
+            if (Z_TYPE_P(v) == IS_STRING) {
                 throw std::runtime_error(
                     "Time64 column inserts require numeric seconds; "
                     "string formatted-time input is not currently supported");
             }
-            if (Z_TYPE_P(array_value) == IS_DOUBLE) {
-                double d = strict_zval_double(array_value, "Time64");
+            if (Z_TYPE_P(v) == IS_DOUBLE) {
+                if (precision >= 7) {
+                    throw std::runtime_error(
+                        "Time64 precision >= 7 cannot be set from a float without "
+                        "precision loss; pass an integer ticks value");
+                }
+                double d = strict_zval_double(v, "Time64");
                 value->Append((int64_t)(d * scale));
             } else {
-                value->Append((int64_t)strict_zval_long(array_value, "Time64") * scale);
+                value->Append((int64_t)strict_zval_long(v, "Time64") * scale);
             }
         }
         ZEND_HASH_FOREACH_END();
@@ -1529,6 +1589,14 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
 
         auto value = std::make_shared<ColumnArray>(createColumn(item_type));
 
+        /* For scalar element types, reuse one child column across rows and
+         * Clear() its rows between them — one allocation total. ColumnTuple
+         * can't take this path: its Clear() drops the sub-columns (leaving a
+         * zero-arity tuple), so a reused tuple child is unusable after the
+         * first row. Build a fresh column per row only in that case. */
+        bool reuse_child = (item_type->GetCode() != Type::Code::Tuple);
+        ColumnRef child = reuse_child ? createColumn(item_type) : nullptr;
+
         ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
             if (Z_TYPE_P(array_value) != IS_ARRAY)
@@ -1536,12 +1604,13 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 throw std::runtime_error("The inserted data is not an array type");
             }
 
-            /* insertColumn returns a fresh column holding this row's
-             * elements; AppendAsColumn copies its rows into the array's
-             * flat data column, so no reusable child is needed. The prior
-             * child + Clear() pattern broke ColumnTuple, whose Clear()
-             * drops its sub-columns rather than emptying their rows. */
-            value->AppendAsColumn(insertColumn(item_type, array_value));
+            if (reuse_child) {
+                child->Append(insertColumn(item_type, array_value));
+                value->AppendAsColumn(child);
+                child->Clear();
+            } else {
+                value->AppendAsColumn(insertColumn(item_type, array_value));
+            }
         }
         ZEND_HASH_FOREACH_END();
 
@@ -2171,6 +2240,16 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         // per cell. Worst case: 1 byte sign + 39 digits + 1 '.' = 41.
         auto dec_type = columnRef->Type()->As<DecimalType>();
         size_t scale = dec_type ? dec_type->GetScale() : 0;
+        /* scale is server-declared and otherwise unbounded; the in-place
+         * pad/point insertion below writes up to ~scale bytes past the
+         * formatted digits into the fixed 64-byte buffer. ClickHouse
+         * Decimal128 caps scale at 38, so anything larger is either a
+         * Decimal256 (unsupported here) or a hostile/MITM server schema —
+         * reject before it can smash the stack. Mirrors the DateTime64
+         * precision>9 guard on this same read path. */
+        if (scale > 38) {
+            throw std::runtime_error("Decimal scale out of supported range (max 38)");
+        }
         Int128 raw = col->At(row);
         char buf[64];
         size_t l = format_int128_dec(raw, buf);

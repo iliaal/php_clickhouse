@@ -127,7 +127,7 @@ foreach ($ch->select("SELECT id, ts, tag FROM events ORDER BY id",
 * `Float32`, `Float64`
 * `Int8` … `Int64`, `UInt8` … `UInt64`
 * `Int128`, `UInt128` (round-trip as decimal strings; PHP integers are 64-bit)
-* `Bool` (reads as a PHP bool; accepts bool or int on write)
+* `Bool` (reads as a PHP bool; on write uses PHP truthiness, so pass a real bool or `0`/`1`. Note the **string** `"false"` is truthy and stores as `true`)
 * `IPv4` (write accepts a dotted-quad string or an integer matching `toIPv4()`), `IPv6` (dotted/colon string)
 * `JSON` (see [JSON columns](#json-columns) below)
 * `LowCardinality(String)`, `LowCardinality(FixedString(N))`, `LowCardinality(Nullable(String))`, `LowCardinality(Nullable(FixedString(N)))`
@@ -137,6 +137,8 @@ foreach ($ch->select("SELECT id, ts, tag FROM events ORDER BY id",
 * `String`
 * `Tuple` (read and write, including `Array(Tuple)`)
 * `UUID`
+
+**Write-side input coercion.** Numeric columns accept an int, an integral float, or a numeric string. String-shaped columns (`IPv4`/`IPv6`, `DateTime`/`DateTime64`) treat a PHP string as a *textual* representation (a dotted-quad/colon address, a `Y-m-d H:i:s` timestamp), not as a numeric form; pass the integer form as an int, not a numeric string. For `DateTime64`/`Time64` with precision >= 7 (sub-microsecond), pass integer ticks or a formatted string: a float can't represent nanosecond-since-epoch values exactly, so float input at that precision is rejected rather than silently rounded.
 
 ## Configuration reference
 
@@ -257,7 +259,12 @@ $ch->writeEnd();
 
 $ch->ping();          // returns true on success, throws on failure
 
-// Streaming reads (no full-result PHP array)
+// Streaming reads (no full-result PHP *row* array; rows are materialized
+// lazily as you iterate). Note: selectStream() buffers the raw result
+// blocks for the iterator's lifetime so it stays re-iterable (Countable,
+// rewind), so it does not reduce peak memory for a huge result. For a
+// genuinely streaming read that holds only one row at a time, use
+// selectStreamCallback().
 $iter = $ch->selectStream(string $sql, array $params = [],
                           string $query_id = "", array $settings = [],
                           int $fetch_mode = 0);

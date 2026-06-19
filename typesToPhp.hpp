@@ -16,15 +16,28 @@
   +----------------------------------------------------------------------+
 */
 #include <string>
+#include <stdexcept>
 
 /*
  * RAII wrapper for the zend_string returned by zval_get_string. Used at
  * PHP-to-C boundaries where the surrounding code can throw without
  * forcing every site to write try { ... } catch { release; throw; }.
+ *
+ * A throwing __toString() makes zval_get_string return "" with
+ * EG(exception) set; the constructor turns that into a C++ throw so the
+ * boundary catch routes to throwClickHouseError (which preserves the
+ * pending PHP exception) instead of silently using the corrupted "".
+ * On that failure zval_get_string returns the interned empty string, so
+ * skipping the release the throw-bypassed destructor would have done is
+ * harmless.
  */
 struct ZStrGuard {
     zend_string *s;
-    explicit ZStrGuard(zval *zv) : s(zval_get_string(zv)) {}
+    explicit ZStrGuard(zval *zv) : s(zval_get_string(zv)) {
+        if (UNEXPECTED(EG(exception))) {
+            throw std::runtime_error("exception while converting a value to string");
+        }
+    }
     ~ZStrGuard() { if (s) zend_string_release(s); }
     ZStrGuard(const ZStrGuard&) = delete;
     ZStrGuard& operator=(const ZStrGuard&) = delete;

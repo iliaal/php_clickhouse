@@ -5431,6 +5431,7 @@ PHP_METHOD(ClickHouseStatement, __construct)
     sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
         "ClickHouseStatement is constructed by ClickHouse::selectStatement(); the constructor is private",
         0);
+    return;
 }
 
 PHP_METHOD(ClickHouseStatement, count)
