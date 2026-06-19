@@ -755,7 +755,16 @@ ColumnRef createColumn(TypeRef type)
 
     case Type::Code::Tuple:
     {
-        throw std::runtime_error("can't support Tuple");
+        /* Build an empty ColumnTuple matching the field types so a Tuple
+         * can serve as the element column of Array(Tuple) on the write
+         * path. The depth guard above bounds recursion. */
+        auto tupleType = type->As<TupleType>()->GetTupleType();
+        std::vector<ColumnRef> columns;
+        columns.reserve(tupleType.size());
+        for (const auto &field : tupleType) {
+            columns.push_back(createColumn(field));
+        }
+        return std::make_shared<ColumnTuple>(columns);
     }
 
     case Type::Code::Void:
@@ -1519,7 +1528,6 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         }
 
         auto value = std::make_shared<ColumnArray>(createColumn(item_type));
-        auto child = createColumn(item_type);
 
         ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
@@ -1528,10 +1536,12 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 throw std::runtime_error("The inserted data is not an array type");
             }
 
-            child->Append(insertColumn(item_type, array_value));
-
-            value->AppendAsColumn(child);
-            child->Clear();
+            /* insertColumn returns a fresh column holding this row's
+             * elements; AppendAsColumn copies its rows into the array's
+             * flat data column, so no reusable child is needed. The prior
+             * child + Clear() pattern broke ColumnTuple, whose Clear()
+             * drops its sub-columns rather than emptying their rows. */
+            value->AppendAsColumn(insertColumn(item_type, array_value));
         }
         ZEND_HASH_FOREACH_END();
 

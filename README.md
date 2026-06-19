@@ -101,7 +101,7 @@ $ch->insert("events", ["id", "ts", "tag"], [
     [2, time(), "beta"],
 ]);
 
-// Filter by an in-memory list of IDs without bloating the SQL — the
+// Filter by an in-memory list of IDs without bloating the SQL. The
 // server reads `ext_ids` as a named temp table for this query only.
 $hits = $ch->selectWithExternalData(
     "SELECT id, tag FROM events WHERE id IN ext_ids",
@@ -135,7 +135,7 @@ foreach ($ch->select("SELECT id, ts, tag FROM events ORDER BY id",
 * `Point`, `Ring`, `Polygon`, `MultiPolygon` (geo)
 * `Nullable(T)`
 * `String`
-* `Tuple` (read and top-level write; `Array(Tuple)` writes are not supported)
+* `Tuple` (read and write, including `Array(Tuple)`)
 * `UUID`
 
 ## Configuration reference
@@ -268,7 +268,7 @@ $ch->selectStreamCallback(string $sql, callable $cb,
                           array $settings = [],
                           int $fetch_mode = 0);  // true per-row stream
 
-// Write rows straight to a PHP stream resource as TSV / CSV — bypasses
+// Write rows straight to a PHP stream resource as TSV / CSV, bypassing
 // per-row PHP array assembly and userland callbacks; cells are
 // formatted block-by-block in C++ and flushed to the stream. Returns
 // rows written. Formats: TabSeparated (alias TSV), TabSeparatedWithNames
@@ -365,7 +365,7 @@ Two placeholder syntaxes are supported in `select` / `execute`:
 
 - `{name}` is client-side identifier substitution. Two value shapes:
   - **Scalar** (string / int / float): coerces to a single token, validated as either an identifier (`[A-Za-z_][A-Za-z0-9_]*`, optionally db-qualified by one dot like `db.tbl`) or a numeric literal. Whitespace, commas, quotes, semicolons, backslashes, and other SQL meta-characters are rejected.
-  - **Array**: each element is validated as a single scalar token, then joined with `", "` for the SQL replacement. Use this for legitimate column lists; an element with internal whitespace or commas is still rejected. A scalar value containing commas is rejected — that ambiguity (single identifier vs. list) is the point of the array-shape API.
+  - **Array**: each element is validated as a single scalar token, then joined with `", "` for the SQL replacement. Use this for legitimate column lists; an element with internal whitespace or commas is still rejected. A scalar value containing commas is rejected; that ambiguity (single identifier vs. list) is the point of the array-shape API.
 - `{name:Type}` is a server-side typed parameter. The SQL text is passed through unchanged; the value is bound via `Query::SetParam` and the server quotes and parses it according to `Type`. Pass PHP arrays for `Array(T)` types; `null` becomes a server `NULL`.
 
 ```php
