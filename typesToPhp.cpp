@@ -2137,8 +2137,10 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
              * so the byte past the end is the next cell, not a NUL. PHP's
              * re2c JSON scanner needs a NUL terminator (json_decode always
              * gets a zend_string), so decode from a terminated copy. */
+            /* php_json_decode takes char* (not const) on PHP 7.4; &str[0]
+             * is a mutable, NUL-terminated pointer on every target. */
             std::string json_str(sv);
-            if (php_json_decode(&decoded, json_str.c_str(), json_str.size(), assoc,
+            if (php_json_decode(&decoded, &json_str[0], json_str.size(), assoc,
                                 PHP_JSON_PARSER_DEFAULT_DEPTH) == FAILURE)
             {
                 zval_ptr_dtor(&decoded);
