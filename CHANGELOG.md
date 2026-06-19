@@ -9,31 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `JSON` column type support. Inserts auto-detect by PHP type: an array or object is JSON-encoded, a string is stored as raw JSON text (validated client-side), and `null` becomes the empty object `{}` (including `Nullable(JSON)` rows). Reads return the raw JSON string by default, or decode to a nested associative array (`ClickHouse::JSON_AS_ARRAY`) or nested `stdClass` (`ClickHouse::JSON_AS_OBJECT`). Reading a `JSON` column requires `output_format_native_write_json_as_string = 1` on the session, since the vendored client only understands the string serialization.
-- `selectStream()` and `selectStreamCallback()` now accept a trailing `fetch_mode` argument (after `settings`), so the `fetch_mode` bitmask — including the new `JSON_AS_ARRAY` / `JSON_AS_OBJECT` flags and the existing `DATE_AS_STRINGS` — applies on the streaming read paths, not just `select()`.
-- `Bool` column read and write. Reads surface a PHP bool; writes accept a bool or an int.
-- `IPv4` and `IPv6` writes (both were read-only before). `IPv4` accepts a dotted-quad string or an integer using the same convention as ClickHouse's `toIPv4()` (16909060 inserts as 1.2.3.4); `IPv6` accepts a dotted/colon string. Both validate client-side and support `Nullable`.
-- `Array(Tuple(...))` writes. `Tuple` columns could already be read and written at the top level; nested inside an `Array` they previously threw on insert.
+- `JSON` column read and write. Inserts take a PHP array/object (encoded) or a raw JSON string; reads return the JSON string, or decode with `ClickHouse::JSON_AS_ARRAY` / `JSON_AS_OBJECT`. Reads need `output_format_native_write_json_as_string=1` on the session.
+- `Bool` column read and write (reads as a PHP bool; writes take a bool or int).
+- `IPv4` and `IPv6` writes (both were read-only); `IPv4` also accepts an integer matching ClickHouse `toIPv4()`. Both support `Nullable`.
+- `Array(Tuple(...))` writes; top-level `Tuple` already worked, nested in an `Array` it previously threw.
+- `selectStream()` and `selectStreamCallback()` take a trailing `fetch_mode`, so `DATE_AS_STRINGS` / `JSON_AS_ARRAY` / `JSON_AS_OBJECT` apply on the streaming reads too.
 
-### Security
+### Changed
 
-- Bounded the server-declared `scale` on the `Decimal` read path. A result column typed with a scale beyond 38 (a `Decimal256`, or a value supplied by a hostile or man-in-the-middle server) drove an in-place format past a fixed 64-byte stack buffer, a stack-smash triggerable by the first decoded row of a `select()`. Scales above 38 now throw, matching the existing `DateTime64` precision guard on the same path.
+- `Array(scalar)` inserts reuse one element column across rows again (a per-row-allocation regression from `Array(Tuple)` support); fresh-per-row now applies only to `Tuple` elements.
+- A streaming insert that is abandoned or interrupted finalizes whatever the server accepted instead of reconnecting to discard. Inserts are not transactional, so use insert deduplication if you need exactly-once.
 
 ### Fixed
 
-- A throwing `__toString()` on an insert cell no longer commits a corrupted empty value while leaving the PHP exception pending. The string conversion now surfaces the original exception, so the insert aborts cleanly and the client stays usable. This matches the placeholder path's existing behavior.
-- By-reference values are now dereferenced consistently across the type, settings, and config paths. Previously a reference cell nested inside a composite (`Array`, `Tuple`, `Nullable`, `Map`, `Enum`, `LowCardinality`, geometry, 128-bit, date/time) was read as `IS_REFERENCE`: at best it threw a misleading "array / object / resource cannot be assigned" error, and at worst it silently wrote a placeholder — a by-ref `null` in `Array(Nullable(Int32))` stored `0`, and in `Array(LowCardinality(Nullable(String)))` stored `""`. A by-reference settings value (e.g. `['key' => &$flag]`) serialized to `""` and the server rejected it; a by-reference constructor config value (`['compression' => &$x]`, by-ref `endpoints`) was mishandled (a by-ref `"zstd"` silently fell back to LZ4). All now dereference before the type/shape branch.
-- The Unix `config.m4` now validates `openssl/ssl.h` and the `ssl`/`crypto` libraries when `--enable-clickhouse-openssl` is requested, failing with a clear message instead of an opaque "openssl/ssl.h: No such file" compile error (matching the Windows `config.w32` checks).
-- `DateTime64` / `Time64` reject a float input at precision >= 7, where a double cannot represent the tick count exactly (silent rounding before); pass integer ticks or a formatted string. Both also bound the server-declared precision at 9 on insert, closing a signed-int64 overflow in the scale computation.
-- `IPv4` inserts accept an integral float (e.g. `16909060.0`), consistent with the integer columns; a fractional float is rejected.
+- `__construct()` rejects a re-run on an already-built object before touching any property, instead of overwriting config and then throwing.
+- A throwing `__toString()` on an insert cell surfaces its exception and aborts the insert cleanly, instead of committing an empty value with the exception left pending.
+- By-reference values dereference consistently across the type, settings, and config paths; a by-ref `null` in `Array(Nullable(T))` / `LowCardinality(Nullable(String))` no longer silently stores `0` / `""`, and a by-ref config value (e.g. `['compression' => &$x]`) is no longer mishandled.
+- A nested array element in a `{placeholder}` list is rejected instead of stringifying to the bogus identifier `Array`.
+- `isExists()` compares its arguments as string literals, so special-character table names work; injection stays neutralized by escaping.
+- `selectStream()` and `selectStreamCallback()` ignore result-shape flags (`FETCH_ONE` / `FETCH_KEY_PAIR` / `FETCH_COLUMN`) per row instead of corrupting the row (`FETCH_ONE` previously fataled the iterator).
+- `selectToStream()` resumes a short write instead of aborting the export.
+- `DateTime64` / `Time64` reject a lossy float at precision 7+, cap insert precision at 9, and bound the seconds-to-ticks and float-to-int64 conversions against overflow/UB.
+- `IPv4` inserts accept an integral float, consistent with the integer columns.
+- `config.m4` validates `openssl/ssl.h` and `ssl` / `crypto` when `--enable-clickhouse-openssl` is set, failing clearly instead of an opaque missing-header error (matching `config.w32`).
 
-### Changed
+### Security
 
-- For `Array(scalar)` inserts, restored a single reused element column across rows instead of allocating a fresh column per row (a regression from adding `Array(Tuple)` support); the per-row allocation now applies only to `Tuple` elements, where it is required.
-
-### Changed
-
-- A streaming insert that is abandoned or interrupted now finalizes whatever the server accepted instead of attempting a reconnect-to-discard. This covers both teardown without `writeEnd()` (script bailout, `unset()`, exception unwind) and a `write()` that throws mid-stream on a healthy wire (earlier blocks commit; only the rejected row is dropped). ClickHouse inserts are not transactional, so the old discard only dropped inserts small enough to sit in the server squash buffer; it was size-dependent and silently partial. Use insert deduplication if you need exactly-once. A genuinely dirty wire still reconnects, but for handle recovery, not rollback.
+- Bounded the server-declared `Decimal` scale on the read path; a scale above 38 drove an in-place format past a 64-byte stack buffer, a stack smash triggerable by a hostile/MITM server or a `Decimal256` column.
 
 ## [0.8.7] - 2026-06-11
 
