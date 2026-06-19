@@ -51,6 +51,26 @@ function clickhouse_skip_if_no_server(): void
     fclose($sock);
 }
 
+/**
+ * For use inside --SKIPIF-- sections after clickhouse_skip_if_no_server():
+ * skip when the server is too old to support the JSON column type (or has
+ * it disabled), so the JSON suite degrades cleanly on older containers.
+ */
+function clickhouse_skip_if_no_json(): void
+{
+    try {
+        $c = new ClickHouse(clickhouse_test_config());
+        $c->setSettings(["allow_experimental_json_type" => 1]);
+        $c->execute("CREATE DATABASE IF NOT EXISTS test");
+        $c->execute("DROP TABLE IF EXISTS test._json_probe");
+        $c->execute("CREATE TABLE test._json_probe (j JSON) ENGINE = Memory");
+        $c->execute("DROP TABLE test._json_probe");
+    } catch (\Throwable $e) {
+        print "skip JSON type not supported by server: " . $e->getMessage();
+        exit;
+    }
+}
+
 function clickhouse_tls_test_config(): array
 {
     $config = clickhouse_test_config();

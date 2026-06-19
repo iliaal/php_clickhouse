@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: 1abb4cb3aed42538a5407daf3cd854c5631e8c08 */
+ * Stub hash: 37308080466cc29a0674c7487357da0bc82e5797 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_ClickHouse___construct, 0, 0, 1)
 	ZEND_ARG_TYPE_INFO(0, connectParams, IS_ARRAY, 0)
@@ -148,6 +148,7 @@ ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_ClickHouse_selectStream, 0,
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, params, IS_ARRAY, 0, "[]")
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, query_id, IS_STRING, 0, "\"\"")
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, settings, IS_ARRAY, 0, "[]")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, fetch_mode, IS_LONG, 0, "0")
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_ClickHouse_selectStatement, 0, 1, ClickHouseStatement, 0)
@@ -163,6 +164,7 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_selectStreamCal
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, params, IS_ARRAY, 0, "[]")
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, query_id, IS_STRING, 0, "\"\"")
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, settings, IS_ARRAY, 0, "[]")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, fetch_mode, IS_LONG, 0, "0")
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_isExists, 0, 2, _IS_BOOL, 0)
@@ -433,6 +435,18 @@ static zend_class_entry *register_class_ClickHouse(void)
 	zend_string *const_FETCH_COLUMN_name = zend_string_init_interned("FETCH_COLUMN", sizeof("FETCH_COLUMN") - 1, 1);
 	zend_declare_typed_class_constant(class_entry, const_FETCH_COLUMN_name, &const_FETCH_COLUMN_value, ZEND_ACC_PUBLIC, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_LONG));
 	zend_string_release(const_FETCH_COLUMN_name);
+
+	zval const_JSON_AS_ARRAY_value;
+	ZVAL_LONG(&const_JSON_AS_ARRAY_value, 16);
+	zend_string *const_JSON_AS_ARRAY_name = zend_string_init_interned("JSON_AS_ARRAY", sizeof("JSON_AS_ARRAY") - 1, 1);
+	zend_declare_typed_class_constant(class_entry, const_JSON_AS_ARRAY_name, &const_JSON_AS_ARRAY_value, ZEND_ACC_PUBLIC, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_LONG));
+	zend_string_release(const_JSON_AS_ARRAY_name);
+
+	zval const_JSON_AS_OBJECT_value;
+	ZVAL_LONG(&const_JSON_AS_OBJECT_value, 32);
+	zend_string *const_JSON_AS_OBJECT_name = zend_string_init_interned("JSON_AS_OBJECT", sizeof("JSON_AS_OBJECT") - 1, 1);
+	zend_declare_typed_class_constant(class_entry, const_JSON_AS_OBJECT_name, &const_JSON_AS_OBJECT_value, ZEND_ACC_PUBLIC, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_LONG));
+	zend_string_release(const_JSON_AS_OBJECT_name);
 
 	zval property_host_default_value;
 	zend_string *property_host_default_value_str = zend_string_init("127.0.0.1", strlen("127.0.0.1"), 1);
