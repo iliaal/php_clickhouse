@@ -9,18 +9,22 @@
 
 Native PHP extension for [ClickHouse](https://clickhouse.com/), built on the official [ClickHouse/clickhouse-cpp](https://github.com/ClickHouse/clickhouse-cpp) v2.6.2 client. Speaks the native binary TCP protocol with LZ4 / ZSTD compression and optional TLS, picking up where [SeasX/SeasClick](https://github.com/SeasX/SeasClick) left off in 2020. 30-40% faster than HTTP-based clients on heavy workloads, with modern types (Date32, Time64, Decimal128, LowCardinality, Map, JSON), multi-endpoint failover, and structured exceptions.
 
+## 📖 Documentation
+
+**Full usage guide, data-type read/write reference, and configuration: [iliaal.github.io/php_clickhouse](https://iliaal.github.io/php_clickhouse/)**
+
+The docs site covers every supported type (what `insert()` accepts and what `select()` returns), `fetch_mode` flags, CSV/TSV streaming, placeholders, settings, observability, and the complete method list. This README is the quick start.
+
 ## Why this fork?
 
 [SeasX/SeasClick](https://github.com/SeasX/SeasClick) was the canonical native PHP ClickHouse extension and stopped accepting PRs in 2020. Several follow-up PRs there have been pending for years. This fork:
 
 - Renames the extension to `php_clickhouse` (module `clickhouse`, classes `ClickHouse` / `ClickHouseException`)
-- Upgrades the vendored client from artpaul-fork v1.x to the official ClickHouse/clickhouse-cpp v2.6.1
+- Upgrades the vendored client from artpaul-fork v1.x to the official ClickHouse/clickhouse-cpp v2.6.2
 - Adds Date32 / Time / Time64 / DateTime64 / Int128 / UInt128 / Decimal128 / LowCardinality / Map / JSON column types, multi-endpoint failover, ZSTD compression, query_id propagation, and TLS
 - Ships an updated test suite, CI, PIE-based packaging, and benchmarks
 
-The original `SeasClick` and `SeasClickException` class names continue to work as deprecated aliases.
-
-Method signatures, return types, and class properties are declared with PHP types via a stub-driven arginfo workflow (`clickhouse.stub.php` → `clickhouse_arginfo.h`). Reflection, IDE completion, and static analyzers (PHPStan, Psalm) see the typed surface without manual stubs.
+The original `SeasClick` and `SeasClickException` class names continue to work as deprecated aliases. Method signatures, return types, and class properties are declared with PHP types via a stub-driven arginfo workflow, so reflection, IDE completion, and static analyzers see the typed surface.
 
 ## 🚀 Install
 
@@ -101,350 +105,19 @@ $ch->insert("events", ["id", "ts", "tag"], [
     [2, time(), "beta"],
 ]);
 
-// Filter by an in-memory list of IDs without bloating the SQL. The
-// server reads `ext_ids` as a named temp table for this query only.
-$hits = $ch->selectWithExternalData(
-    "SELECT id, tag FROM events WHERE id IN ext_ids",
-    [["name" => "ext_ids",
-      "columns" => ["id" => "UInt32"],
-      "rows" => [[1], [42], [1337]]]]
-);
-
 foreach ($ch->select("SELECT id, ts, tag FROM events ORDER BY id",
                      [], ClickHouse::DATE_AS_STRINGS) as $row) {
     print_r($row);
 }
 ```
 
-## 📦 Supported data types
-
-* `Array(T)` including nested server-side placeholder values such as `Array(Array(UInt32))`
-* `Date`, `Date32`, `DateTime`, `DateTime64(N[, timezone])`
-* `Time`, `Time64(N)` (server side requires ClickHouse 25.x or later)
-* `Decimal`, `Decimal32`, `Decimal64`, `Decimal128(P, S)` (read/write as scaled-integer strings)
-* `Enum8`, `Enum16`
-* `FixedString(N)`
-* `Float32`, `Float64`
-* `Int8` … `Int64`, `UInt8` … `UInt64`
-* `Int128`, `UInt128` (round-trip as decimal strings; PHP integers are 64-bit)
-* `Bool` (reads as a PHP bool; on write uses PHP truthiness, so pass a real bool or `0`/`1`. Note the **string** `"false"` is truthy and stores as `true`)
-* `IPv4` (write accepts a dotted-quad string or an integer matching `toIPv4()`), `IPv6` (dotted/colon string)
-* `JSON` (see [JSON columns](#json-columns) below)
-* `LowCardinality(String)`, `LowCardinality(FixedString(N))`, `LowCardinality(Nullable(String))`, `LowCardinality(Nullable(FixedString(N)))`
-* `Map(K, V)` over scalar K and V (`String`, `Int8` through `Int64`, `UInt8` through `UInt64`, `Float32`, `Float64`, `UUID`) plus `LowCardinality(String)` keys and values. `Map(LowCardinality(K), V)` reads are not yet decoded by the vendored client; writes succeed and the data is queryable server side.
-* `Point`, `Ring`, `Polygon`, `MultiPolygon` (geo)
-* `Nullable(T)`
-* `String`
-* `Tuple` (read and write, including `Array(Tuple)`)
-* `UUID`
-
-**Write-side input coercion.** Numeric columns accept an int, an integral float, or a numeric string. String-shaped columns (`IPv4`/`IPv6`, `DateTime`/`DateTime64`) treat a PHP string as a *textual* representation (a dotted-quad/colon address, a `Y-m-d H:i:s` timestamp), not as a numeric form; pass the integer form as an int, not a numeric string. For `DateTime64`/`Time64` with precision >= 7 (sub-microsecond), pass integer ticks or a formatted string: a float can't represent nanosecond-since-epoch values exactly, so float input at that precision is rejected rather than silently rounded.
-
-## Configuration reference
-
-All keys go in the array passed to `new ClickHouse([...])`.
-
-### Connection
-
-| Key | Type | Default | Description |
-|---|---|---|---|
-| `host` | string | `127.0.0.1` | Server host |
-| `port` | int | `9000` | Native TCP port (or `9440` for TLS) |
-| `database` | string | `default` | Default database |
-| `user` | string | `default` | Username |
-| `passwd` | string | (empty) | Password |
-| `endpoints` | array | (none) | List of `[{host, port}, ...]` for round-robin failover. Tried in order on connect failure. |
-
-### Compression
-
-| Key | Type | Default | Description |
-|---|---|---|---|
-| `compression` | bool / string | `false` | `false`/`"none"` = uncompressed; `true`/`"lz4"` = LZ4 (fast); `"zstd"` = ZSTD (denser) |
-| `max_compression_chunk_size` | int | `65535` | Block size used by the compressor |
-
-### Timeouts and retry
-
-| Key | Type | Default | Description |
-|---|---|---|---|
-| `connect_timeout` | int (sec) | `5` | TCP connect deadline |
-| `connect_timeout_ms` | int (ms) | (none) | Sub-second connect deadline; overrides the seconds key when set |
-| `receive_timeout` | int (sec) | `0` | Read deadline (0 = no timeout) |
-| `receive_timeout_ms` | int (ms) | (none) | Sub-second read deadline; overrides the seconds key when set |
-| `send_timeout` | int (sec) | `0` | Write deadline |
-| `send_timeout_ms` | int (ms) | (none) | Sub-second write deadline; overrides the seconds key when set |
-| `retry_count` | int | `1` | Send retries on transient failure |
-| `retry_timeout` | int (sec) | `5` | Sleep between retries |
-| `tcp_nodelay` | bool | `true` | TCP_NODELAY |
-| `tcp_keepalive` | bool | `false` | TCP keepalive |
-| `tcp_keepalive_idle` | int (sec) | `60` | Idle time before first keepalive probe |
-| `tcp_keepalive_intvl` | int (sec) | `5` | Interval between probes |
-| `tcp_keepalive_cnt` | int | `3` | Failed probes before declaring dead |
-
-### TLS (build with `--enable-clickhouse-openssl`)
-
-| Key | Type | Default | Description |
-|---|---|---|---|
-| `ssl` | bool | `false` | Enable TLS |
-| `ssl_min_protocol_version` | string | `tls1.2` | Minimum protocol; one of `tls1.0`, `tls1.1`, `tls1.2`, `tls1.3` |
-| `ssl_skip_verify` | bool | `false` | Skip cert validation; dev only |
-| `ssl_use_default_ca` | bool | `true` | Trust the system CA bundle |
-| `ssl_ca_files` | string \| array | (none) | PEM CA file path(s) |
-| `ssl_ca_directory` | string | (none) | OpenSSL hashed-cert directory |
-
-Building without `--enable-clickhouse-openssl` and passing `ssl => true` raises `ClickHouseException` at construct time.
-
-## Methods
-
-```php
-$ch = new ClickHouse(array $config);
-
-// Schema / DDL
-$ch->execute(string $sql,
-             array $params = [],
-             string $query_id = "",
-             array $settings = []);
-
-// Read
-$rows = $ch->select(string $sql,
-                    array $params = [],
-                    int $fetch_mode = 0,
-                    string $query_id = "",
-                    array $settings = []);
-
-// Read with external in-memory tables sent alongside the query.
-// Each entry: ['name' => 'ext_x', 'columns' => ['c' => 'Type', ...],
-//              'rows' => [[...], [...], ...]]. The query body references
-// the external table by name (e.g. `WHERE id IN ext_ids`). Keeps the
-// SQL small when filtering by big lists; multiple externals per call.
-$rows = $ch->selectWithExternalData(string $sql,
-                                    array  $externals,
-                                    array  $params = [],
-                                    int    $fetch_mode = 0,
-                                    string $query_id = "",
-                                    array  $settings = []);
-
-// Bulk insert (entire dataset in one call)
-$ch->insert(string $table, array $columns, array $values,
-            string $query_id = "",
-            array $settings = []);
-
-// Same as insert(), but rows are associative arrays and the column list
-// is derived from the first row's keys.
-$ch->insertAssoc(string $table, array $rows,
-                 string $query_id = "",
-                 array $settings = []);
-
-// Stream-parse a TSV / CSV file (or any PHP stream resource) and insert
-// the rows in batches of $batch_rows. Bytes are parsed in C++; only
-// $batch_rows worth of per-column zvals exist at any time, so inputs
-// larger than memory work fine. Formats match selectToStream()'s set
-// (TabSeparated, TabSeparatedWithNames, CSV, CSVWithNames). Literal `\N`
-// in either format is the NULL marker; empty CSV cells become empty
-// strings. Returns rows inserted.
-$f = fopen("/tmp/events.csv", "rb");
-$n = $ch->insertFromStream(string $table, array $columns, mixed $stream,
-                           string $format = "TabSeparated",
-                           int    $batch_rows = 10000,
-                           string $query_id = "",
-                           array  $settings = []);
-fclose($f);
-
-// Streaming insert (open block, append, close)
-$ch->writeStart(string $table, array $columns,
-                string $query_id = "",
-                array $settings = []);
-$ch->write(array $values);
-$ch->write(array $more_values);
-$ch->writeEnd();
-
-$ch->ping();          // returns true on success, throws on failure
-
-// Streaming reads (no full-result PHP *row* array; rows are materialized
-// lazily as you iterate). Note: selectStream() buffers the raw result
-// blocks for the iterator's lifetime so it stays re-iterable (Countable,
-// rewind), so it does not reduce peak memory for a huge result. For a
-// genuinely streaming read that holds only one row at a time, use
-// selectStreamCallback().
-$iter = $ch->selectStream(string $sql, array $params = [],
-                          string $query_id = "", array $settings = [],
-                          int $fetch_mode = 0);
-foreach ($iter as $row) { /* ... */ }   // ClickHouseRowIterator: Iterator+Countable
-
-$ch->selectStreamCallback(string $sql, callable $cb,
-                          array $params = [], string $query_id = "",
-                          array $settings = [],
-                          int $fetch_mode = 0);  // true per-row stream
-
-// Write rows straight to a PHP stream resource as TSV / CSV, bypassing
-// per-row PHP array assembly and userland callbacks; cells are
-// formatted block-by-block in C++ and flushed to the stream. Returns
-// rows written. Formats: TabSeparated (alias TSV), TabSeparatedWithNames
-// (alias TSVWithNames), CSV, CSVWithNames. Dates emit as ISO strings;
-// Decimal / Int128 / UInt128 as decimal strings. NULL = `\N` (TSV) /
-// empty (CSV). Array / Tuple / Map columns are rejected.
-$f = fopen("/tmp/events.tsv", "wb");
-$n = $ch->selectToStream(string $sql, array $params, mixed $stream,
-                         string $format = "TabSeparated",
-                         string $query_id = "", array $settings = []);
-fclose($f);
-
-// smi2-style result wrapper: returns a ClickHouseStatement (Iterator,
-// Countable, ArrayAccess, JsonSerializable) carrying a per-call stats
-// snapshot. Use when you want fetchOne / fetchKeyPair / fetchColumn /
-// statistics() on the result, or want to keep stats around after
-// running other queries on the client. Plain $ch->select() is faster
-// when you just need the array.
-$stmt = $ch->selectStatement(string $sql, array $params = [],
-                             string $query_id = "", array $settings = []);
-foreach ($stmt as $row) { /* ... */ }
-$stmt[0]; count($stmt); json_encode($stmt);
-$stmt->fetchOne(); $stmt->fetchKeyPair(); $stmt->fetchColumn();
-$stmt->toArray(); $stmt->statistics();
-
-// Settings, observability, helpers
-$ch->setSettings(array $settings);     // client-wide; per-call overrides; chainable
-$ch->setSetting(string $key, mixed $value);  // single-key sugar, chainable
-$ch->setDatabase(string $database);    // USE on the server, updates default; chainable
-$ch->setProgressCallback(?callable $cb);
-$ch->setProfileCallback(?callable $cb);
-$ch->setVerbose(true);                 // JSON lifecycle lines on STDERR
-$ch->setVerbose(fn($e, $ctx) => ...);  // or custom sink: select_start /
-                                       // data_block / select_finish /
-                                       // execute_start / execute_finish /
-                                       // server_exception
-$ch->setVerbose(false);                // disable
-$stats = $ch->getStatistics();         // last query: rows, bytes, elapsed_ms, query_id
-
-$ch->resetConnection();
-$info = $ch->getServerInfo();          // name, version_*, revision, timezone, display_name
-$ep   = $ch->getCurrentEndpoint();     // {host, port} of the active endpoint, or null
-
-$ch->enableLogQueries(bool $enabled = true);
-$log = $ch->getLogQueries();           // returns and clears the buffer
-
-// DDL / introspection helpers
-$ch->isExists(string $database, string $table);
-$ch->showDatabases();
-$ch->showProcesslist();
-$ch->getServerVersion();
-$ch->databaseSize(?string $database = null);     // {bytes_on_disk, rows}
-$ch->tablesSize(?string $database = null);
-$ch->tableSize(string $table);                   // {rows, bytes_on_disk, partitions, modification_time}
-$ch->partitions(string $table);
-$ch->showTables(?string $database = null, ?string $like = null);
-$ch->showCreateTable(string $table);
-$ch->getServerUptime();                // seconds
-$ch->truncateTable(string $table);
-$ch->dropPartition(string $table, string $partition);
-```
-
-`fetch_mode` is a bitmask of `ClickHouse::FETCH_ONE`, `ClickHouse::FETCH_KEY_PAIR`, `ClickHouse::FETCH_COLUMN`, `ClickHouse::DATE_AS_STRINGS`, `ClickHouse::JSON_AS_ARRAY`, and `ClickHouse::JSON_AS_OBJECT`. `select`, `selectStream`, and `selectStreamCallback` all accept it (on the streaming methods it is the trailing argument, after `settings`).
-
-### JSON columns
-
-The `JSON` column type round-trips through PHP. **Reads require `output_format_native_write_json_as_string = 1`** on the session (set it via `setSettings()` or a per-query `settings` array); the vendored client only understands the string serialization, and a read without this setting fails with a protocol error.
-
-```php
-$ch->setSettings([
-    "allow_experimental_json_type"              => 1, // only needed to CREATE a JSON column
-    "output_format_native_write_json_as_string" => 1, // required to SELECT JSON
-]);
-
-// Insert: a PHP array or object is JSON-encoded; a string is stored as
-// raw JSON text (validated client-side); null becomes the empty object {}.
-$ch->insert("events", ["id", "payload"], [
-    [1, ["level" => "info", "tags" => ["a", "b"]]],
-    [2, '{"level":"warn"}'],
-]);
-
-// Read: raw JSON string by default.
-$ch->select("SELECT payload FROM events");
-
-// JSON_AS_ARRAY decodes to a nested associative array;
-// JSON_AS_OBJECT decodes to nested stdClass.
-$ch->select("SELECT payload FROM events", [], ClickHouse::JSON_AS_ARRAY);
-$ch->select("SELECT payload FROM events", [], ClickHouse::JSON_AS_OBJECT);
-```
-
-### Placeholders
-
-Two placeholder syntaxes are supported in `select` / `execute`:
-
-- `{name}` is client-side identifier substitution. Two value shapes:
-  - **Scalar** (string / int / float): coerces to a single token, validated as either an identifier (`[A-Za-z_][A-Za-z0-9_]*`, optionally db-qualified by one dot like `db.tbl`) or a numeric literal. Whitespace, commas, quotes, semicolons, backslashes, and other SQL meta-characters are rejected.
-  - **Array**: each element is validated as a single scalar token, then joined with `", "` for the SQL replacement. Use this for legitimate column lists; an element with internal whitespace or commas is still rejected. A scalar value containing commas is rejected; that ambiguity (single identifier vs. list) is the point of the array-shape API.
-- `{name:Type}` is a server-side typed parameter. The SQL text is passed through unchanged; the value is bound via `Query::SetParam` and the server quotes and parses it according to `Type`. Pass PHP arrays for `Array(T)` types; `null` becomes a server `NULL`.
-
-```php
-// Single-identifier substitution.
-$ch->select("SELECT * FROM {tbl}", ["tbl" => "users"]);
-
-// Column-list substitution via array value.
-$ch->select("SELECT {cols} FROM users",
-            ["cols" => ["id", "name", "email"]]);
-
-// Server-side typed parameters, no client-side quoting needed.
-$ch->select("SELECT * FROM users WHERE id IN ({ids:Array(UInt32)})",
-            ["ids" => [1, 2, 3]]);
-```
-
-### Settings
-
-`setSettings()` applies client-wide. The 5th argument on `select` / `insert` / `execute` / `writeStart` overrides per call. Both accept plain `string => string` pairs; PHP scalars are stringified for you.
-
-```php
-$ch->setSettings(["max_execution_time" => "30"]);
-
-// Per-call override.
-$ch->select("SELECT * FROM big_table",
-            [], 0, "",
-            ["max_execution_time" => "5",
-             "max_memory_usage"   => "1000000000"]);
-```
-
-### Statistics and progress
-
-```php
-$ch->setProgressCallback(function (array $p) {
-    fprintf(STDERR, "rows=%d bytes=%d\n", $p["rows"], $p["bytes"]);
-});
-
-$ch->select("SELECT count() FROM big_table");
-
-$stats = $ch->getStatistics();
-// rows_read, bytes_read, total_rows, written_rows, written_bytes,
-// blocks, rows_before_limit, applied_limit, elapsed_ms
-```
-
-### Query log
-
-`enableLogQueries(true)` turns on a per-client buffer that records each completed `select` / `insert` / `execute` / streaming `writeEnd`. Each entry is `{sql, query_id, elapsed_ms, rows_read, bytes_read, error_code, error_message}`. `sql` is capped before retention. `error_code` is `0` on success, the server error code on a `ServerException`, or `-1` on client/network failure. `getLogQueries()` returns the buffer and clears it.
-
-```php
-$ch->enableLogQueries(true);
-$ch->select("SELECT count() FROM users");
-$ch->insert("logins", ["user_id", "ts"], $batch);
-
-foreach ($ch->getLogQueries() as $q) {
-    fprintf(STDERR, "[%.1fms] %s\n", $q["elapsed_ms"], $q["sql"]);
-}
-```
-
-### Structured exceptions
-
-`ClickHouseException` carries three extra public properties:
-
-- `server_code`: ClickHouse error code (e.g. 159 = `TIMEOUT_EXCEEDED`). `0` for client-side errors.
-- `server_name`: server-reported exception name (e.g. `DB::Exception`). `null` for client-side errors.
-- `query_id`: the query id associated with the failed call, when one was supplied. `null` otherwise.
+Configuration keys, the full method list, per-type read/write rules, placeholders, settings, streaming, and observability all live in the **[documentation site](https://iliaal.github.io/php_clickhouse/)**.
 
 ## 📊 Benchmarks
 
 PHP 8.4.22 / ClickHouse 26.3.9.8 / localhost loopback / `Memory` table (no disk).
 
-Compared against [smi2/phpClickHouse](https://github.com/smi2/phpClickHouse), the most popular pure-PHP HTTP client.
-
-Each cell is total wall-clock seconds for `selectCount` queries plus a single bulk insert of `dataCount` rows.
+Compared against [smi2/phpClickHouse](https://github.com/smi2/phpClickHouse), the most popular pure-PHP HTTP client. Each cell is total wall-clock seconds for `selectCount` queries plus a single bulk insert of `dataCount` rows.
 
 | dataCount × selectCount × limit | phpClickHouse (HTTP) | php_clickhouse (uncompressed) | php_clickhouse (LZ4) | php_clickhouse (ZSTD) |
 |---|---:|---:|---:|---:|
@@ -483,7 +156,7 @@ The vendored compression libraries (`lib/clickhouse-cpp/contrib/lz4/`, `contrib/
 
 ## Credits
 
-`php_clickhouse` started as a fork of [SeasX/SeasClick](https://github.com/SeasX/SeasClick) by SeasX Group (`ahhhh.wang@gmail.com`). The original PR-4 work to add fetch modes landed in 2019 and the upstream maintainer hasn't accepted external PRs since. Independent re-vendoring, port to clickhouse-cpp v2.6.1, new types, TLS, and packaging are by Ilia Alshanetsky <ilia@ilia.ws>.
+`php_clickhouse` started as a fork of [SeasX/SeasClick](https://github.com/SeasX/SeasClick) by SeasX Group (`ahhhh.wang@gmail.com`). The original PR-4 work to add fetch modes landed in 2019 and the upstream maintainer hasn't accepted external PRs since. Independent re-vendoring, port to clickhouse-cpp v2.6.2, new types, TLS, and packaging are by Ilia Alshanetsky <ilia@ilia.ws>.
 
 ## Contributing
 

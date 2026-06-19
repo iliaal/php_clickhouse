@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>php_clickhouse documentation</title>
+<meta name="description" content="Native PHP extension for ClickHouse. Usage guide, data-type read/write reference, configuration, streaming, and the full method list.">
+<style>
+:root {
+  --bg: #0d1117; --panel: #161b22; --panel2: #1c2230; --border: #2a3140;
+  --fg: #e6edf3; --muted: #9aa7b4; --accent: #ffcc4d; --accent2: #7ee787;
+  --link: #6cb6ff; --code-bg: #11161e; --th: #1f6feb22; --warn: #f0a35e;
+  --mono: ui-monospace, "SFMono-Regular", "Menlo", "Consolas", monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #ffffff; --panel: #f6f8fa; --panel2: #eef1f5; --border: #d6dbe1;
+    --fg: #1f2328; --muted: #59636e; --accent: #b8860b; --accent2: #1a7f37;
+    --link: #0969da; --code-bg: #f6f8fa; --th: #ddf4ff; --warn: #9a6700;
+  }
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: 1rem; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font-family: var(--sans); line-height: 1.6; font-size: 16px;
+}
+a { color: var(--link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.layout { display: flex; max-width: 1280px; margin: 0 auto; }
+nav.side {
+  position: sticky; top: 0; align-self: flex-start; height: 100vh;
+  width: 250px; flex: 0 0 250px; overflow-y: auto; padding: 1.5rem 1rem;
+  border-right: 1px solid var(--border); background: var(--panel);
+}
+nav.side .brand { font-weight: 700; font-size: 1.15rem; margin-bottom: 0.25rem; }
+nav.side .brand .v { color: var(--muted); font-weight: 400; font-size: 0.8rem; }
+nav.side ul { list-style: none; padding: 0; margin: 0.75rem 0 0; }
+nav.side li { margin: 0.1rem 0; }
+nav.side a { color: var(--muted); display: block; padding: 0.18rem 0.5rem; border-radius: 6px; font-size: 0.92rem; }
+nav.side a:hover { background: var(--panel2); color: var(--fg); text-decoration: none; }
+nav.side a.sub { padding-left: 1.25rem; font-size: 0.86rem; }
+main { flex: 1 1 auto; min-width: 0; padding: 2rem 2.5rem 6rem; }
+h1 { font-size: 2rem; margin: 0 0 0.25rem; }
+h2 { font-size: 1.5rem; margin: 2.5rem 0 0.75rem; padding-top: 0.5rem; border-bottom: 1px solid var(--border); padding-bottom: 0.35rem; }
+h3 { font-size: 1.15rem; margin: 1.75rem 0 0.5rem; }
+.tagline { color: var(--muted); font-size: 1.05rem; margin-top: 0; }
+.pill { display: inline-block; background: var(--panel2); border: 1px solid var(--border); border-radius: 999px; padding: 0.1rem 0.6rem; font-size: 0.8rem; color: var(--muted); margin: 0 0.3rem 0.3rem 0; }
+code { font-family: var(--mono); background: var(--code-bg); padding: 0.1rem 0.35rem; border-radius: 5px; font-size: 0.88em; border: 1px solid var(--border); }
+pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px; padding: 1rem 1.1rem; overflow-x: auto; line-height: 1.5; }
+pre code { background: none; border: none; padding: 0; font-size: 0.85rem; }
+.tok-com { color: #8b949e; font-style: italic; }
+.tok-str { color: #a5d6ff; }
+.tok-var { color: #ffa657; }
+.tok-num, .tok-lit, .tok-prop { color: #79c0ff; }
+.tok-kw, .tok-tag { color: #ff7b72; }
+.tok-fn { color: #d2a8ff; }
+.tok-cls { color: #7ee787; }
+@media (prefers-color-scheme: light) {
+  .tok-com { color: #6e7781; }
+  .tok-str { color: #0a3069; }
+  .tok-var { color: #953800; }
+  .tok-num, .tok-lit, .tok-prop { color: #0550ae; }
+  .tok-kw, .tok-tag { color: #cf222e; }
+  .tok-fn { color: #8250df; }
+  .tok-cls { color: #1a7f37; }
+}
+table { border-collapse: collapse; width: 100%; margin: 0.75rem 0 1rem; font-size: 0.9rem; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--border); padding: 0.45rem 0.65rem; text-align: left; vertical-align: top; }
+th { background: var(--th); font-weight: 600; white-space: nowrap; }
+td code { white-space: nowrap; }
+.matrix td:first-child code { font-weight: 600; }
+.note { background: var(--panel2); border-left: 3px solid var(--accent); border-radius: 0 8px 8px 0; padding: 0.75rem 1rem; margin: 1rem 0; }
+.warn { border-left-color: var(--warn); }
+.note p { margin: 0.35rem 0; }
+.note p:first-child { margin-top: 0; } .note p:last-child { margin-bottom: 0; }
+.lede { font-size: 1.05rem; color: var(--fg); }
+.muted { color: var(--muted); }
+hr { border: none; border-top: 1px solid var(--border); margin: 3rem 0 1rem; }
+footer { color: var(--muted); font-size: 0.9rem; }
+.topbar { display: none; }
+@media (max-width: 900px) {
+  nav.side { display: none; }
+  main { padding: 1.25rem 1.1rem 4rem; }
+  .topbar { display: flex; align-items: center; gap: 0.6rem; padding: 0.8rem 1.1rem; border-bottom: 1px solid var(--border); background: var(--panel); position: sticky; top: 0; z-index: 5; }
+  .topbar .brand { font-weight: 700; }
+}
+.anchor { color: var(--muted); font-weight: 400; opacity: 0; margin-left: 0.4rem; font-size: 0.8em; }
+h2:hover .anchor, h3:hover .anchor { opacity: 1; }
+</style>
+</head>
+<body>
+<div class="topbar"><span class="brand">php_clickhouse</span><span class="muted">docs</span></div>
+<div class="layout">
+<nav class="side">
+  <div class="brand">php_clickhouse <span class="v">v0.8.7</span></div>
+  <div class="muted" style="font-size:0.82rem">Native ClickHouse client for PHP</div>
+  <ul>
+    <li><a href="#intro">Overview</a></li>
+    <li><a href="#install">Install</a></li>
+    <li><a href="#quickstart">Quick start</a></li>
+    <li><a href="#data-types">Data types</a></li>
+    <li><a href="#type-matrix" class="sub">Read/write matrix</a></li>
+    <li><a href="#coercion" class="sub">Write coercion</a></li>
+    <li><a href="#fetch-modes">Fetch modes</a></li>
+    <li><a href="#config">Configuration</a></li>
+    <li><a href="#config-connection" class="sub">Connection</a></li>
+    <li><a href="#config-compression" class="sub">Compression</a></li>
+    <li><a href="#config-timeouts" class="sub">Timeouts &amp; retry</a></li>
+    <li><a href="#config-tls" class="sub">TLS</a></li>
+    <li><a href="#methods">Methods</a></li>
+    <li><a href="#m-read" class="sub">Reading</a></li>
+    <li><a href="#m-insert" class="sub">Inserting</a></li>
+    <li><a href="#m-stream" class="sub">Streaming</a></li>
+    <li><a href="#m-statement" class="sub">Result wrapper</a></li>
+    <li><a href="#m-settings" class="sub">Settings &amp; obs.</a></li>
+    <li><a href="#m-ddl" class="sub">DDL helpers</a></li>
+    <li><a href="#json">JSON columns</a></li>
+    <li><a href="#streaming">CSV / TSV streaming</a></li>
+    <li><a href="#placeholders">Placeholders</a></li>
+    <li><a href="#settings">Settings</a></li>
+    <li><a href="#stats">Statistics &amp; progress</a></li>
+    <li><a href="#logging">Query log</a></li>
+    <li><a href="#exceptions">Exceptions</a></li>
+  </ul>
+  <div style="margin-top:1rem"><a href="https://github.com/iliaal/php_clickhouse">GitHub →</a></div>
+</nav>
+<main>
+
+<h1 id="intro">php_clickhouse</h1>
+<p class="tagline">Native PHP extension for ClickHouse, built on the official clickhouse-cpp v2.6.2 client.</p>
+<p class="lede">Speaks the native binary TCP protocol with LZ4 / ZSTD compression and optional TLS. This guide covers how to read and write every supported data type, configure the client, stream CSV/TSV, and use the full method surface. For install and benchmarks, see the <a href="https://github.com/iliaal/php_clickhouse">README</a>.</p>
+<p>
+  <span class="pill">PHP 7.4 – 8.5</span>
+  <span class="pill">native TCP protocol</span>
+  <span class="pill">LZ4 / ZSTD</span>
+  <span class="pill">TLS</span>
+  <span class="pill">multi-endpoint failover</span>
+</p>
+
+<h2 id="install">Install <a class="anchor" href="#install">#</a></h2>
+<p>Via <a href="https://github.com/php/pie">PIE</a> (the PHP Foundation's PECL successor):</p>
+<pre><code>pie install iliaal/php_clickhouse
+# with TLS:
+pie install iliaal/php_clickhouse --enable-clickhouse-openssl</code></pre>
+<p>Then add <code>extension=clickhouse.so</code> to your <code>php.ini</code>. Build-from-source instructions, platform support, and the Docker test-server recipe are in the <a href="https://github.com/iliaal/php_clickhouse#-install">README</a>.</p>
+
+<h2 id="quickstart">Quick start <a class="anchor" href="#quickstart">#</a></h2>
+<pre><code>&lt;?php
+$ch = new ClickHouse([
+    "host"        =&gt; "127.0.0.1",
+    "port"        =&gt; 9000,
+    "database"    =&gt; "test",
+    "user"        =&gt; "default",
+    "passwd"      =&gt; "",
+    "compression" =&gt; "lz4",   // or "zstd" / true / false
+]);
+
+$ch-&gt;execute("CREATE TABLE IF NOT EXISTS events (
+    id UInt32, ts DateTime64(3), tag LowCardinality(String)
+) ENGINE = Memory");
+
+$ch-&gt;insert("events", ["id", "ts", "tag"], [
+    [1, time(), "alpha"],
+    [2, time(), "beta"],
+]);
+
+// Filter by an in-memory list of IDs without bloating the SQL. The
+// server reads `ext_ids` as a named temp table for this query only.
+$hits = $ch-&gt;selectWithExternalData(
+    "SELECT id, tag FROM events WHERE id IN ext_ids",
+    [["name" =&gt; "ext_ids",
+      "columns" =&gt; ["id" =&gt; "UInt32"],
+      "rows" =&gt; [[1], [42], [1337]]]]
+);
+
+foreach ($ch-&gt;select("SELECT id, ts, tag FROM events ORDER BY id",
+                     [], ClickHouse::DATE_AS_STRINGS) as $row) {
+    print_r($row);
+}</code></pre>
+
+<h2 id="data-types">Data types <a class="anchor" href="#data-types">#</a></h2>
+<p>The extension maps ClickHouse column types to PHP values on both the write path (<code>insert()</code>, <code>insertAssoc()</code>, <code>write()</code>) and the read path (<code>select()</code> and the streaming readers). The matrix below is the authoritative per-type reference.</p>
+
+<h3 id="type-matrix">Read / write matrix <a class="anchor" href="#type-matrix">#</a></h3>
+<p>Each row gives what <code>insert()</code> accepts for a column of that type, what <code>select()</code> hands back, whether <code>Nullable(T)</code> is supported, and the behavior worth knowing. Unless noted, a <code>null</code> into a non-<code>Nullable</code> column is rejected, and a value of the wrong shape throws rather than silently coercing to <code>0</code>.</p>
+<table class="matrix">
+<thead><tr><th>ClickHouse type</th><th>Write accepts</th><th>Read returns</th><th>Nullable</th><th>Notes</th></tr></thead>
+<tbody>
+<tr><td><code>Int8</code> … <code>Int64</code></td><td>int, integral float, or numeric string; range-checked to the column width</td><td>PHP <code>int</code></td><td>yes</td><td>Out-of-range throws. A fractional float (<code>1.5</code>) or partial numeric string (<code>"12abc"</code>) is rejected.</td></tr>
+<tr><td><code>UInt8</code>, <code>UInt16</code></td><td>int ≥ 0, integral float, numeric string within width</td><td>PHP <code>int</code></td><td>yes</td><td>—</td></tr>
+<tr><td><code>UInt32</code></td><td>as above, plus a <code>"0x…"</code> hex string</td><td>PHP <code>int</code></td><td>yes</td><td>Hex must fully consume and fit in UInt32.</td></tr>
+<tr><td><code>UInt64</code></td><td>int ≥ 0, integral float, decimal string up to <code>UINT64_MAX</code>, or <code>"0x…"</code> hex</td><td>PHP <code>int</code> if ≤ 2<sup>63</sup>−1, otherwise a <strong>decimal string</strong></td><td>yes</td><td>Values above the signed range come back as strings to avoid collapsing to a negative int.</td></tr>
+<tr><td><code>Int128</code></td><td>int, or a signed decimal string in [−2<sup>127</sup>, 2<sup>127</sup>−1]</td><td><strong>decimal string</strong></td><td>yes</td><td>PHP ints are 64-bit; larger magnitudes need the string form.</td></tr>
+<tr><td><code>UInt128</code></td><td>int ≥ 0, or a decimal string up to 2<sup>128</sup>−1 (≤ 39 digits)</td><td><strong>decimal string</strong></td><td>yes</td><td>—</td></tr>
+<tr><td><code>Float32</code>, <code>Float64</code></td><td>int, float, or numeric string; <code>NaN</code>/<code>Inf</code> rejected</td><td>PHP <code>float</code></td><td>yes</td><td><code>Float32</code> round-trips at single precision.</td></tr>
+<tr><td><code>Decimal</code>, <code>Decimal32/64/128(P,S)</code></td><td>any value stringified and stored as a scaled decimal (e.g. <code>"12345.6789"</code>, <code>42</code>)</td><td><strong>string</strong> with the scale point inserted (<code>"12.34"</code>, <code>"0.0000000000"</code>)</td><td>yes</td><td>Scale capped at 38. <code>Decimal256</code> is not supported.</td></tr>
+<tr><td><code>String</code></td><td>any (objects via <code>__toString</code>); binary-safe</td><td>PHP <code>string</code> (binary-safe)</td><td>yes</td><td>A throwing <code>__toString</code> propagates the exception.</td></tr>
+<tr><td><code>FixedString(N)</code></td><td>string (≤ N bytes)</td><td>PHP <code>string</code> with <strong>trailing NULs trimmed</strong></td><td>yes</td><td>—</td></tr>
+<tr><td><code>UUID</code></td><td>hyphenated or bare-hex 32-char string</td><td>32-char <strong>bare-hex</strong> string (no hyphens)</td><td>yes</td><td>As a <code>Map</code> key/value, UUID reads back hyphenated.</td></tr>
+<tr><td><code>Bool</code></td><td><strong>PHP truthiness</strong> via <code>zend_is_true</code> (pass a real bool or <code>0</code>/<code>1</code>)</td><td>PHP <code>bool</code></td><td>yes</td><td>The string <code>"false"</code> is truthy and stores as <code>true</code>.</td></tr>
+<tr><td><code>IPv4</code></td><td>dotted-quad string, <strong>or</strong> an int / integral float matching <code>toIPv4(N)</code> (0 … 4294967295, MSB = first octet)</td><td>dotted-quad string</td><td>yes</td><td>Fractional float or out-of-range int throws.</td></tr>
+<tr><td><code>IPv6</code></td><td>dotted/colon string (validated by <code>inet_pton</code>)</td><td>canonical string (<code>"::1"</code>)</td><td>yes</td><td>—</td></tr>
+<tr><td><code>Date</code></td><td>int (epoch seconds) or <code>"YYYY-MM-DD"</code></td><td>int epoch, or <code>"YYYY-MM-DD"</code> with <code>DATE_AS_STRINGS</code></td><td>yes</td><td>Invalid calendar dates (<code>"2024-02-30"</code>) and trailing garbage are rejected.</td></tr>
+<tr><td><code>Date32</code></td><td>same as <code>Date</code>; supports pre-epoch (<code>-2208988800</code> → <code>"1900-01-01"</code>)</td><td>int epoch, or string with <code>DATE_AS_STRINGS</code></td><td>yes</td><td>—</td></tr>
+<tr><td><code>DateTime</code></td><td>int (epoch seconds) or <code>"YYYY-MM-DD HH:MM:SS"</code></td><td>int epoch, or string with <code>DATE_AS_STRINGS</code></td><td>yes</td><td>A numeric string is read as a textual timestamp, not a number.</td></tr>
+<tr><td><code>DateTime64(N[, tz])</code></td><td><strong>int = whole epoch seconds</strong>, or <code>"… HH:MM:SS.fff"</code>; float = fractional epoch seconds but <strong>rejected at N ≥ 7</strong></td><td>raw <strong>int ticks</strong> by default, or <code>"… HH:MM:SS.ffffff"</code> with <code>DATE_AS_STRINGS</code></td><td>yes</td><td>N capped at 9. A float can't hold nanosecond epochs exactly, so it's rejected past microseconds rather than rounded.</td></tr>
+<tr><td><code>Time</code></td><td><strong>int seconds-since-midnight only</strong> (string rejected)</td><td>int seconds, or <code>"HH:MM:SS"</code> (signed) with <code>DATE_AS_STRINGS</code></td><td>yes</td><td>Server needs ClickHouse 25.x or later.</td></tr>
+<tr><td><code>Time64(N)</code></td><td><strong>int seconds only</strong>; float OK at N &lt; 7, rejected at N ≥ 7; string rejected</td><td>raw int ticks, or <code>"HH:MM:SS.fff"</code> (sign-magnitude) with <code>DATE_AS_STRINGS</code></td><td>yes</td><td>N capped at 9.</td></tr>
+<tr><td><code>Enum8</code>, <code>Enum16</code></td><td>int (a declared value) or a string name (validated)</td><td>the <strong>enum name</strong> string</td><td>yes</td><td>An undeclared int or name throws.</td></tr>
+<tr><td><code>Array(T)</code></td><td>PHP list array of <code>T</code> cells</td><td>PHP list array</td><td>yes, as <code>Array(Nullable(T))</code></td><td>Multidimensional <code>Array(Array(T))</code> is rejected on write; reads of server-nested arrays work. <code>Array(Tuple)</code> writes are supported.</td></tr>
+<tr><td><code>Tuple(...)</code></td><td>PHP list array; arity must match the column</td><td>PHP positional list array</td><td>inner fields may be <code>Nullable</code></td><td>Arity mismatch throws. <code>Array(Tuple)</code> works.</td></tr>
+<tr><td><code>Map(K, V)</code></td><td>PHP assoc array per row</td><td>PHP assoc array (int or string keys)</td><td>—</td><td>Supported K/V set below.</td></tr>
+<tr><td><code>LowCardinality(String)</code> and <code>FixedString</code> / <code>Nullable</code> variants</td><td>string (or <code>null</code> in the <code>Nullable</code> forms)</td><td>string (or <code>null</code>)</td><td>only the <code>LC(Nullable(...))</code> forms</td><td>Only <code>String</code> / <code>FixedString</code> inner types; anything else throws.</td></tr>
+<tr><td><code>JSON</code></td><td>PHP <strong>array/object → JSON-encoded</strong>; <strong>string → raw JSON</strong> (validated client-side); <code>null</code> → <code>"{}"</code></td><td>raw JSON <strong>string</strong> by default; nested <strong>assoc array</strong> with <code>JSON_AS_ARRAY</code>; nested <strong>stdClass</strong> with <code>JSON_AS_OBJECT</code></td><td>yes, as <code>Nullable(JSON)</code></td><td>Reads require <code>output_format_native_write_json_as_string = 1</code>. See <a href="#json">JSON columns</a>.</td></tr>
+<tr><td><code>Point</code></td><td><code>[x, y]</code> (two numeric elements)</td><td><code>[x, y]</code> float pair</td><td>—</td><td>Server needs <code>allow_experimental_geo_types = 1</code>.</td></tr>
+<tr><td><code>Ring</code></td><td>array of points</td><td>array of points</td><td>—</td><td>—</td></tr>
+<tr><td><code>Polygon</code></td><td>array of rings</td><td>array of rings</td><td>—</td><td>—</td></tr>
+<tr><td><code>MultiPolygon</code></td><td>array of polygons</td><td>array of polygons</td><td>—</td><td>—</td></tr>
+</tbody>
+</table>
+
+<h4>Map key/value support</h4>
+<p>Both the read decoder and the write path accept these scalar key and value types: <code>String</code>, <code>Int8</code> … <code>Int64</code>, <code>UInt8</code> … <code>UInt64</code>, <code>Float32</code>, <code>Float64</code>, <code>UUID</code>. The write path additionally accepts <code>LowCardinality(String)</code> keys and values. UInt64 entries above 2<sup>63</sup>−1 come back as strings; UUID keys/values read back hyphenated.</p>
+<div class="note warn">
+<p><strong><code>Map(LowCardinality(K), V)</code> writes succeed but reads are not decoded</strong> by the vendored client. The data is queryable server-side, but a <code>SELECT</code> through this extension throws on the unsupported key type. Other types (<code>Int128</code>/<code>UInt128</code>, <code>Decimal</code>, <code>Date*</code>, <code>Bool</code>, <code>IPv4</code>/<code>IPv6</code>) are not valid <code>Map</code> keys or values here.</p>
+</div>
+
+<h4 id="coercion">Write-side coercion <a class="anchor" href="#coercion">#</a></h4>
+<p>Numeric columns (the integer, float, and decimal families) accept an int, an integral float, or a numeric string, and reject anything that doesn't fully parse as a number. The string-shaped columns are the exceptions worth memorizing:</p>
+<ul>
+<li><code>Date</code>, <code>DateTime</code>, <code>IPv4</code>, <code>IPv6</code> treat a PHP string as a <em>textual</em> representation (a <code>Y-m-d</code> date, a dotted-quad/colon address), not a numeric form. To pass the integer form, pass an actual int.</li>
+<li><code>Time</code> and <code>Time64</code> accept <strong>numeric seconds only</strong>; a <code>"HH:MM:SS"</code> string is rejected on write.</li>
+<li><code>DateTime64</code> / <code>Time64</code> at precision ≥ 7 (sub-microsecond) reject float input, since a float can't represent nanosecond-since-epoch values exactly. Pass integer ticks or a formatted string instead.</li>
+</ul>
+<p>Nested-type recursion (arrays, tuples, maps) is capped at depth 32.</p>
+
+<h2 id="fetch-modes">Fetch modes <a class="anchor" href="#fetch-modes">#</a></h2>
+<p><code>fetch_mode</code> is a bitmask combining the constants below. <code>select</code>, <code>selectStream</code>, <code>selectStreamCallback</code>, and <code>selectWithExternalData</code> all accept it. There are two categories: <strong>shape flags</strong> restructure the whole result, and <strong>value flags</strong> change how a single cell is rendered.</p>
+<table>
+<thead><tr><th>Constant</th><th>Value</th><th>Category</th><th>Effect</th></tr></thead>
+<tbody>
+<tr><td><code>ClickHouse::FETCH_ONE</code></td><td>1</td><td>shape</td><td>Return only the first cell of the first row, as a scalar (not an array).</td></tr>
+<tr><td><code>ClickHouse::FETCH_KEY_PAIR</code></td><td>2</td><td>shape</td><td>Build an assoc map from column 0 → column 1 (needs ≥ 2 columns; scalar key).</td></tr>
+<tr><td><code>ClickHouse::FETCH_COLUMN</code></td><td>8</td><td>shape</td><td>Return a flat list of just column 0 from each row.</td></tr>
+<tr><td><code>ClickHouse::DATE_AS_STRINGS</code></td><td>4</td><td>value</td><td>Date / DateTime / Time families emit formatted strings instead of int epoch/ticks.</td></tr>
+<tr><td><code>ClickHouse::JSON_AS_ARRAY</code></td><td>16</td><td>value</td><td>JSON cells decode to a nested assoc array (wins if both JSON bits are set).</td></tr>
+<tr><td><code>ClickHouse::JSON_AS_OBJECT</code></td><td>32</td><td>value</td><td>JSON cells decode to a nested <code>stdClass</code>.</td></tr>
+</tbody>
+</table>
+<div class="note">
+<p>On the streaming readers (<code>selectStream</code>, <code>selectStreamCallback</code>), <code>fetch_mode</code> is the <strong>trailing</strong> argument, after <code>settings</code>. The shape flags (<code>FETCH_ONE</code> / <code>FETCH_KEY_PAIR</code> / <code>FETCH_COLUMN</code>) are <strong>ignored</strong> there; the iterator always yields full rows. Only the value flags (<code>DATE_AS_STRINGS</code>, <code>JSON_AS_*</code>) take effect.</p>
+</div>
+
+<h2 id="config">Configuration <a class="anchor" href="#config">#</a></h2>
+<p>All keys go in the array passed to <code>new ClickHouse([...])</code>.</p>
+
+<h3 id="config-connection">Connection <a class="anchor" href="#config-connection">#</a></h3>
+<table>
+<thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td><code>host</code></td><td>string</td><td><code>127.0.0.1</code></td><td>Server host</td></tr>
+<tr><td><code>port</code></td><td>int</td><td><code>9000</code></td><td>Native TCP port (or <code>9440</code> for TLS)</td></tr>
+<tr><td><code>database</code></td><td>string</td><td><code>default</code></td><td>Default database</td></tr>
+<tr><td><code>user</code></td><td>string</td><td><code>default</code></td><td>Username</td></tr>
+<tr><td><code>passwd</code></td><td>string</td><td>(empty)</td><td>Password</td></tr>
+<tr><td><code>endpoints</code></td><td>array</td><td>(none)</td><td>List of <code>[{host, port}, ...]</code> for round-robin failover. Tried in order on connect failure.</td></tr>
+</tbody>
+</table>
+
+<h3 id="config-compression">Compression <a class="anchor" href="#config-compression">#</a></h3>
+<table>
+<thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td><code>compression</code></td><td>bool / string</td><td><code>false</code></td><td><code>false</code>/<code>"none"</code> = uncompressed; <code>true</code>/<code>"lz4"</code> = LZ4 (fast); <code>"zstd"</code> = ZSTD (denser)</td></tr>
+<tr><td><code>max_compression_chunk_size</code></td><td>int</td><td><code>65535</code></td><td>Block size used by the compressor</td></tr>
+</tbody>
+</table>
+
+<h3 id="config-timeouts">Timeouts and retry <a class="anchor" href="#config-timeouts">#</a></h3>
+<table>
+<thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td><code>connect_timeout</code></td><td>int (sec)</td><td><code>5</code></td><td>TCP connect deadline</td></tr>
+<tr><td><code>connect_timeout_ms</code></td><td>int (ms)</td><td>(none)</td><td>Sub-second connect deadline; overrides the seconds key when set</td></tr>
+<tr><td><code>receive_timeout</code></td><td>int (sec)</td><td><code>0</code></td><td>Read deadline (0 = no timeout)</td></tr>
+<tr><td><code>receive_timeout_ms</code></td><td>int (ms)</td><td>(none)</td><td>Sub-second read deadline; overrides the seconds key when set</td></tr>
+<tr><td><code>send_timeout</code></td><td>int (sec)</td><td><code>0</code></td><td>Write deadline</td></tr>
+<tr><td><code>send_timeout_ms</code></td><td>int (ms)</td><td>(none)</td><td>Sub-second write deadline; overrides the seconds key when set</td></tr>
+<tr><td><code>retry_count</code></td><td>int</td><td><code>1</code></td><td>Send retries on transient failure</td></tr>
+<tr><td><code>retry_timeout</code></td><td>int (sec)</td><td><code>5</code></td><td>Sleep between retries</td></tr>
+<tr><td><code>tcp_nodelay</code></td><td>bool</td><td><code>true</code></td><td>TCP_NODELAY</td></tr>
+<tr><td><code>tcp_keepalive</code></td><td>bool</td><td><code>false</code></td><td>TCP keepalive</td></tr>
+<tr><td><code>tcp_keepalive_idle</code></td><td>int (sec)</td><td><code>60</code></td><td>Idle time before first keepalive probe</td></tr>
+<tr><td><code>tcp_keepalive_intvl</code></td><td>int (sec)</td><td><code>5</code></td><td>Interval between probes</td></tr>
+<tr><td><code>tcp_keepalive_cnt</code></td><td>int</td><td><code>3</code></td><td>Failed probes before declaring dead</td></tr>
+</tbody>
+</table>
+
+<h3 id="config-tls">TLS <a class="anchor" href="#config-tls">#</a></h3>
+<p class="muted">Requires a build with <code>--enable-clickhouse-openssl</code>. Building without it and passing <code>ssl =&gt; true</code> raises <code>ClickHouseException</code> at construct time.</p>
+<table>
+<thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td><code>ssl</code></td><td>bool</td><td><code>false</code></td><td>Enable TLS</td></tr>
+<tr><td><code>ssl_min_protocol_version</code></td><td>string</td><td><code>tls1.2</code></td><td>Minimum protocol; one of <code>tls1.0</code>, <code>tls1.1</code>, <code>tls1.2</code>, <code>tls1.3</code></td></tr>
+<tr><td><code>ssl_skip_verify</code></td><td>bool</td><td><code>false</code></td><td>Skip cert validation; dev only</td></tr>
+<tr><td><code>ssl_use_default_ca</code></td><td>bool</td><td><code>true</code></td><td>Trust the system CA bundle</td></tr>
+<tr><td><code>ssl_ca_files</code></td><td>string | array</td><td>(none)</td><td>PEM CA file path(s)</td></tr>
+<tr><td><code>ssl_ca_directory</code></td><td>string</td><td>(none)</td><td>OpenSSL hashed-cert directory</td></tr>
+</tbody>
+</table>
+
+<h2 id="methods">Methods <a class="anchor" href="#methods">#</a></h2>
+<p>Every call signature is grouped below. <code>$params</code>, <code>$query_id</code>, and <code>$settings</code> mean the same thing everywhere: client-side / server-side <a href="#placeholders">placeholders</a>, an optional query id propagated to the server, and a per-call <a href="#settings">settings</a> override.</p>
+
+<h3 id="m-construct">Constructor &amp; DDL <a class="anchor" href="#m-construct">#</a></h3>
+<pre><code>$ch = new ClickHouse(array $config);
+
+// Run any statement that returns no result set (DDL, INSERT ... SELECT, etc.)
+$ch-&gt;execute(string $sql,
+             array $params = [],
+             string $query_id = "",
+             array $settings = []);
+
+$ch-&gt;ping();   // returns true on success, throws on failure</code></pre>
+
+<h3 id="m-read">Reading <a class="anchor" href="#m-read">#</a></h3>
+<pre><code>// Buffered read into a PHP array. $fetch_mode is the bitmask from "Fetch modes".
+$rows = $ch-&gt;select(string $sql,
+                    array $params = [],
+                    int $fetch_mode = 0,
+                    string $query_id = "",
+                    array $settings = []);
+
+// Read with external in-memory tables sent alongside the query.
+// Each entry: ['name' =&gt; 'ext_x', 'columns' =&gt; ['c' =&gt; 'Type', ...],
+//              'rows' =&gt; [[...], [...], ...]]. The query body references
+// the external table by name (e.g. `WHERE id IN ext_ids`). Keeps the
+// SQL small when filtering by big lists; multiple externals per call.
+$rows = $ch-&gt;selectWithExternalData(string $sql,
+                                    array  $externals,
+                                    array  $params = [],
+                                    int    $fetch_mode = 0,
+                                    string $query_id = "",
+                                    array  $settings = []);</code></pre>
+
+<h3 id="m-insert">Inserting <a class="anchor" href="#m-insert">#</a></h3>
+<pre><code>// Bulk insert (entire dataset in one call), rows as positional arrays
+// matching $columns.
+$ch-&gt;insert(string $table, array $columns, array $values,
+            string $query_id = "",
+            array $settings = []);
+
+// Same as insert(), but rows are associative arrays and the column list
+// is derived from the first row's keys.
+$ch-&gt;insertAssoc(string $table, array $rows,
+                 string $query_id = "",
+                 array $settings = []);</code></pre>
+
+<h3 id="m-stream">Streaming reads &amp; writes <a class="anchor" href="#m-stream">#</a></h3>
+<p>For datasets larger than memory, or when you want to pipe rows to/from a file. The CSV/TSV stream helpers are documented with examples under <a href="#streaming">CSV / TSV streaming</a>.</p>
+<pre><code>// Streaming insert: open a block, append rows, close. write() flushes
+// blocks to the server as you go.
+$ch-&gt;writeStart(string $table, array $columns,
+                string $query_id = "",
+                array $settings = []);
+$ch-&gt;write(array $values);
+$ch-&gt;write(array $more_values);
+$ch-&gt;writeEnd();
+
+// Parse a TSV / CSV stream and insert in batches of $batch_rows. Returns
+// rows inserted. See "CSV / TSV streaming".
+$ch-&gt;insertFromStream(string $table, array $columns, mixed $stream,
+                      string $format = "TabSeparated",
+                      int    $batch_rows = 10000,
+                      string $query_id = "",
+                      array  $settings = []);
+
+// Lazy read. selectStream() buffers raw result blocks for the iterator's
+// lifetime so it stays re-iterable (Countable, rewind); it does NOT reduce
+// peak memory for a huge result. For a genuinely streaming read holding one
+// row at a time, use selectStreamCallback(). $fetch_mode is the trailing arg.
+$iter = $ch-&gt;selectStream(string $sql, array $params = [],
+                          string $query_id = "", array $settings = [],
+                          int $fetch_mode = 0);
+foreach ($iter as $row) { /* ... */ }   // ClickHouseRowIterator: Iterator + Countable
+
+$ch-&gt;selectStreamCallback(string $sql, callable $cb,
+                          array $params = [], string $query_id = "",
+                          array $settings = [],
+                          int $fetch_mode = 0);  // true per-row stream
+
+// Write query rows straight to a PHP stream as TSV / CSV. Returns rows
+// written. See "CSV / TSV streaming".
+$ch-&gt;selectToStream(string $sql, array $params, mixed $stream,
+                    string $format = "TabSeparated",
+                    string $query_id = "", array $settings = []);</code></pre>
+
+<h3 id="m-statement">Result wrapper <a class="anchor" href="#m-statement">#</a></h3>
+<pre><code>// smi2-style result wrapper: returns a ClickHouseStatement (Iterator,
+// Countable, ArrayAccess, JsonSerializable) carrying a per-call stats
+// snapshot. Use it for fetchOne / fetchKeyPair / fetchColumn on the result,
+// or to keep stats around after running other queries. Plain $ch-&gt;select()
+// is faster when you just need the array.
+$stmt = $ch-&gt;selectStatement(string $sql, array $params = [],
+                             string $query_id = "", array $settings = []);
+foreach ($stmt as $row) { /* ... */ }
+$stmt[0]; count($stmt); json_encode($stmt);
+$stmt-&gt;fetchOne(); $stmt-&gt;fetchKeyPair(); $stmt-&gt;fetchColumn();
+$stmt-&gt;toArray(); $stmt-&gt;statistics();</code></pre>
+
+<h3 id="m-settings">Settings &amp; observability <a class="anchor" href="#m-settings">#</a></h3>
+<pre><code>$ch-&gt;setSettings(array $settings);            // client-wide; per-call overrides; chainable
+$ch-&gt;setSetting(string $key, mixed $value);  // single-key sugar, chainable
+$ch-&gt;setDatabase(string $database);          // USE on the server, updates default; chainable
+$ch-&gt;setProgressCallback(?callable $cb);
+$ch-&gt;setProfileCallback(?callable $cb);
+$ch-&gt;setVerbose(true);                 // JSON lifecycle lines on STDERR
+$ch-&gt;setVerbose(fn($e, $ctx) =&gt; ...);  // or custom sink
+$ch-&gt;setVerbose(false);                // disable
+$stats = $ch-&gt;getStatistics();         // last query: rows, bytes, elapsed_ms, query_id</code></pre>
+
+<h3 id="m-conn">Connection &amp; server info <a class="anchor" href="#m-conn">#</a></h3>
+<pre><code>$ch-&gt;resetConnection();
+$info = $ch-&gt;getServerInfo();          // name, version_*, revision, timezone, display_name
+$ep   = $ch-&gt;getCurrentEndpoint();     // {host, port} of the active endpoint, or null
+$ch-&gt;enableLogQueries(bool $enabled = true);
+$log = $ch-&gt;getLogQueries();           // returns and clears the buffer (see Query log)</code></pre>
+
+<h3 id="m-ddl">DDL &amp; introspection helpers <a class="anchor" href="#m-ddl">#</a></h3>
+<pre><code>$ch-&gt;isExists(string $database, string $table);
+$ch-&gt;showDatabases();
+$ch-&gt;showProcesslist();
+$ch-&gt;getServerVersion();
+$ch-&gt;databaseSize(?string $database = null);     // {bytes_on_disk, rows}
+$ch-&gt;tablesSize(?string $database = null);
+$ch-&gt;tableSize(string $table);                   // {rows, bytes_on_disk, partitions, modification_time}
+$ch-&gt;partitions(string $table);
+$ch-&gt;showTables(?string $database = null, ?string $like = null);
+$ch-&gt;showCreateTable(string $table);
+$ch-&gt;getServerUptime();                // seconds
+$ch-&gt;truncateTable(string $table);
+$ch-&gt;dropPartition(string $table, string $partition);</code></pre>
+
+<h2 id="json">JSON columns <a class="anchor" href="#json">#</a></h2>
+<p>The <code>JSON</code> column type round-trips through PHP.</p>
+<div class="note warn">
+<p><strong>Reads require <code>output_format_native_write_json_as_string = 1</code></strong> on the session (set it via <code>setSettings()</code> or a per-query <code>settings</code> array). The vendored client only understands the string serialization; a read without this setting fails with a protocol error.</p>
+</div>
+<pre><code>$ch-&gt;setSettings([
+    "allow_experimental_json_type"              =&gt; 1, // only needed to CREATE a JSON column
+    "output_format_native_write_json_as_string" =&gt; 1, // required to SELECT JSON
+]);
+
+// Insert: a PHP array or object is JSON-encoded; a string is stored as
+// raw JSON text (validated client-side); null becomes the empty object {}.
+$ch-&gt;insert("events", ["id", "payload"], [
+    [1, ["level" =&gt; "info", "tags" =&gt; ["a", "b"]]],
+    [2, '{"level":"warn"}'],
+]);
+
+// Read: raw JSON string by default.
+$ch-&gt;select("SELECT payload FROM events");
+
+// JSON_AS_ARRAY decodes to a nested associative array;
+// JSON_AS_OBJECT decodes to nested stdClass.
+$ch-&gt;select("SELECT payload FROM events", [], ClickHouse::JSON_AS_ARRAY);
+$ch-&gt;select("SELECT payload FROM events", [], ClickHouse::JSON_AS_OBJECT);</code></pre>
+
+<h2 id="streaming">CSV / TSV streaming <a class="anchor" href="#streaming">#</a></h2>
+<p>Two methods move rows directly between a ClickHouse table and a PHP stream resource, formatting or parsing the bytes in C++ so neither path builds a full PHP result array. Both accept these formats: <code>TabSeparated</code> (alias <code>TSV</code>), <code>TabSeparatedWithNames</code> (alias <code>TSVWithNames</code>), <code>CSV</code>, and <code>CSVWithNames</code>.</p>
+
+<h3>Reading: <code>selectToStream()</code></h3>
+<p>Writes query rows to a stream as TSV/CSV, block-by-block, and returns the number of rows written. Dates and datetimes emit ISO strings; <code>Decimal</code> / <code>Int128</code> / <code>UInt128</code> / <code>UUID</code> / <code>IPv4</code> / <code>IPv6</code> emit their string forms. <code>NULL</code> becomes <code>\N</code> in TSV and an unquoted <code>\N</code> in CSV (a real string equal to <code>"\N"</code> is quoted so it can't be misread as NULL).</p>
+<pre><code>$f = fopen("/tmp/events.tsv", "wb");
+$n = $ch-&gt;selectToStream(
+    "SELECT id, ts, tag FROM events ORDER BY id",
+    [], $f, "TabSeparatedWithNames"
+);
+fclose($f);
+echo "$n rows written\n";</code></pre>
+<div class="note warn">
+<p><strong>Composite and geo columns are rejected:</strong> <code>Array</code>, <code>Tuple</code>, <code>Map</code>, <code>Point</code>, <code>Ring</code>, <code>Polygon</code>, and <code>MultiPolygon</code> can't be unambiguously serialized to a flat text format, so <code>selectToStream()</code> throws naming the offending type. Use <code>select()</code> for those. (Nullable and LowCardinality wrappers around a streamable scalar are fine.)</p>
+</div>
+
+<h3>Writing: <code>insertFromStream()</code></h3>
+<p>Parses a TSV/CSV stream and inserts rows in batches of <code>$batch_rows</code> (default 10000), returning the number of rows inserted. Only one batch of per-column zvals exists at a time, so inputs larger than memory work. Cells arrive as strings and run through the same write coercion as <code>insert()</code> for each server-supplied column type, so a numeric column still needs a valid numeric string.</p>
+<pre><code>$f = fopen("/tmp/events.csv", "rb");
+$n = $ch-&gt;insertFromStream(
+    "events", ["id", "ts", "tag"], $f,
+    "CSVWithNames", 5000
+);
+fclose($f);
+echo "$n rows inserted\n";</code></pre>
+<ul>
+<li><strong>NULL marker:</strong> TSV uses the <code>\N</code> escape (a literal <code>\\N</code> round-trips as the two-byte string); CSV uses an unquoted literal <code>\N</code> cell. An empty CSV cell becomes an empty string, not NULL.</li>
+<li>A <code>\N</code> cell aimed at a non-<code>Nullable</code> column throws; reaching NULL needs a <code>Nullable(T)</code> destination.</li>
+<li>The <code>*WithNames</code> formats skip the first row as a header.</li>
+<li><code>batch_rows &lt; 1</code>, a non-stream argument, or an empty column list all throw.</li>
+</ul>
+
+<h2 id="placeholders">Placeholders <a class="anchor" href="#placeholders">#</a></h2>
+<p>Two placeholder syntaxes are supported in <code>select</code> / <code>execute</code>:</p>
+<ul>
+<li><code>{name}</code> is client-side identifier substitution. Two value shapes:
+  <ul>
+  <li><strong>Scalar</strong> (string / int / float): coerces to a single token, validated as either an identifier (<code>[A-Za-z_][A-Za-z0-9_]*</code>, optionally db-qualified by one dot like <code>db.tbl</code>) or a numeric literal. Whitespace, commas, quotes, semicolons, backslashes, and other SQL meta-characters are rejected.</li>
+  <li><strong>Array</strong>: each element is validated as a single scalar token, then joined with <code>", "</code> for the SQL replacement. Use this for legitimate column lists; an element with internal whitespace or commas is still rejected. A scalar value containing commas is rejected; that ambiguity (single identifier vs. list) is the point of the array-shape API.</li>
+  </ul>
+</li>
+<li><code>{name:Type}</code> is a server-side typed parameter. The SQL text is passed through unchanged; the value is bound via <code>Query::SetParam</code> and the server quotes and parses it according to <code>Type</code>. Pass PHP arrays for <code>Array(T)</code> types; <code>null</code> becomes a server <code>NULL</code>.</li>
+</ul>
+<pre><code>// Single-identifier substitution.
+$ch-&gt;select("SELECT * FROM {tbl}", ["tbl" =&gt; "users"]);
+
+// Column-list substitution via array value.
+$ch-&gt;select("SELECT {cols} FROM users",
+            ["cols" =&gt; ["id", "name", "email"]]);
+
+// Server-side typed parameters, no client-side quoting needed.
+$ch-&gt;select("SELECT * FROM users WHERE id IN ({ids:Array(UInt32)})",
+            ["ids" =&gt; [1, 2, 3]]);</code></pre>
+
+<h2 id="settings">Settings <a class="anchor" href="#settings">#</a></h2>
+<p><code>setSettings()</code> applies client-wide. The 5th argument on <code>select</code> / <code>insert</code> / <code>execute</code> / <code>writeStart</code> overrides per call. Both accept plain <code>string =&gt; string</code> pairs; PHP scalars are stringified for you.</p>
+<pre><code>$ch-&gt;setSettings(["max_execution_time" =&gt; "30"]);
+
+// Per-call override.
+$ch-&gt;select("SELECT * FROM big_table",
+            [], 0, "",
+            ["max_execution_time" =&gt; "5",
+             "max_memory_usage"   =&gt; "1000000000"]);</code></pre>
+
+<h2 id="stats">Statistics and progress <a class="anchor" href="#stats">#</a></h2>
+<pre><code>$ch-&gt;setProgressCallback(function (array $p) {
+    fprintf(STDERR, "rows=%d bytes=%d\n", $p["rows"], $p["bytes"]);
+});
+
+$ch-&gt;select("SELECT count() FROM big_table");
+
+$stats = $ch-&gt;getStatistics();
+// rows_read, bytes_read, total_rows, written_rows, written_bytes,
+// blocks, rows_before_limit, applied_limit, elapsed_ms</code></pre>
+<div class="note warn">
+<p>A progress or profile callback that throws unwinds the client's packet loop mid-stream. Call <code>resetConnection()</code> before reusing the client after a callback throws.</p>
+</div>
+
+<h2 id="logging">Query log <a class="anchor" href="#logging">#</a></h2>
+<p><code>enableLogQueries(true)</code> turns on a per-client buffer that records each completed <code>select</code> / <code>insert</code> / <code>execute</code> / streaming <code>writeEnd</code>. Each entry is <code>{sql, query_id, elapsed_ms, rows_read, bytes_read, error_code, error_message}</code>. <code>sql</code> is capped before retention. <code>error_code</code> is <code>0</code> on success, the server error code on a <code>ServerException</code>, or <code>-1</code> on client/network failure. <code>getLogQueries()</code> returns the buffer and clears it.</p>
+<pre><code>$ch-&gt;enableLogQueries(true);
+$ch-&gt;select("SELECT count() FROM users");
+$ch-&gt;insert("logins", ["user_id", "ts"], $batch);
+
+foreach ($ch-&gt;getLogQueries() as $q) {
+    fprintf(STDERR, "[%.1fms] %s\n", $q["elapsed_ms"], $q["sql"]);
+}</code></pre>
+
+<h2 id="exceptions">Structured exceptions <a class="anchor" href="#exceptions">#</a></h2>
+<p><code>ClickHouseException</code> carries three extra public properties:</p>
+<ul>
+<li><code>server_code</code>: ClickHouse error code (e.g. 159 = <code>TIMEOUT_EXCEEDED</code>). <code>0</code> for client-side errors.</li>
+<li><code>server_name</code>: server-reported exception name (e.g. <code>DB::Exception</code>). <code>null</code> for client-side errors.</li>
+<li><code>query_id</code>: the query id associated with the failed call, when one was supplied. <code>null</code> otherwise.</li>
+</ul>
+
+<hr>
+<footer>
+<p>php_clickhouse is built on the official <a href="https://github.com/ClickHouse/clickhouse-cpp">ClickHouse/clickhouse-cpp</a> v2.6.2 client. PHP wrapper licensed under <a href="http://www.php.net/license/3_01.txt">PHP-3.01</a>. By Ilia Alshanetsky.</p>
+<p><a href="https://github.com/iliaal/php_clickhouse">GitHub</a> • <a href="https://github.com/iliaal/php_clickhouse#-install">Install</a> • <a href="https://ilia.ws">Blog</a></p>
+</footer>
+
+</main>
+</div>
+<script>
+(function () {
+  var KW = new Set("abstract and array as break callable case catch class clone const continue declare default do echo else elseif empty enddeclare endfor endforeach endif endswitch endwhile enum extends final finally fn for foreach function global goto if implements include include_once instanceof insteadof interface isset list match namespace new or print private protected public readonly require require_once return static switch throw trait try unset use var while xor yield".split(" "));
+  var LIT = new Set("true false null TRUE FALSE NULL STDERR STDOUT STDIN PHP_INT_MAX PHP_INT_MIN PHP_VERSION_ID".split(" "));
+  function esc(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+  var RE = /(<\?php|<\?=|\?>)|(\/\/[^\n]*)|('(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*")|(\$[A-Za-z_]\w*)|(\b\d+\.?\d*\b)|([A-Za-z_]\w*)/g;
+  function hl(src) {
+    var out = "", last = 0, m;
+    while ((m = RE.exec(src))) {
+      var gap = src.slice(last, m.index);
+      out += esc(gap);
+      last = RE.lastIndex;
+      var gapTrim = gap.replace(/\s+$/, "");
+      if (m[1]) out += '<span class="tok-tag">' + esc(m[1]) + '</span>';
+      else if (m[2]) out += '<span class="tok-com">' + esc(m[2]) + '</span>';
+      else if (m[3]) out += '<span class="tok-str">' + esc(m[3]) + '</span>';
+      else if (m[4]) out += '<span class="tok-var">' + esc(m[4]) + '</span>';
+      else if (m[5]) out += '<span class="tok-num">' + esc(m[5]) + '</span>';
+      else if (m[6]) {
+        var id = m[6], cls, callish = /^\s*\(/.test(src.slice(last));
+        if (KW.has(id)) cls = "tok-kw";
+        else if (LIT.has(id)) cls = "tok-lit";
+        else if (gapTrim.slice(-2) === "->" || gapTrim.slice(-2) === "::") cls = callish ? "tok-fn" : "tok-prop";
+        else if (callish) cls = "tok-fn";
+        else if (/^[A-Z]/.test(id)) cls = "tok-cls";
+        else cls = "tok-id";
+        out += cls === "tok-id" ? esc(id) : '<span class="' + cls + '">' + esc(id) + '</span>';
+      }
+    }
+    out += esc(src.slice(last));
+    return out;
+  }
+  document.querySelectorAll("pre > code").forEach(function (c) { c.innerHTML = hl(c.textContent); });
+})();
+</script>
+</body>
+</html>
