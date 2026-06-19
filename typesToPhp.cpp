@@ -838,6 +838,7 @@ static ColumnRef appendUIntColumnWithHex(HashTable *values_ht,
     auto value = std::make_shared<TCol>();
     zval *array_value;
     ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
+        ZVAL_DEREF(array_value);
         if (Z_TYPE_P(array_value) == IS_STRING && Z_STRLEN_P(array_value) >= 3 &&
             *Z_STRVAL_P(array_value) == '0' &&
             (*(Z_STRVAL_P(array_value) + 1) == 'x' || *(Z_STRVAL_P(array_value) + 1) == 'X')) {
@@ -909,6 +910,7 @@ static ColumnRef appendEnumColumn(TypeRef type, HashTable *values_ht)
     }
     zval *array_value;
     ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
+        ZVAL_DEREF(array_value);
         if (Z_TYPE_P(array_value) == IS_NULL) {
             if (g_allow_null_in_strict <= 0) {
                 throw std::runtime_error(
@@ -945,6 +947,7 @@ static ColumnRef appendDateColumn(HashTable *values_ht, bool is_date)
     zval *array_value;
     const char *type_label = is_date ? "Date" : "DateTime";
     ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
+        ZVAL_DEREF(array_value);
         /* Any string is treated as a formatted date/datetime. The prior
          * dash-only gate routed dashless strings through zval_get_long,
          * which silently coerced "abc" to 0 and landed it as the epoch.
@@ -972,6 +975,7 @@ static ColumnRef appendLowCardinalityColumn(HashTable *values_ht, std::shared_pt
 {
     zval *array_value;
     ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
+        ZVAL_DEREF(array_value);
         if constexpr (nullable) {
             if (Z_TYPE_P(array_value) == IS_NULL) {
                 value->Append(std::nullopt);
@@ -1010,6 +1014,7 @@ static ColumnRef appendMapColumn(HashTable *values_ht, KFn extract_key, VFn extr
     std::vector<std::pair<K, V>> entries;
     zval *array_value;
     ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
+        ZVAL_DEREF(array_value);
         if (Z_TYPE_P(array_value) != IS_ARRAY) {
             throw std::runtime_error("Map row must be a PHP array");
         }
@@ -1030,6 +1035,7 @@ static ColumnRef appendMapColumn(HashTable *values_ht, KFn extract_key, VFn extr
 // insert path; used by Map(*, UUID) value extraction.
 static UUID phpToUUID(zval *zv)
 {
+    ZVAL_DEREF(zv);
     if (Z_TYPE_P(zv) == IS_NULL) {
         if (g_allow_null_in_strict <= 0) {
             throw std::runtime_error("null cannot be assigned to non-Nullable column UUID");
@@ -1136,6 +1142,7 @@ static ColumnRef appendMapByValueType(HashTable *values_ht, TypeRef vtype, KFn k
 // Used by Point/Ring/Polygon/MultiPolygon insert paths.
 static std::tuple<double, double> phpToPoint(zval *zv)
 {
+    ZVAL_DEREF(zv);
     if (Z_TYPE_P(zv) != IS_ARRAY) {
         throw std::runtime_error("Point must be a PHP array of 2 numbers");
     }
@@ -1155,6 +1162,7 @@ static std::tuple<double, double> phpToPoint(zval *zv)
 
 static std::vector<std::tuple<double, double>> phpToRing(zval *zv)
 {
+    ZVAL_DEREF(zv);
     if (Z_TYPE_P(zv) != IS_ARRAY) {
         throw std::runtime_error("Ring must be a PHP array of points");
     }
@@ -1168,6 +1176,7 @@ static std::vector<std::tuple<double, double>> phpToRing(zval *zv)
 
 static std::vector<std::vector<std::tuple<double, double>>> phpToPolygon(zval *zv)
 {
+    ZVAL_DEREF(zv);
     if (Z_TYPE_P(zv) != IS_ARRAY) {
         throw std::runtime_error("Polygon must be a PHP array of rings");
     }
@@ -1472,6 +1481,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         auto value = std::make_shared<ColumnTime>();
         ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
+            ZVAL_DEREF(array_value);
             /* Time is stored as int seconds-since-midnight; accept only
              * numeric inputs. String inputs would need an "HH:MM:SS"
              * parser which the column type doesn't currently expose, so
@@ -1539,6 +1549,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         const absl::uint128 int128_max     = abs_int128_min - 1;
         ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
+            ZVAL_DEREF(array_value);
             if (Z_TYPE_P(array_value) == IS_STRING) {
                 const char *s = Z_STRVAL_P(array_value);
                 size_t len = Z_STRLEN_P(array_value);
@@ -1576,6 +1587,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         // UInt128 range: 0 .. 2^128-1, i.e. up to 39 decimal digits.
         ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
+            ZVAL_DEREF(array_value);
             if (Z_TYPE_P(array_value) == IS_STRING) {
                 const char *s = Z_STRVAL_P(array_value);
                 size_t len = Z_STRLEN_P(array_value);
@@ -1629,6 +1641,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
 
         ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
+            ZVAL_DEREF(array_value);
             if (Z_TYPE_P(array_value) != IS_ARRAY)
             {
                 throw std::runtime_error("The inserted data is not an array type");
@@ -1658,14 +1671,14 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
 
         ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
-            if (Z_TYPE_P(array_value) == IS_NULL)
-            {
-                nulls->Append(1);
-            }
-            else
-            {
-                nulls->Append(0);
-            }
+            /* Deref before the IS_NULL test: nested in Array/Tuple, a cell
+             * can arrive as IS_REFERENCE. The child build below derefs (via
+             * strict_zval_*), so without this the bitmap would mark a by-ref
+             * null as non-null while the child writes a 0 placeholder,
+             * silently storing 0 instead of NULL. */
+            zval *nv = array_value;
+            ZVAL_DEREF(nv);
+            nulls->Append(Z_TYPE_P(nv) == IS_NULL ? 1 : 0);
         }
         ZEND_HASH_FOREACH_END();
 
@@ -1707,6 +1720,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
 
                 ZEND_HASH_FOREACH_VAL(values_ht, pzval)
                 {
+                    ZVAL_DEREF(pzval);
                     if (Z_TYPE_P(pzval) != IS_ARRAY)
                     {
                         throw std::runtime_error("Tuple row must be a PHP array");
@@ -1721,6 +1735,10 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                         throw std::runtime_error(
                             "Tuple row is missing a field value");
                     }
+                    /* Deref before transposing so a by-ref field value is
+                     * stored as its target, not an IS_REFERENCE the recursive
+                     * per-field build would have to unwrap. */
+                    ZVAL_DEREF(fzval);
                     sc_zval_add_ref(fzval);
                     add_next_index_zval(return_tmp, fzval);
                 }
@@ -1960,6 +1978,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     {
         auto col = std::make_shared<ColumnMultiPolygon>();
         ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
+            ZVAL_DEREF(array_value);
             if (Z_TYPE_P(array_value) != IS_ARRAY) {
                 throw std::runtime_error("MultiPolygon must be a PHP array of polygons");
             }
