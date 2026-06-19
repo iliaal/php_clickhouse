@@ -60,7 +60,8 @@ echo "nested ref: ", implode(",", $c->select("SELECT a FROM test.h_arr", [], Cli
 $c->execute("DROP TABLE IF EXISTS test.h_dt");
 $c->execute("CREATE TABLE test.h_dt (t DateTime64(9)) ENGINE = Memory");
 expect_throw("dt64(9) float", fn() => $c->insert("test.h_dt", ["t"], [[1700000000.5]]));
-$c->insert("test.h_dt", ["t"], [[1700000000000000000]]);
+// Integer input is whole epoch seconds (scaled to ticks internally).
+$c->insert("test.h_dt", ["t"], [[1700000000]]);
 echo "dt64(9) int ok: ", (int) $c->select("SELECT count() c FROM test.h_dt", [], ClickHouse::FETCH_ONE), "\n";
 
 // CR-007: IPv4 accepts an integral float (consistent with integer columns);

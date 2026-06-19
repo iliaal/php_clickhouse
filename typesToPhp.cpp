@@ -1421,19 +1421,27 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                     precision, scale);
                 value->Append((int64_t)whole * scale + frac);
             } else if (Z_TYPE_P(v) == IS_DOUBLE) {
-                /* A double's 52-bit mantissa cannot hold epoch * 10^precision
-                 * exactly once precision >= 7 (e.g. nanoseconds since 1970
-                 * exceed 2^52), so a float would silently round. Require the
-                 * integer-ticks or string form for sub-microsecond precision. */
+                /* The numeric paths take the value as (fractional) seconds
+                 * since the epoch, like DateTime. A double's 52-bit mantissa
+                 * can't hold epoch * 10^precision exactly once precision >= 7,
+                 * so a float would silently round; require a formatted string
+                 * for sub-microsecond precision. */
                 if (precision >= 7) {
                     throw std::runtime_error(
                         "DateTime64 precision >= 7 cannot be set from a float without "
-                        "precision loss; pass an integer ticks value or a formatted string");
+                        "precision loss; pass a formatted date string for sub-microsecond precision");
                 }
                 double d = strict_zval_double(v, "DateTime64");
                 value->Append((int64_t)(d * scale));
             } else {
-                value->Append((int64_t)strict_zval_long(v, "DateTime64") * scale);
+                /* Integer = whole seconds since the epoch, scaled to ticks.
+                 * Guard the multiply against int64 overflow for absurd inputs. */
+                int64_t secs = (int64_t)strict_zval_long(v, "DateTime64");
+                if (secs > INT64_MAX / scale || secs < INT64_MIN / scale) {
+                    throw std::runtime_error(
+                        "DateTime64 seconds value out of representable range for this precision");
+                }
+                value->Append(secs * scale);
             }
         }
         ZEND_HASH_FOREACH_END();
@@ -1486,12 +1494,19 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 if (precision >= 7) {
                     throw std::runtime_error(
                         "Time64 precision >= 7 cannot be set from a float without "
-                        "precision loss; pass an integer ticks value");
+                        "precision loss; pass an integer number of seconds");
                 }
                 double d = strict_zval_double(v, "Time64");
                 value->Append((int64_t)(d * scale));
             } else {
-                value->Append((int64_t)strict_zval_long(v, "Time64") * scale);
+                /* Integer = whole seconds, scaled to ticks; guard the
+                 * multiply against int64 overflow. */
+                int64_t secs = (int64_t)strict_zval_long(v, "Time64");
+                if (secs > INT64_MAX / scale || secs < INT64_MIN / scale) {
+                    throw std::runtime_error(
+                        "Time64 seconds value out of representable range for this precision");
+                }
+                value->Append(secs * scale);
             }
         }
         ZEND_HASH_FOREACH_END();
