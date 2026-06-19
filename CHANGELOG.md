@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- A streaming insert abandoned without `writeEnd()` (script bailout, `unset()`, exception unwind) now finalizes whatever the server accepted instead of attempting a reconnect-to-discard on teardown. ClickHouse inserts are not transactional, so the old discard only dropped inserts small enough to sit in the server squash buffer; it was size-dependent and silently partial. Use insert deduplication if you need exactly-once.
+- A streaming insert that is abandoned or interrupted now finalizes whatever the server accepted instead of attempting a reconnect-to-discard. This covers both teardown without `writeEnd()` (script bailout, `unset()`, exception unwind) and a `write()` that throws mid-stream on a healthy wire (earlier blocks commit; only the rejected row is dropped). ClickHouse inserts are not transactional, so the old discard only dropped inserts small enough to sit in the server squash buffer; it was size-dependent and silently partial. Use insert deduplication if you need exactly-once. A genuinely dirty wire still reconnects, but for handle recovery, not rollback.
 
 ## [0.8.7] - 2026-06-11
 

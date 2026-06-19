@@ -87,16 +87,6 @@ struct clickhouse_object {
     Client *client;
     Block insert_block;
     bool has_insert_block;
-    /* True once write() has handed any block to the native client during
-     * the current writeStart()/writeEnd() session. The error-path
-     * recovery keys off this: a pre-send failure on a still-clean
-     * session can EndInsert() to close the empty insert and clear the
-     * native inserting_ flag, but once a block has been sent the wire is
-     * dirty and recovery must ResetConnection() to get a usable handle
-     * back (EndInsert() on a dirty wire would throw or wedge). This is
-     * handle recovery, not insert rollback: ClickHouse inserts are not
-     * transactional, so streamed blocks may already be persisted. */
-    bool insert_blocks_sent;
     /* Guards same-client reentry. clickhouse-cpp's Client uses a single
      * socket and a single per-call packet loop; a userland callback that
      * fires another query / insert on the same client mid-stream sends
@@ -148,7 +138,6 @@ static zend_object *clickhouse_create_object(zend_class_entry *ce)
 
     obj->client = nullptr;
     obj->has_insert_block = false;
-    obj->insert_blocks_sent = false;
     obj->query_active = false;
     obj->log_enabled = false;
     obj->verbose_to_stderr = false;
@@ -1134,7 +1123,6 @@ static void clearStreamingInsertState(clickhouse_object *obj)
 {
     obj->insert_block = Block();
     obj->has_insert_block = false;
-    obj->insert_blocks_sent = false;
     obj->insert_sql.clear();
     obj->insert_query_id.clear();
     obj->insert_started_at = std::chrono::steady_clock::time_point();
@@ -3099,7 +3087,7 @@ static void do_insert_into(zval *this_obj, zend_string *table,
              * partially transmitted block can either commit the
              * transmitted prefix or leave the native client wedged
              * in inserting state. Same ordering streaming write()
-             * uses for insert_blocks_sent. */
+             * uses for block_send_started. */
             block_sent = true;
             client->SendInsertBlock(blockInsert);
             client->EndInsert();
@@ -3830,7 +3818,6 @@ PHP_METHOD(ClickHouse, writeStart)
 
         obj->insert_block = blockQuery;
         obj->has_insert_block = true;
-        obj->insert_blocks_sent = false;
         obj->insert_sql = sql;
         obj->insert_query_id = qid;
         obj->insert_started_at = t0;
@@ -3855,6 +3842,7 @@ PHP_METHOD(ClickHouse, write)
     ZEND_PARSE_PARAMETERS_END();
 
     bool session_owned = false;
+    bool block_send_started = false;
     try
     {
         /* Acquire the reentry guard before any heavy lifting. Fail-fast
@@ -3872,9 +3860,8 @@ PHP_METHOD(ClickHouse, write)
         HashTable *values_ht = Z_ARRVAL_P(values);
         if (zend_hash_num_elements(values_ht) == 0) {
             /* Appending zero rows is a no-op, not an error. Throwing here
-             * sent the catch path through ResetConnection whenever a prior
-             * write() had already sent blocks (insert_blocks_sent), tearing
-             * down the in-flight insert over a benign empty batch. */
+             * would tear down the in-flight insert over a benign empty
+             * batch. */
             RETURN_TRUE;
         }
 
@@ -3907,32 +3894,31 @@ PHP_METHOD(ClickHouse, write)
             zval_ptr_dtor(&inner);
         }
 
-        /* Mark the session dirty before SendInsertBlock so any failure
-         * mid-send routes the catch path to ResetConnection() instead
-         * of EndInsert(). EndInsert on a wire that already saw partial
-         * data would commit it. */
-        obj->insert_blocks_sent = true;
+        /* Mark the wire dirty immediately before SendInsertBlock. If the
+         * send itself throws mid-frame the wire is unusable and the catch
+         * recovers the handle with ResetConnection(); a throw before this
+         * point (row conversion) leaves the wire healthy and the catch can
+         * finalize instead. */
+        block_send_started = true;
         client->SendInsertBlock(blockInsert);
     }
     catch (const std::exception& e)
     {
-        /* Three failure phases now, each needing a different recovery:
-         *   - Pre-send on a clean session (no prior write() succeeded):
-         *     the wire is healthy and no data has crossed it; close the
-         *     empty insert with EndInsert() so the vendored Client
-         *     clears its `inserting_` flag. Without this, the next
-         *     select/execute throws "cannot execute query while
-         *     inserting" and the caller has to resetConnection() by
-         *     hand.
-         *   - Pre-send on a dirty session (a prior write() already sent
-         *     blocks): the wire is dirty, so ResetConnection() to get a
-         *     usable handle back. This recovers the connection; it is
-         *     not an insert rollback — ClickHouse is not transactional,
-         *     so blocks already streamed may be persisted regardless.
-         *   - Mid-send (SendInsertBlock itself threw): the wire is
-         *     dirty regardless of prior writes; reset for the same
-         *     reason. insert_blocks_sent is set true before
-         *     SendInsertBlock so this case lands here too.
+        /* Recovery depends on whether the wire is dirty, keyed on
+         * block_send_started:
+         *   - Healthy wire (the throw came from row conversion before this
+         *     call sent anything): finalize with EndInsert(). That commits
+         *     whatever the server already accepted from earlier write()s
+         *     and clears the native `inserting_` flag so the next
+         *     select/execute does not hit "cannot execute query while
+         *     inserting". This matches the teardown policy: ClickHouse is
+         *     not transactional, so we finalize rather than fake a rollback
+         *     by reconnecting. If EndInsert() itself throws, fall back to
+         *     ResetConnection() to recover the handle.
+         *   - Dirty wire (SendInsertBlock itself threw mid-frame): the
+         *     wire cannot be finalized, so ResetConnection() to recover a
+         *     usable handle. This is handle recovery, not rollback; the
+         *     server may have persisted earlier blocks regardless.
          * Swallow secondary failures from the recovery call — we are
          * already throwing the original error to PHP.
          *
@@ -3953,10 +3939,14 @@ PHP_METHOD(ClickHouse, write)
             setElapsedSince(obj, obj->insert_started_at);
         }
         if (obj->client && obj->has_insert_block) {
-            if (obj->insert_blocks_sent) {
+            if (block_send_started) {
                 tryResetConnectionReapplyDatabase(getThis(), obj, false);
             } else {
-                try { obj->client->EndInsert(); } catch (...) {}
+                try {
+                    obj->client->EndInsert();
+                } catch (...) {
+                    tryResetConnectionReapplyDatabase(getThis(), obj, false);
+                }
             }
         }
         if (!sql.empty() || !qid.empty()) {
