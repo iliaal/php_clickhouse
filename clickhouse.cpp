@@ -5210,16 +5210,18 @@ PHP_METHOD(ClickHouse, isExists)
         Z_PARAM_STR(db)
         Z_PARAM_STR(table)
     ZEND_PARSE_PARAMETERS_END();
-    try {
-        validateIdentifier(ZSTR_VAL(db), ZSTR_LEN(db), "database name", false);
-        validateIdentifier(ZSTR_VAL(table), ZSTR_LEN(table), "table name", false);
-    } catch (const std::exception &e) {
-        throwClickHouseError(e);
-        return;
-    }
+    /* db / table are compared as string VALUES against system.tables, not
+     * interpolated as identifiers, so escape them as string literals rather
+     * than rejecting any name that isn't a bare identifier. This admits the
+     * quoted/special-character names ClickHouse allows (e.g. `my-table`) and
+     * is injection-safe (sqlStringLiteral escapes quotes/backslashes/NUL).
+     * Matches showTables(), which already filters by a string literal.
+     * (showCreateTable keeps strict identifier validation: there the name is
+     * interpolated as an identifier, not compared as a value.) */
     std::string sql =
-        "SELECT count() AS c FROM system.tables WHERE database = '" +
-        std::string(ZSTR_VAL(db), ZSTR_LEN(db)) + "' AND name = '" + std::string(ZSTR_VAL(table), ZSTR_LEN(table)) + "'";
+        "SELECT count() AS c FROM system.tables WHERE database = " +
+        sqlStringLiteral(std::string(ZSTR_VAL(db), ZSTR_LEN(db))) +
+        " AND name = " + sqlStringLiteral(std::string(ZSTR_VAL(table), ZSTR_LEN(table)));
     zval row;
     runHelperSelectFirstRow(&row, getThis(), sql);
     if (EG(exception)) return;
