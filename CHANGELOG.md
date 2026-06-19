@@ -15,6 +15,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `IPv4` and `IPv6` writes (both were read-only before). `IPv4` accepts a dotted-quad string or an integer using the same convention as ClickHouse's `toIPv4()` (16909060 inserts as 1.2.3.4); `IPv6` accepts a dotted/colon string. Both validate client-side and support `Nullable`.
 - `Array(Tuple(...))` writes. `Tuple` columns could already be read and written at the top level; nested inside an `Array` they previously threw on insert.
 
+### Security
+
+- Bounded the server-declared `scale` on the `Decimal` read path. A result column typed with a scale beyond 38 (a `Decimal256`, or a value supplied by a hostile or man-in-the-middle server) drove an in-place format past a fixed 64-byte stack buffer, a stack-smash triggerable by the first decoded row of a `select()`. Scales above 38 now throw, matching the existing `DateTime64` precision guard on the same path.
+
+### Fixed
+
+- A throwing `__toString()` on an insert cell no longer commits a corrupted empty value while leaving the PHP exception pending. The string conversion now surfaces the original exception, so the insert aborts cleanly and the client stays usable. This matches the placeholder path's existing behavior.
+- By-reference values nested inside `Array(...)` / `Tuple(...)` insert rows are now dereferenced before coercion, instead of failing with a misleading "array / object / resource cannot be assigned" error.
+- `DateTime64` / `Time64` reject a float input at precision >= 7, where a double cannot represent the tick count exactly (silent rounding before); pass integer ticks or a formatted string. Both also bound the server-declared precision at 9 on insert, closing a signed-int64 overflow in the scale computation.
+- `IPv4` inserts accept an integral float (e.g. `16909060.0`), consistent with the integer columns; a fractional float is rejected.
+
+### Changed
+
+- For `Array(scalar)` inserts, restored a single reused element column across rows instead of allocating a fresh column per row (a regression from adding `Array(Tuple)` support); the per-row allocation now applies only to `Tuple` elements, where it is required.
+
 ### Changed
 
 - A streaming insert that is abandoned or interrupted now finalizes whatever the server accepted instead of attempting a reconnect-to-discard. This covers both teardown without `writeEnd()` (script bailout, `unset()`, exception unwind) and a `write()` that throws mid-stream on a healthy wire (earlier blocks commit; only the rejected row is dropped). ClickHouse inserts are not transactional, so the old discard only dropped inserts small enough to sit in the server squash buffer; it was size-dependent and silently partial. Use insert deduplication if you need exactly-once. A genuinely dirty wire still reconnects, but for handle recovery, not rollback.
