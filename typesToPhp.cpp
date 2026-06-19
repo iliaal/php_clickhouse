@@ -36,6 +36,7 @@ extern "C" {
 #include "lib/clickhouse-cpp/clickhouse/error_codes.h"
 #include "lib/clickhouse-cpp/clickhouse/types/type_parser.h"
 #include "lib/clickhouse-cpp/clickhouse/columns/factory.h"
+#include "lib/clickhouse-cpp/clickhouse/columns/bool.h"
 #include "lib/clickhouse-cpp/clickhouse/columns/geo.h"
 #include "lib/clickhouse-cpp/clickhouse/columns/ip4.h"
 #include "lib/clickhouse-cpp/clickhouse/columns/ip6.h"
@@ -668,6 +669,19 @@ ColumnRef createColumn(TypeRef type)
         return std::make_shared<ColumnJSON>();
     }
 
+    case Type::Code::Bool:
+    {
+        return std::make_shared<ColumnBool>();
+    }
+    case Type::Code::IPv4:
+    {
+        return std::make_shared<ColumnIPv4>();
+    }
+    case Type::Code::IPv6:
+    {
+        return std::make_shared<ColumnIPv6>();
+    }
+
     case Type::Code::Array:
     {
         return std::make_shared<ColumnArray>(createColumn(type->As<ArrayType>()->GetItemType()));
@@ -1244,6 +1258,80 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
             } else {
                 throw std::runtime_error(
                     "JSON insert requires an array, object, or JSON string value");
+            }
+        }
+        ZEND_HASH_FOREACH_END();
+        return value;
+    }
+    case Type::Code::Bool:
+    {
+        auto value = std::make_shared<ColumnBool>();
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
+        {
+            zval *v = array_value;
+            ZVAL_DEREF(v);
+            if (Z_TYPE_P(v) == IS_NULL) {
+                if (g_allow_null_in_strict == 0) {
+                    throw std::runtime_error("null cannot be assigned to non-Nullable column Bool");
+                }
+                value->Append(false);
+            } else {
+                value->Append((bool)zend_is_true(v));
+            }
+        }
+        ZEND_HASH_FOREACH_END();
+        return value;
+    }
+    case Type::Code::IPv4:
+    {
+        /* ColumnIPv4::Append(string) validates via inet_pton and throws on
+         * an empty string, so the empty-string null placeholder String uses
+         * doesn't work. Under AllowNullGuard (a Nullable(IPv4) build), emit
+         * a valid sentinel the null bitmap masks out. */
+        auto value = std::make_shared<ColumnIPv4>();
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
+        {
+            zval *v = array_value;
+            ZVAL_DEREF(v);
+            if (Z_TYPE_P(v) == IS_NULL && g_allow_null_in_strict > 0) {
+                value->Append(std::string("0.0.0.0"));
+            } else if (Z_TYPE_P(v) == IS_LONG) {
+                /* Integer input matches ClickHouse's toIPv4(N): the value is
+                 * the IP with the most-significant byte as the first octet
+                 * (16909060 -> 1.2.3.4). Format to dotted-quad and reuse the
+                 * validated string path rather than ColumnIPv4::Append(uint32),
+                 * whose host/network byte-order handling differs. */
+                zend_long n = Z_LVAL_P(v);
+                if (n < 0 || (uint64_t)n > UINT32_MAX) {
+                    throw std::runtime_error("IPv4 integer out of range (0 .. 4294967295)");
+                }
+                uint32_t u = (uint32_t)n;
+                char ipbuf[16];
+                snprintf(ipbuf, sizeof(ipbuf), "%u.%u.%u.%u",
+                         (unsigned)((u >> 24) & 0xFF), (unsigned)((u >> 16) & 0xFF),
+                         (unsigned)((u >> 8) & 0xFF),  (unsigned)(u & 0xFF));
+                value->Append(std::string(ipbuf));
+            } else {
+                value->Append(strict_zval_string(v, "IPv4"));
+            }
+        }
+        ZEND_HASH_FOREACH_END();
+        return value;
+    }
+    case Type::Code::IPv6:
+    {
+        auto value = std::make_shared<ColumnIPv6>();
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
+        {
+            zval *v = array_value;
+            ZVAL_DEREF(v);
+            if (Z_TYPE_P(v) == IS_NULL && g_allow_null_in_strict > 0) {
+                value->Append(std::string_view("::"));
+            } else {
+                /* Append(string_view) calls inet_pton on .data(); a view of
+                 * a std::string is NUL-terminated, a bare view need not be. */
+                std::string s = strict_zval_string(v, "IPv6");
+                value->Append(std::string_view(s));
             }
         }
         ZEND_HASH_FOREACH_END();
@@ -2100,6 +2188,24 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             sc_add_next_index_stringl(arr, buf, l, 1);
         } else {
             SC_SINGLE_STRING(buf, l);
+        }
+        break;
+    }
+    case Type::Code::Bool:
+    {
+        auto b_col = as_or_throw<ColumnBool>(columnRef, "Bool read");
+        bool v = b_col->At(row);
+        if (is_array)
+        {
+            add_next_index_bool(arr, v);
+        }
+        else if (fetch_mode & SC_FETCH_ONE)
+        {
+            ZVAL_BOOL(arr, v);
+        }
+        else
+        {
+            add_assoc_bool_ex(arr, column_name.c_str(), column_name.length(), v);
         }
         break;
     }

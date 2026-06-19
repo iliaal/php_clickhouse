@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `JSON` column type support. Inserts auto-detect by PHP type: an array or object is JSON-encoded, a string is stored as raw JSON text (validated client-side), and `null` becomes the empty object `{}` (including `Nullable(JSON)` rows). Reads return the raw JSON string by default, or decode to a nested associative array (`ClickHouse::JSON_AS_ARRAY`) or nested `stdClass` (`ClickHouse::JSON_AS_OBJECT`). Reading a `JSON` column requires `output_format_native_write_json_as_string = 1` on the session, since the vendored client only understands the string serialization.
 - `selectStream()` and `selectStreamCallback()` now accept a trailing `fetch_mode` argument (after `settings`), so the `fetch_mode` bitmask — including the new `JSON_AS_ARRAY` / `JSON_AS_OBJECT` flags and the existing `DATE_AS_STRINGS` — applies on the streaming read paths, not just `select()`.
+- `Bool` column read and write. Reads surface a PHP bool; writes accept a bool or an int.
+- `IPv4` and `IPv6` writes (both were read-only before). `IPv4` accepts a dotted-quad string or an integer using the same convention as ClickHouse's `toIPv4()` (16909060 inserts as 1.2.3.4); `IPv6` accepts a dotted/colon string. Both validate client-side and support `Nullable`.
 
 ### Changed
 

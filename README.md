@@ -127,14 +127,15 @@ foreach ($ch->select("SELECT id, ts, tag FROM events ORDER BY id",
 * `Float32`, `Float64`
 * `Int8` … `Int64`, `UInt8` … `UInt64`
 * `Int128`, `UInt128` (round-trip as decimal strings; PHP integers are 64-bit)
-* `IPv4`, `IPv6`
+* `Bool` (reads as a PHP bool; accepts bool or int on write)
+* `IPv4` (write accepts a dotted-quad string or an integer matching `toIPv4()`), `IPv6` (dotted/colon string)
 * `JSON` (see [JSON columns](#json-columns) below)
 * `LowCardinality(String)`, `LowCardinality(FixedString(N))`, `LowCardinality(Nullable(String))`, `LowCardinality(Nullable(FixedString(N)))`
 * `Map(K, V)` over scalar K and V (`String`, `Int8` through `Int64`, `UInt8` through `UInt64`, `Float32`, `Float64`, `UUID`) plus `LowCardinality(String)` keys and values. `Map(LowCardinality(K), V)` reads are not yet decoded by the vendored client; writes succeed and the data is queryable server side.
 * `Point`, `Ring`, `Polygon`, `MultiPolygon` (geo)
 * `Nullable(T)`
 * `String`
-* `Tuple` (read-only)
+* `Tuple` (read and top-level write; `Array(Tuple)` writes are not supported)
 * `UUID`
 
 ## Configuration reference
