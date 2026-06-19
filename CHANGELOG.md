@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `JSON` column type support. Inserts auto-detect by PHP type: an array or object is JSON-encoded, a string is stored as raw JSON text (validated client-side), and `null` becomes the empty object `{}` (including `Nullable(JSON)` rows). Reads return the raw JSON string by default, or decode to a nested associative array (`ClickHouse::JSON_AS_ARRAY`) or nested `stdClass` (`ClickHouse::JSON_AS_OBJECT`). Reading a `JSON` column requires `output_format_native_write_json_as_string = 1` on the session, since the vendored client only understands the string serialization.
+- `selectStream()` and `selectStreamCallback()` now accept a trailing `fetch_mode` argument (after `settings`), so the `fetch_mode` bitmask — including the new `JSON_AS_ARRAY` / `JSON_AS_OBJECT` flags and the existing `DATE_AS_STRINGS` — applies on the streaming read paths, not just `select()`.
+
 ### Changed
 
 - A streaming insert that is abandoned or interrupted now finalizes whatever the server accepted instead of attempting a reconnect-to-discard. This covers both teardown without `writeEnd()` (script bailout, `unset()`, exception unwind) and a `write()` that throws mid-stream on a healthy wire (earlier blocks commit; only the rejected row is dropped). ClickHouse inserts are not transactional, so the old discard only dropped inserts small enough to sit in the server squash buffer; it was size-dependent and silently partial. Use insert deduplication if you need exactly-once. A genuinely dirty wire still reconnects, but for handle recovery, not rollback.

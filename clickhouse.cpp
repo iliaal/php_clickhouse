@@ -4850,19 +4850,22 @@ PHP_METHOD(ClickHouse, selectStream)
     zval *params = NULL;
     zend_string *query_id = NULL;
     zval *settings = NULL;
+    zend_long fetch_mode = 0;
 
-    ZEND_PARSE_PARAMETERS_START(1, 4)
+    ZEND_PARSE_PARAMETERS_START(1, 5)
         Z_PARAM_STR(sql)
         Z_PARAM_OPTIONAL
         Z_PARAM_ARRAY(params)
         Z_PARAM_STR(query_id)
         Z_PARAM_ARRAY(settings)
+        Z_PARAM_LONG(fetch_mode)
     ZEND_PARSE_PARAMETERS_END();
     std::string qid = makeQid(query_id);
     clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
 
     object_init_ex(return_value, clickhouse_iter_ce);
     clickhouse_iter_object *iter = Z_CLICKHOUSE_ITER_P(return_value);
+    iter->fetch_mode = fetch_mode;
     std::string log_sql(ZSTR_VAL(sql), ZSTR_LEN(sql));
 
     try {
@@ -4942,14 +4945,16 @@ PHP_METHOD(ClickHouse, selectStreamCallback)
     zval *params = NULL;
     zend_string *query_id = NULL;
     zval *settings = NULL;
+    zend_long fetch_mode = 0;
 
-    ZEND_PARSE_PARAMETERS_START(2, 5)
+    ZEND_PARSE_PARAMETERS_START(2, 6)
         Z_PARAM_STR(sql)
         Z_PARAM_ZVAL(cb)
         Z_PARAM_OPTIONAL
         Z_PARAM_ARRAY(params)
         Z_PARAM_STR(query_id)
         Z_PARAM_ARRAY(settings)
+        Z_PARAM_LONG(fetch_mode)
     ZEND_PARSE_PARAMETERS_END();
 
     if (!zend_is_callable(cb, 0, NULL)) {
@@ -4996,7 +5001,7 @@ PHP_METHOD(ClickHouse, selectStreamCallback)
         }
 
         size_t verbose_block_idx = 0;
-        query.OnData([cb, obj, &verbose_block_idx](const Block &block) {
+        query.OnData([cb, obj, &verbose_block_idx, fetch_mode](const Block &block) {
             if (block.GetRowCount() == 0 || block.GetColumnCount() == 0) return;
             if (verbose_active(obj)) {
                 zval ctx;
@@ -5023,7 +5028,7 @@ PHP_METHOD(ClickHouse, selectStreamCallback)
                  * partially-built row_zv HashTable. */
                 try {
                     for (size_t col = 0; col < col_count; ++col) {
-                        convertToZval(&row_zv, block[col], row, col_names[col], 0, 0);
+                        convertToZval(&row_zv, block[col], row, col_names[col], 0, fetch_mode);
                     }
                 } catch (...) {
                     zval_ptr_dtor(&row_zv);
@@ -5122,7 +5127,7 @@ PHP_METHOD(ClickHouseRowIterator, current)
             const std::string &name = (col < iter->column_names.size())
                 ? iter->column_names[col]
                 : empty_name;
-            convertToZval(return_value, block[col], iter->row_idx, name, 0, 0);
+            convertToZval(return_value, block[col], iter->row_idx, name, 0, iter->fetch_mode);
         }
     } catch (const std::exception &e) {
         zval_ptr_dtor(return_value);

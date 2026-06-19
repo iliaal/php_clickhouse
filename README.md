@@ -7,7 +7,7 @@
 
 ![php_clickhouse: native binary protocol vs HTTP](images/php_clickhouse-hero.jpg)
 
-Native PHP extension for [ClickHouse](https://clickhouse.com/), built on the official [ClickHouse/clickhouse-cpp](https://github.com/ClickHouse/clickhouse-cpp) v2.6.2 client. Speaks the native binary TCP protocol with LZ4 / ZSTD compression and optional TLS, picking up where [SeasX/SeasClick](https://github.com/SeasX/SeasClick) left off in 2020. 30-40% faster than HTTP-based clients on heavy workloads, with modern types (Date32, Time64, Decimal128, LowCardinality, Map), multi-endpoint failover, and structured exceptions.
+Native PHP extension for [ClickHouse](https://clickhouse.com/), built on the official [ClickHouse/clickhouse-cpp](https://github.com/ClickHouse/clickhouse-cpp) v2.6.2 client. Speaks the native binary TCP protocol with LZ4 / ZSTD compression and optional TLS, picking up where [SeasX/SeasClick](https://github.com/SeasX/SeasClick) left off in 2020. 30-40% faster than HTTP-based clients on heavy workloads, with modern types (Date32, Time64, Decimal128, LowCardinality, Map, JSON), multi-endpoint failover, and structured exceptions.
 
 ## Why this fork?
 
@@ -15,7 +15,7 @@ Native PHP extension for [ClickHouse](https://clickhouse.com/), built on the off
 
 - Renames the extension to `php_clickhouse` (module `clickhouse`, classes `ClickHouse` / `ClickHouseException`)
 - Upgrades the vendored client from artpaul-fork v1.x to the official ClickHouse/clickhouse-cpp v2.6.1
-- Adds Date32 / Time / Time64 / DateTime64 / Int128 / UInt128 / Decimal128 / LowCardinality / Map column types, multi-endpoint failover, ZSTD compression, query_id propagation, and TLS
+- Adds Date32 / Time / Time64 / DateTime64 / Int128 / UInt128 / Decimal128 / LowCardinality / Map / JSON column types, multi-endpoint failover, ZSTD compression, query_id propagation, and TLS
 - Ships an updated test suite, CI, PIE-based packaging, and benchmarks
 
 The original `SeasClick` and `SeasClickException` class names continue to work as deprecated aliases.
@@ -128,6 +128,7 @@ foreach ($ch->select("SELECT id, ts, tag FROM events ORDER BY id",
 * `Int8` … `Int64`, `UInt8` … `UInt64`
 * `Int128`, `UInt128` (round-trip as decimal strings; PHP integers are 64-bit)
 * `IPv4`, `IPv6`
+* `JSON` (see [JSON columns](#json-columns) below)
 * `LowCardinality(String)`, `LowCardinality(FixedString(N))`, `LowCardinality(Nullable(String))`, `LowCardinality(Nullable(FixedString(N)))`
 * `Map(K, V)` over scalar K and V (`String`, `Int8` through `Int64`, `UInt8` through `UInt64`, `Float32`, `Float64`, `UUID`) plus `LowCardinality(String)` keys and values. `Map(LowCardinality(K), V)` reads are not yet decoded by the vendored client; writes succeed and the data is queryable server side.
 * `Point`, `Ring`, `Polygon`, `MultiPolygon` (geo)
@@ -257,12 +258,14 @@ $ch->ping();          // returns true on success, throws on failure
 
 // Streaming reads (no full-result PHP array)
 $iter = $ch->selectStream(string $sql, array $params = [],
-                          string $query_id = "", array $settings = []);
+                          string $query_id = "", array $settings = [],
+                          int $fetch_mode = 0);
 foreach ($iter as $row) { /* ... */ }   // ClickHouseRowIterator: Iterator+Countable
 
 $ch->selectStreamCallback(string $sql, callable $cb,
                           array $params = [], string $query_id = "",
-                          array $settings = []);  // true per-row stream
+                          array $settings = [],
+                          int $fetch_mode = 0);  // true per-row stream
 
 // Write rows straight to a PHP stream resource as TSV / CSV — bypasses
 // per-row PHP array assembly and userland callbacks; cells are
@@ -327,7 +330,33 @@ $ch->truncateTable(string $table);
 $ch->dropPartition(string $table, string $partition);
 ```
 
-`fetch_mode` is a bitmask of `ClickHouse::FETCH_ONE`, `ClickHouse::FETCH_KEY_PAIR`, `ClickHouse::FETCH_COLUMN`, and `ClickHouse::DATE_AS_STRINGS`.
+`fetch_mode` is a bitmask of `ClickHouse::FETCH_ONE`, `ClickHouse::FETCH_KEY_PAIR`, `ClickHouse::FETCH_COLUMN`, `ClickHouse::DATE_AS_STRINGS`, `ClickHouse::JSON_AS_ARRAY`, and `ClickHouse::JSON_AS_OBJECT`. `select`, `selectStream`, and `selectStreamCallback` all accept it (on the streaming methods it is the trailing argument, after `settings`).
+
+### JSON columns
+
+The `JSON` column type round-trips through PHP. **Reads require `output_format_native_write_json_as_string = 1`** on the session (set it via `setSettings()` or a per-query `settings` array); the vendored client only understands the string serialization, and a read without this setting fails with a protocol error.
+
+```php
+$ch->setSettings([
+    "allow_experimental_json_type"              => 1, // only needed to CREATE a JSON column
+    "output_format_native_write_json_as_string" => 1, // required to SELECT JSON
+]);
+
+// Insert: a PHP array or object is JSON-encoded; a string is stored as
+// raw JSON text (validated client-side); null becomes the empty object {}.
+$ch->insert("events", ["id", "payload"], [
+    [1, ["level" => "info", "tags" => ["a", "b"]]],
+    [2, '{"level":"warn"}'],
+]);
+
+// Read: raw JSON string by default.
+$ch->select("SELECT payload FROM events");
+
+// JSON_AS_ARRAY decodes to a nested associative array;
+// JSON_AS_OBJECT decodes to nested stdClass.
+$ch->select("SELECT payload FROM events", [], ClickHouse::JSON_AS_ARRAY);
+$ch->select("SELECT payload FROM events", [], ClickHouse::JSON_AS_OBJECT);
+```
 
 ### Placeholders
 

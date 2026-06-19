@@ -23,6 +23,9 @@ extern "C" {
 #include "php.h"
 #include "php_ini.h"
 #include "ext/standard/info.h"
+#include "ext/json/php_json.h"
+#include "zend_smart_str.h"
+#include "zend_exceptions.h"
 #include "php7_wrapper.h"
 #include "main/snprintf.h"  // php_gcvt: locale-independent double formatter for Map float keys (CR-507)
 };
@@ -660,6 +663,11 @@ ColumnRef createColumn(TypeRef type)
         return std::make_shared<ColumnDecimal>(dt->GetPrecision(), dt->GetScale());
     }
 
+    case Type::Code::JSON:
+    {
+        return std::make_shared<ColumnJSON>();
+    }
+
     case Type::Code::Array:
     {
         return std::make_shared<ColumnArray>(createColumn(type->As<ArrayType>()->GetItemType()));
@@ -1192,6 +1200,53 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         }
         ZEND_HASH_FOREACH_END();
 
+        return value;
+    }
+    case Type::Code::JSON:
+    {
+        /* Auto-detect by zval type: a PHP array/object is json_encode'd;
+         * a string is treated as raw JSON text and validated client-side
+         * (a malformed string would otherwise fail mid-stream inside the
+         * server's block parse with an opaque protocol error). NULL maps
+         * to the empty object {} -- ClickHouse rejects empty strings and
+         * NULL for JSON, and {} is the convention ColumnNullableT<ColumnJSON>
+         * uses for null rows, so a Nullable(JSON) build under
+         * AllowNullGuard lands a valid placeholder here too. */
+        auto value = std::make_shared<ColumnJSON>();
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
+        {
+            zval *v = array_value;
+            ZVAL_DEREF(v);
+            if (Z_TYPE_P(v) == IS_ARRAY || Z_TYPE_P(v) == IS_OBJECT) {
+                smart_str buf = {0};
+                if (php_json_encode(&buf, v, 0) == FAILURE || EG(exception)) {
+                    smart_str_free(&buf);
+                    if (EG(exception)) {
+                        zend_clear_exception();
+                    }
+                    throw std::runtime_error("JSON insert: failed to encode value to JSON");
+                }
+                smart_str_0(&buf);
+                value->Append(std::string(ZSTR_VAL(buf.s), ZSTR_LEN(buf.s)));
+                smart_str_free(&buf);
+            } else if (Z_TYPE_P(v) == IS_STRING) {
+                /* Validate without keeping the decoded value. */
+                zval probe;
+                if (php_json_decode(&probe, Z_STRVAL_P(v), Z_STRLEN_P(v),
+                                    /*assoc=*/true, PHP_JSON_PARSER_DEFAULT_DEPTH) == FAILURE) {
+                    zval_ptr_dtor(&probe);
+                    throw std::runtime_error("JSON insert: string value is not valid JSON");
+                }
+                zval_ptr_dtor(&probe);
+                value->Append(std::string(Z_STRVAL_P(v), Z_STRLEN_P(v)));
+            } else if (Z_TYPE_P(v) == IS_NULL) {
+                value->Append(std::string("{}"));
+            } else {
+                throw std::runtime_error(
+                    "JSON insert requires an array, object, or JSON string value");
+            }
+        }
+        ZEND_HASH_FOREACH_END();
         return value;
     }
     case Type::Code::FixedString:
@@ -2062,6 +2117,56 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         else
         {
             SC_SINGLE_STRING(col.data(), col.length());
+        }
+        break;
+    }
+    case Type::Code::JSON:
+    {
+        /* Reads require output_format_native_write_json_as_string=1 on the
+         * session; without it ColumnJSON::LoadPrefix throws a ProtocolError
+         * before we ever reach here. Default surfaces the raw JSON string.
+         * JSON_AS_ARRAY / JSON_AS_OBJECT decode it to a PHP value (assoc
+         * array vs stdClass); ARRAY wins if both bits are set. */
+        auto j_col = as_or_throw<ColumnJSON>(columnRef, "JSON read");
+        auto sv = j_col->At(row);
+        if (fetch_mode & (SC_FETCH_JSON_AS_ARRAY | SC_FETCH_JSON_AS_OBJECT))
+        {
+            bool assoc = (fetch_mode & SC_FETCH_JSON_AS_ARRAY) != 0;
+            zval decoded;
+            /* At() returns a string_view into ColumnString's packed buffer,
+             * so the byte past the end is the next cell, not a NUL. PHP's
+             * re2c JSON scanner needs a NUL terminator (json_decode always
+             * gets a zend_string), so decode from a terminated copy. */
+            std::string json_str(sv);
+            if (php_json_decode(&decoded, json_str.c_str(), json_str.size(), assoc,
+                                PHP_JSON_PARSER_DEFAULT_DEPTH) == FAILURE)
+            {
+                zval_ptr_dtor(&decoded);
+                throw std::runtime_error("JSON read: failed to decode server JSON value");
+            }
+            if (is_array)
+            {
+                add_next_index_zval(arr, &decoded);
+            }
+            else if (fetch_mode & SC_FETCH_ONE)
+            {
+                ZVAL_COPY_VALUE(arr, &decoded);
+            }
+            else
+            {
+                sc_add_assoc_zval_ex(arr, column_name.c_str(), column_name.length(), &decoded);
+            }
+        }
+        else
+        {
+            if (is_array)
+            {
+                sc_add_next_index_stringl(arr, sv.data(), sv.length(), 1);
+            }
+            else
+            {
+                SC_SINGLE_STRING(sv.data(), sv.length());
+            }
         }
         break;
     }

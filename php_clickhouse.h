@@ -40,6 +40,8 @@ extern zend_module_entry clickhouse_module_entry;
 #define SC_FETCH_KEY_PAIR 2
 #define SC_FETCH_DATE_AS_STRINGS 4
 #define SC_FETCH_COLUMN 8
+#define SC_FETCH_JSON_AS_ARRAY 16
+#define SC_FETCH_JSON_AS_OBJECT 32
 
 #define CLICKHOUSE_RES_NAME "ClickHouse"
 #define CLICKHOUSE_EXCEPTION_NAME "ClickHouseException"

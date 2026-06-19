@@ -8,6 +8,8 @@ final class ClickHouse
     public const int FETCH_KEY_PAIR = 2;
     public const int DATE_AS_STRINGS = 4;
     public const int FETCH_COLUMN = 8;
+    public const int JSON_AS_ARRAY = 16;
+    public const int JSON_AS_OBJECT = 32;
 
     protected string $host = "127.0.0.1";
     protected int $port = 9000;
@@ -139,7 +141,8 @@ final class ClickHouse
         string $sql,
         array $params = [],
         string $query_id = "",
-        array $settings = []
+        array $settings = [],
+        int $fetch_mode = 0
     ): ClickHouseRowIterator {}
 
     public function selectStatement(
@@ -154,7 +157,8 @@ final class ClickHouse
         callable $callback,
         array $params = [],
         string $query_id = "",
-        array $settings = []
+        array $settings = [],
+        int $fetch_mode = 0
     ): bool {}
 
     public function isExists(string $database, string $table): bool {}
