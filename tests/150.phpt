@@ -56,9 +56,10 @@ $z = "zstd";
 $cfg = clickhouse_test_config();
 $cfg["compression"] = &$z;
 $c2 = new ClickHouse($cfg);
-$rp = (new ReflectionObject($c2))->getProperty("compression");
-$rp->setAccessible(true); // required on PHP 7.4 / 8.0 for a protected property
-echo "by-ref compression: ", $rp->getValue($c2), "\n";
+// Read the protected property via a bound closure: portable across 7.4-8.5
+// (Reflection's setAccessible is required on 7.4 but deprecated in 8.5).
+$readComp = Closure::bind(function () { return $this->compression; }, $c2, ClickHouse::class);
+echo "by-ref compression: ", $readComp(), "\n";
 
 foreach (["r_an","r_lc","r_tp","r_en","r_pt"] as $t) $c->execute("DROP TABLE test.$t");
 ?>
