@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `selectStream()` and `selectStreamCallback()` now accept a trailing `fetch_mode` argument (after `settings`), so the `fetch_mode` bitmask — including the new `JSON_AS_ARRAY` / `JSON_AS_OBJECT` flags and the existing `DATE_AS_STRINGS` — applies on the streaming read paths, not just `select()`.
 - `Bool` column read and write. Reads surface a PHP bool; writes accept a bool or an int.
 - `IPv4` and `IPv6` writes (both were read-only before). `IPv4` accepts a dotted-quad string or an integer using the same convention as ClickHouse's `toIPv4()` (16909060 inserts as 1.2.3.4); `IPv6` accepts a dotted/colon string. Both validate client-side and support `Nullable`.
+- `Array(Tuple(...))` writes. `Tuple` columns could already be read and written at the top level; nested inside an `Array` they previously threw on insert.
 
 ### Changed
 
