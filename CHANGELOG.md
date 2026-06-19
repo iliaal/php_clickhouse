@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- A streaming insert abandoned without `writeEnd()` (script bailout, `unset()`, exception unwind) now finalizes whatever the server accepted instead of attempting a reconnect-to-discard on teardown. ClickHouse inserts are not transactional, so the old discard only dropped inserts small enough to sit in the server squash buffer; it was size-dependent and silently partial. Use insert deduplication if you need exactly-once.
+
 ## [0.8.7] - 2026-06-11
 
 ### Fixed

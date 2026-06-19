@@ -88,13 +88,14 @@ struct clickhouse_object {
     Block insert_block;
     bool has_insert_block;
     /* True once write() has handed any block to the native client during
-     * the current writeStart()/writeEnd() session. The streaming-insert
-     * recovery path keys off this: pre-send conversion failure on a
-     * still-clean session can EndInsert() to close an empty insert,
-     * but once even one block has been sent the recovery must
-     * ResetConnection() to discard partial data. EndInsert() in that
-     * case would commit the already-sent blocks and turn a thrown
-     * write() into a silent partial-commit. */
+     * the current writeStart()/writeEnd() session. The error-path
+     * recovery keys off this: a pre-send failure on a still-clean
+     * session can EndInsert() to close the empty insert and clear the
+     * native inserting_ flag, but once a block has been sent the wire is
+     * dirty and recovery must ResetConnection() to get a usable handle
+     * back (EndInsert() on a dirty wire would throw or wedge). This is
+     * handle recovery, not insert rollback: ClickHouse inserts are not
+     * transactional, so streamed blocks may already be persisted. */
     bool insert_blocks_sent;
     /* Guards same-client reentry. clickhouse-cpp's Client uses a single
      * socket and a single per-call packet loop; a userland callback that
@@ -173,24 +174,16 @@ static void clickhouse_free_obj(zend_object *object)
 {
     clickhouse_object *obj = clickhouse_from_obj(object);
 
-    /* Mirror write()'s catch-side recovery policy for an orphaned
-     * streaming insert. EndInsert() commits whatever blocks have
-     * already been sent, so on a session that received write() rows
-     * but never writeEnd() — script bailout, exception unwinding,
-     * unset() before completion — calling EndInsert() here turns an
-     * incomplete user intent into an implicit partial commit. Use
-     * ResetConnection() in that case so the server discards the
-     * in-flight insert. A clean session (BeginInsert ran, no blocks
-     * sent yet) is harmless to close with EndInsert. Swallow errors:
-     * free_obj must not throw. */
-    if (obj->client && obj->has_insert_block) {
-        if (obj->insert_blocks_sent) {
-            try { obj->client->ResetConnection(); } catch (...) {}
-        } else {
-            try { obj->client->EndInsert(); } catch (...) {}
-        }
-    }
-
+    /* An orphaned streaming insert (rows sent, no writeEnd() — script
+     * bailout, exception unwind, unset() before completion) is wound
+     * down by ~Client, which sends the end-of-insert marker on the
+     * existing wire and finalizes whatever the server accepted. We
+     * deliberately do NOT reconnect-to-discard first: ClickHouse inserts
+     * are not transactional, so blocks already streamed may have been
+     * written to parts regardless, and the old discard only dropped
+     * inserts small enough to still sit in the server's squash buffer —
+     * size-dependent and silently partial. Just delete and let the
+     * client wind down. */
     if (obj->client) {
         delete obj->client;
         obj->client = nullptr;
@@ -3128,8 +3121,9 @@ static void do_insert_into(zval *this_obj, zend_string *table,
              *     leave the client unable to run subsequent queries
              *     ("cannot execute query while inserting" until manual
              *     resetConnection). ResetConnection() drops the socket
-             *     and reconnects — discards any in-flight insert and
-             *     leaves the handle reusable.
+             *     and reconnects, leaving the handle reusable. This is
+             *     handle recovery, not insert rollback: the server may
+             *     have persisted blocks already streamed.
              * A throw past SendInsertBlock means the data left this
              * process; the server alone determined whether to commit.
              * Reset to recover the handle either way. */
@@ -3931,10 +3925,10 @@ PHP_METHOD(ClickHouse, write)
          *     inserting" and the caller has to resetConnection() by
          *     hand.
          *   - Pre-send on a dirty session (a prior write() already sent
-         *     blocks): EndInsert() would commit those earlier blocks
-         *     and turn this thrown write() into a silent partial commit.
-         *     Drop the connection instead so the server discards the
-         *     in-flight insert.
+         *     blocks): the wire is dirty, so ResetConnection() to get a
+         *     usable handle back. This recovers the connection; it is
+         *     not an insert rollback — ClickHouse is not transactional,
+         *     so blocks already streamed may be persisted regardless.
          *   - Mid-send (SendInsertBlock itself threw): the wire is
          *     dirty regardless of prior writes; reset for the same
          *     reason. insert_blocks_sent is set true before

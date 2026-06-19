@@ -1,5 +1,5 @@
 --TEST--
-ClickHouse destructor on an in-flight streaming insert rolls back, does not commit
+ClickHouse destructor on an in-flight streaming insert finalizes it (no rollback)
 --EXTENSIONS--
 clickhouse
 --SKIPIF--
@@ -8,51 +8,52 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression for round-13-followup CR-001: clickhouse_free_obj() called
-// EndInsert() unconditionally when has_insert_block was true. EndInsert()
-// commits any blocks the session already sent — so writeStart() + write()
-// followed by unset()/teardown without writeEnd() implicitly committed
-// partial data. write()'s own catch path was already routed through
-// ResetConnection() for dirty sessions in Round 13; the destructor now
-// follows the same policy.
+// ClickHouse inserts are not transactional. A streaming insert that is
+// abandoned without writeEnd() (script bailout, exception unwind, unset())
+// is wound down by ~Client, which finalizes whatever the server accepted on
+// the existing wire. The destructor does NOT reconnect-to-discard: that only
+// ever dropped inserts small enough to still sit in the server squash buffer,
+// so it was size-dependent and silently partial. Callers needing exactly-once
+// must use explicit insert deduplication, not handle teardown.
 
 $cfg = clickhouse_test_config();
 $c = new ClickHouse($cfg);
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
-$c->execute("DROP TABLE IF EXISTS test.destruct_rollback");
-$c->execute("CREATE TABLE test.destruct_rollback (id UInt32) ENGINE=Memory");
+$c->execute("DROP TABLE IF EXISTS test.destruct_finalize");
+$c->execute("CREATE TABLE test.destruct_finalize (id UInt32) ENGINE=Memory");
 
-// Dirty session: rows sent, no writeEnd, then drop the handle.
+// Dirty session: rows sent, no writeEnd, then drop the handle. The
+// destructor finalizes the in-flight insert; the rows land.
 $c2 = new ClickHouse($cfg);
-$c2->writeStart("test.destruct_rollback", ["id"]);
+$c2->writeStart("test.destruct_finalize", ["id"]);
 $c2->write([[1], [2]]);
 unset($c2);
 
-$cnt = $c->select("SELECT count() FROM test.destruct_rollback", [], ClickHouse::FETCH_ONE);
+$cnt = $c->select("SELECT count() FROM test.destruct_finalize", [], ClickHouse::FETCH_ONE);
 echo "after dirty unset: $cnt\n";
 
-// Clean session: writeStart but never wrote — destructor should still
-// close the empty insert without throwing or wedging the server.
+// Clean session: writeStart but never wrote — destructor closes the empty
+// insert without throwing or wedging the server. No rows added.
 $c3 = new ClickHouse($cfg);
-$c3->writeStart("test.destruct_rollback", ["id"]);
+$c3->writeStart("test.destruct_finalize", ["id"]);
 unset($c3);
 
-$cnt = $c->select("SELECT count() FROM test.destruct_rollback", [], ClickHouse::FETCH_ONE);
+$cnt = $c->select("SELECT count() FROM test.destruct_finalize", [], ClickHouse::FETCH_ONE);
 echo "after clean unset: $cnt\n";
 
 // Sanity: a complete cycle on a fresh handle still lands as expected.
 $c4 = new ClickHouse($cfg);
-$c4->writeStart("test.destruct_rollback", ["id"]);
+$c4->writeStart("test.destruct_finalize", ["id"]);
 $c4->write([[10], [20], [30]]);
 $c4->writeEnd();
 unset($c4);
 
-$cnt = $c->select("SELECT count() FROM test.destruct_rollback", [], ClickHouse::FETCH_ONE);
+$cnt = $c->select("SELECT count() FROM test.destruct_finalize", [], ClickHouse::FETCH_ONE);
 echo "after full cycle: $cnt\n";
 
-$c->execute("DROP TABLE test.destruct_rollback");
+$c->execute("DROP TABLE test.destruct_finalize");
 ?>
 --EXPECT--
-after dirty unset: 0
-after clean unset: 0
-after full cycle: 3
+after dirty unset: 2
+after clean unset: 2
+after full cycle: 5
