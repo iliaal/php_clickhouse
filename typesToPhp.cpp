@@ -338,6 +338,21 @@ static double strict_zval_double(zval *z, const char *type_label)
     }
 }
 
+/* Casting a double outside [INT64_MIN, INT64_MAX] to int64_t is UB
+ * (C11 6.3.1.4p1). On x86-64 it silently saturates rather than trapping,
+ * and GCC's -fsanitize=undefined does NOT flag it, so guard explicitly.
+ * 9223372036854775808.0 is 2^63, the first double above INT64_MAX; any
+ * value strictly below it (and >= -2^63) truncates to a valid int64. The
+ * negated-range test also rejects a NaN/Inf the multiply might produce. */
+static int64_t checked_double_to_int64(double v, const char *type_label)
+{
+    if (!(v >= -9223372036854775808.0 && v < 9223372036854775808.0)) {
+        throw std::runtime_error(
+            std::string(type_label) + " value out of representable 64-bit range");
+    }
+    return (int64_t)v;
+}
+
 static std::string strict_zval_string(zval *z, const char *type_label)
 {
     ZVAL_DEREF(z);
@@ -1432,7 +1447,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                         "precision loss; pass a formatted date string for sub-microsecond precision");
                 }
                 double d = strict_zval_double(v, "DateTime64");
-                value->Append((int64_t)(d * scale));
+                value->Append(checked_double_to_int64(d * scale, "DateTime64"));
             } else {
                 /* Integer = whole seconds since the epoch, scaled to ticks.
                  * Guard the multiply against int64 overflow for absurd inputs. */
@@ -1497,7 +1512,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                         "precision loss; pass an integer number of seconds");
                 }
                 double d = strict_zval_double(v, "Time64");
-                value->Append((int64_t)(d * scale));
+                value->Append(checked_double_to_int64(d * scale, "Time64"));
             } else {
                 /* Integer = whole seconds, scaled to ticks; guard the
                  * multiply against int64 overflow. */

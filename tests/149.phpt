@@ -63,6 +63,13 @@ expect_throw("dt64(9) float", fn() => $c->insert("test.h_dt", ["t"], [[170000000
 // Integer input is whole epoch seconds (scaled to ticks internally).
 $c->insert("test.h_dt", ["t"], [[1700000000]]);
 echo "dt64(9) int ok: ", (int) $c->select("SELECT count() c FROM test.h_dt", [], ClickHouse::FETCH_ONE), "\n";
+// An out-of-range float (precision < 7 path) is bounded before the int64
+// cast instead of invoking double->int64 UB.
+$c->execute("DROP TABLE IF EXISTS test.h_dt3");
+$c->execute("CREATE TABLE test.h_dt3 (t DateTime64(3)) ENGINE = Memory");
+expect_throw("dt64(3) huge float", fn() => $c->insert("test.h_dt3", ["t"], [[1e300]]));
+$c->insert("test.h_dt3", ["t"], [[1700000000.5]]);
+echo "dt64(3) float ok: ", (int) $c->select("SELECT count() c FROM test.h_dt3", [], ClickHouse::FETCH_ONE), "\n";
 
 // CR-007: IPv4 accepts an integral float (consistent with integer columns);
 // a fractional float is rejected.
@@ -72,7 +79,7 @@ $c->insert("test.h_ip", ["a"], [[16909060.0]]);
 echo "ipv4 float: ", $c->select("SELECT a FROM test.h_ip", [], ClickHouse::FETCH_ONE), "\n";
 expect_throw("ipv4 fractional", fn() => $c->insert("test.h_ip", ["a"], [[1.5]]));
 
-foreach (["h_dec","h_dec2","h_s","h_arr","h_dt","h_ip"] as $t) $c->execute("DROP TABLE test.$t");
+foreach (["h_dec","h_dec2","h_s","h_arr","h_dt","h_dt3","h_ip"] as $t) $c->execute("DROP TABLE test.$t");
 ?>
 --EXPECT--
 decimal scale>38 read: throw
@@ -84,5 +91,7 @@ no row committed: 0
 nested ref: 1,5,3
 dt64(9) float: throw
 dt64(9) int ok: 1
+dt64(3) huge float: throw
+dt64(3) float ok: 1
 ipv4 float: 1.2.3.4
 ipv4 fractional: throw
