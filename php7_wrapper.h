@@ -86,7 +86,13 @@ static inline int sc_zend_hash_get_current_data(HashTable *ht, void **v)
     return SUCCESS;
 }
 
-#define php_array_get_value(ht, str, v) ((v = sc_zend_hash_find(ht, (char *)str, sizeof(str)-1)) && !ZVAL_IS_NULL(v))
+/* Deref the found value so callers branching on Z_TYPE_P(v) see the real
+ * type rather than IS_REFERENCE (a by-ref config value, e.g.
+ * ['compression' => &$x], would otherwise fall through type checks). The
+ * conditional-assignment keeps it a single expression usable in `if`. */
+#define php_array_get_value(ht, str, v) \
+    (((v = sc_zend_hash_find(ht, (char *)str, sizeof(str)-1)) != NULL) \
+     && ((v = (Z_ISREF_P(v) ? Z_REFVAL_P(v) : v)), !ZVAL_IS_NULL(v)))
 
 /* FAST_ZPP _OR_NULL convenience macros are PHP 8.0+. Shim for 7.4 with
  * the older Z_PARAM_*_EX(dest, check_null, separate) form. */

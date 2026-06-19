@@ -16,13 +16,27 @@ if test "$PHP_CLICKHOUSE" != "no"; then
 
   CLICKHOUSE_SSL_SRC=""
   if test "$PHP_CLICKHOUSE_OPENSSL" != "no"; then
-    AC_MSG_CHECKING([for OpenSSL libraries])
-    PHP_ADD_LIBRARY(ssl, 1, CLICKHOUSE_SHARED_LIBADD)
-    PHP_ADD_LIBRARY(crypto, 1, CLICKHOUSE_SHARED_LIBADD)
-    AC_DEFINE([WITH_OPENSSL], [1], [Build php_clickhouse with TLS/SSL support])
-    CXXFLAGS="$CXXFLAGS -DWITH_OPENSSL"
-    CLICKHOUSE_SSL_SRC="lib/clickhouse-cpp/clickhouse/base/sslsocket.cpp"
-    AC_MSG_RESULT([enabled])
+    dnl Validate the OpenSSL header and libraries before wiring up the TLS
+    dnl build, so --enable-clickhouse-openssl fails with a clear message
+    dnl rather than an opaque "openssl/ssl.h: No such file" when compiling
+    dnl sslsocket.cpp. The Windows config.w32 already does CHECK_LIB /
+    dnl CHECK_HEADER for this.
+    AC_CHECK_HEADER([openssl/ssl.h], [], [
+      AC_MSG_ERROR([--enable-clickhouse-openssl was requested but openssl/ssl.h was not found. Install the OpenSSL development package (e.g. libssl-dev / openssl-devel) or drop the flag.])
+    ])
+    PHP_CHECK_LIBRARY(ssl, SSL_CTX_new, [
+      PHP_CHECK_LIBRARY(crypto, EVP_get_digestbyname, [
+        PHP_ADD_LIBRARY(ssl, 1, CLICKHOUSE_SHARED_LIBADD)
+        PHP_ADD_LIBRARY(crypto, 1, CLICKHOUSE_SHARED_LIBADD)
+        AC_DEFINE([WITH_OPENSSL], [1], [Build php_clickhouse with TLS/SSL support])
+        CXXFLAGS="$CXXFLAGS -DWITH_OPENSSL"
+        CLICKHOUSE_SSL_SRC="lib/clickhouse-cpp/clickhouse/base/sslsocket.cpp"
+      ], [
+        AC_MSG_ERROR([--enable-clickhouse-openssl requires libcrypto, which was not found. Install the OpenSSL development package.])
+      ])
+    ], [
+      AC_MSG_ERROR([--enable-clickhouse-openssl requires libssl, which was not found. Install the OpenSSL development package (e.g. libssl-dev / openssl-devel).])
+    ])
   fi
 
   clickhouse_source_file="clickhouse.cpp \

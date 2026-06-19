@@ -1202,6 +1202,7 @@ static std::string formatParamValue(zval *v, const std::string &type, bool insid
 
 static std::string formatScalarParam(zval *v)
 {
+    ZVAL_DEREF(v);
     switch (Z_TYPE_P(v)) {
         case IS_NULL:
             return std::string();
