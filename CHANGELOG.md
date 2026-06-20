@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.8] - 2026-06-20
+
 ### Added
 
 - `JSON` column read and write. Inserts take a PHP array/object (encoded) or a raw JSON string; reads return the JSON string, or decode with `ClickHouse::JSON_AS_ARRAY` / `JSON_AS_OBJECT`. Reads need `output_format_native_write_json_as_string=1` on the session.
@@ -834,7 +836,8 @@ own way.
   emits a clear "unsupported" warning. Full Windows build of the
   vendored zstd + absl + lz4 + cityhash is a separate project.
 
-[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.8.7...HEAD
+[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.8.8...HEAD
+[0.8.8]: https://github.com/iliaal/php_clickhouse/releases/tag/0.8.8
 [0.8.7]: https://github.com/iliaal/php_clickhouse/releases/tag/0.8.7
 [0.8.6]: https://github.com/iliaal/php_clickhouse/releases/tag/0.8.6
 [0.8.5]: https://github.com/iliaal/php_clickhouse/releases/tag/0.8.5
