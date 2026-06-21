@@ -10,6 +10,7 @@ final class ClickHouse
     public const int FETCH_COLUMN = 8;
     public const int JSON_AS_ARRAY = 16;
     public const int JSON_AS_OBJECT = 32;
+    public const int UUID_WITH_DASHES = 64;
 
     protected string $host = "127.0.0.1";
     protected int $port = 9000;

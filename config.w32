@@ -38,7 +38,7 @@ if (PHP_CLICKHOUSE != "no") {
             AC_DEFINE("WITH_OPENSSL", 1, "Build php_clickhouse with TLS/SSL support");
             clickhouse_ssl_src = "sslsocket.cpp";
         } else {
-            WARNING("clickhouse-openssl was requested but libssl/libcrypto were not found; building without TLS support.");
+            ERROR("--enable-clickhouse-openssl was requested but libssl/libcrypto/openssl headers were not found. Install OpenSSL or drop the flag. (config.m4 fails hard here too.)");
         }
     }
 

@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: 37308080466cc29a0674c7487357da0bc82e5797 */
+ * Stub hash: f48d5a5a610120dfd9ac4a88c1284acbc7a84fba */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_ClickHouse___construct, 0, 0, 1)
 	ZEND_ARG_TYPE_INFO(0, connectParams, IS_ARRAY, 0)
@@ -447,6 +447,12 @@ static zend_class_entry *register_class_ClickHouse(void)
 	zend_string *const_JSON_AS_OBJECT_name = zend_string_init_interned("JSON_AS_OBJECT", sizeof("JSON_AS_OBJECT") - 1, 1);
 	zend_declare_typed_class_constant(class_entry, const_JSON_AS_OBJECT_name, &const_JSON_AS_OBJECT_value, ZEND_ACC_PUBLIC, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_LONG));
 	zend_string_release(const_JSON_AS_OBJECT_name);
+
+	zval const_UUID_WITH_DASHES_value;
+	ZVAL_LONG(&const_UUID_WITH_DASHES_value, 64);
+	zend_string *const_UUID_WITH_DASHES_name = zend_string_init_interned("UUID_WITH_DASHES", sizeof("UUID_WITH_DASHES") - 1, 1);
+	zend_declare_typed_class_constant(class_entry, const_UUID_WITH_DASHES_name, &const_UUID_WITH_DASHES_value, ZEND_ACC_PUBLIC, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_LONG));
+	zend_string_release(const_UUID_WITH_DASHES_name);
 
 	zval property_host_default_value;
 	zend_string *property_host_default_value_str = zend_string_init("127.0.0.1", strlen("127.0.0.1"), 1);

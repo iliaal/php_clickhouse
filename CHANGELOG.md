@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `ClickHouse::UUID_WITH_DASHES` fetch flag renders `UUID` cells — standalone columns and `Map` keys/values — as the hyphenated canonical form instead of bare 32-char hex. Applies to `select`, `selectStream`, and `selectStreamCallback`.
+
+### Changed
+
+- `Map(UUID, …)` keys and `Map(…, UUID)` values read back as bare 32-char hex by default, matching standalone `UUID` columns; they previously rendered hyphenated. Pass `ClickHouse::UUID_WITH_DASHES` for the canonical dashed form.
+
+### Fixed
+
+- `Time` inserts reject a value outside the int32 range instead of silently truncating it.
+- `Decimal` inserts reject a non-scalar value (array / object) with a clear exception instead of stringifying it to `"Array"` and failing server-side.
+- `FixedString` inserts reject a value longer than the declared width client-side instead of relying on an opaque server protocol error.
+- `config.w32` fails hard when `--enable-clickhouse-openssl` is set but OpenSSL is missing, instead of warning and silently building without TLS (matching `config.m4`).
+
 ## [0.8.8] - 2026-06-20
 
 ### Added
