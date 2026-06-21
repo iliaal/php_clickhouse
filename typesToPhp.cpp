@@ -365,8 +365,8 @@ static std::string strict_zval_string(zval *z, const char *type_label)
     return std::string(sg.val(), sg.len());
 }
 
-/* Format a UUID as either 32 raw hex chars (default, SeasClick-compatible)
- * or the canonical 8-4-4-4-12 dashed form. Stripping the dashes from the
+/* Format a UUID as either 32 raw hex chars (the historical default) or
+ * the canonical 8-4-4-4-12 dashed form. Stripping the dashes from the
  * dashed form yields exactly the raw-hex form, so both render the same
  * bytes. Returns the number of chars written (excluding the NUL). */
 static int format_uuid(UUID u, bool dashed, char *buf, size_t bufsz)
