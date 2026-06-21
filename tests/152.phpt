@@ -25,7 +25,7 @@ function probe_client(string $label, callable $fn, string $needle): void {
         $fn();
         echo "$label: NO THROW\n";
     } catch (Throwable $e) {
-        echo "$label: ", str_contains($e->getMessage(), $needle) ? "REJECTED (client)" : "REJECTED (server)", "\n";
+        echo "$label: ", strpos($e->getMessage(), $needle) !== false ? "REJECTED (client)" : "REJECTED (server)", "\n";
     }
 }
 
