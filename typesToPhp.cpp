@@ -365,6 +365,25 @@ static std::string strict_zval_string(zval *z, const char *type_label)
     return std::string(sg.val(), sg.len());
 }
 
+/* Format a UUID as either 32 raw hex chars (default, SeasClick-compatible)
+ * or the canonical 8-4-4-4-12 dashed form. Stripping the dashes from the
+ * dashed form yields exactly the raw-hex form, so both render the same
+ * bytes. Returns the number of chars written (excluding the NUL). */
+static int format_uuid(UUID u, bool dashed, char *buf, size_t bufsz)
+{
+    if (dashed) {
+        return snprintf(buf, bufsz, "%08x-%04x-%04x-%04x-%012llx",
+                        (uint32_t)(u.first >> 32),
+                        (uint16_t)((u.first >> 16) & 0xffff),
+                        (uint16_t)(u.first & 0xffff),
+                        (uint16_t)(u.second >> 48),
+                        (unsigned long long)(u.second & 0xffffffffffffull));
+    }
+    return snprintf(buf, bufsz, "%016llx%016llx",
+                    (unsigned long long)u.first,
+                    (unsigned long long)u.second);
+}
+
 static int uuid_hex_value(char c)
 {
     if (c >= '0' && c <= '9') return c - '0';
@@ -1405,11 +1424,17 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     }
     case Type::Code::FixedString:
     {
-        auto value = std::make_shared<ColumnFixedString>(parseFixedStringWidth(type));
+        size_t width = parseFixedStringWidth(type);
+        auto value = std::make_shared<ColumnFixedString>(width);
 
         ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
-            value->Append(strict_zval_string(array_value, "FixedString"));
+            std::string s = strict_zval_string(array_value, "FixedString");
+            if (s.size() > width) {
+                throw std::runtime_error(
+                    "FixedString value exceeds the declared column width");
+            }
+            value->Append(s);
         }
         ZEND_HASH_FOREACH_END();
 
@@ -1492,7 +1517,12 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                     "Time column inserts require numeric seconds; "
                     "string formatted-time input is not currently supported");
             }
-            value->Append((int32_t)strict_zval_long(array_value, "Time"));
+            zend_long t = strict_zval_long(array_value, "Time");
+            if (t < INT32_MIN || t > INT32_MAX) {
+                throw std::runtime_error(
+                    "Time column value out of representable int32 range");
+            }
+            value->Append((int32_t)t);
         }
         ZEND_HASH_FOREACH_END();
         return value;
@@ -1614,7 +1644,14 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         auto value = std::make_shared<ColumnDecimal>(dt->GetPrecision(), dt->GetScale());
         ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
-            ZStrGuard sg(array_value);
+            zval *v = array_value;
+            ZVAL_DEREF(v);
+            if (Z_TYPE_P(v) == IS_ARRAY || Z_TYPE_P(v) == IS_OBJECT ||
+                Z_TYPE_P(v) == IS_RESOURCE) {
+                throw std::runtime_error(
+                    "Decimal insert requires a scalar value (string, int, or float)");
+            }
+            ZStrGuard sg(v);
             value->Append(std::string(sg.val(), sg.len()));
         }
         ZEND_HASH_FOREACH_END();
@@ -2219,17 +2256,16 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             throw std::runtime_error("UUID read: column type mismatch");
         }
         auto col = (*uuid_col)[row];
-        char buf[33];
-        snprintf(buf, sizeof(buf), "%016llx%016llx",
-                 (unsigned long long)col.first,
-                 (unsigned long long)col.second);
+        char buf[37];
+        int blen = format_uuid(col, (fetch_mode & SC_FETCH_UUID_WITH_DASHES) != 0,
+                               buf, sizeof(buf));
         if (is_array)
         {
-            sc_add_next_index_stringl(arr, buf, 32, 1);
+            sc_add_next_index_stringl(arr, buf, blen, 1);
         }
         else
         {
-            SC_SINGLE_STRING(buf, 32);
+            SC_SINGLE_STRING(buf, blen);
         }
         break;
     }
@@ -2965,14 +3001,10 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
                 case Type::Code::Float64: dbl_out  = (double)k_f64_col->At(i);     return 2;
                 case Type::Code::UUID: {
                     UUID u = k_uuid_col->At(i);
-                    char buf[64];
-                    snprintf(buf, sizeof(buf), "%08x-%04x-%04x-%04x-%012llx",
-                             (uint32_t)(u.first >> 32),
-                             (uint16_t)((u.first >> 16) & 0xffff),
-                             (uint16_t)(u.first & 0xffff),
-                             (uint16_t)(u.second >> 48),
-                             (unsigned long long)(u.second & 0xffffffffffffull));
-                    str_buf.assign(buf);
+                    char buf[37];
+                    int blen = format_uuid(u, (fetch_mode & SC_FETCH_UUID_WITH_DASHES) != 0,
+                                           buf, sizeof(buf));
+                    str_buf.assign(buf, blen);
                     return 0;
                 }
                 default:
@@ -3077,13 +3109,9 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
                 addDbl(kkind, str_key_buf, long_key, dbl_key, dv);
             } else if (value_code == Type::Code::UUID) {
                 UUID u = v_uuid_col->At(i);
-                char buf[64];
-                int blen = snprintf(buf, sizeof(buf), "%08x-%04x-%04x-%04x-%012llx",
-                         (uint32_t)(u.first >> 32),
-                         (uint16_t)((u.first >> 16) & 0xffff),
-                         (uint16_t)(u.first & 0xffff),
-                         (uint16_t)(u.second >> 48),
-                         (unsigned long long)(u.second & 0xffffffffffffull));
+                char buf[37];
+                int blen = format_uuid(u, (fetch_mode & SC_FETCH_UUID_WITH_DASHES) != 0,
+                                       buf, sizeof(buf));
                 addStrL(kkind, str_key_buf, long_key, dbl_key, buf, blen);
             } else {
                 throw std::runtime_error("Map read: unsupported value type " + value_type_ref->GetName());

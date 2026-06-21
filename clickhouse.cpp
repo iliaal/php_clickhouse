@@ -3626,9 +3626,9 @@ PHP_METHOD(ClickHouse, insertFromStream)
             throw std::runtime_error("The insert operation is now in progress");
         }
 
-        /* Validate column-name list shape (same rules as insert()). */
-        std::vector<zend_string*> column_names;
-        column_names.reserve(columns_count);
+        /* Validate column-name list shape (same rules as insert()). The
+         * SQL is built from the original `columns` zval below, so this is
+         * a validation-only pass. */
         {
             zval *cz;
             ZEND_HASH_FOREACH_VAL(columns_ht, cz) {
@@ -3637,7 +3637,6 @@ PHP_METHOD(ClickHouse, insertFromStream)
                     throw std::runtime_error(
                         "insertFromStream: columns must be a list of column-name strings");
                 }
-                column_names.push_back(Z_STR_P(cz));
             } ZEND_HASH_FOREACH_END();
         }
 
