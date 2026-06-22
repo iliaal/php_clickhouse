@@ -454,6 +454,12 @@ static zend_class_entry *register_class_ClickHouse(void)
 	zend_declare_typed_class_constant(class_entry, const_UUID_WITH_DASHES_name, &const_UUID_WITH_DASHES_value, ZEND_ACC_PUBLIC, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_LONG));
 	zend_string_release(const_UUID_WITH_DASHES_name);
 
+	zval const_FIXEDSTRING_BINARY_value;
+	ZVAL_LONG(&const_FIXEDSTRING_BINARY_value, 128);
+	zend_string *const_FIXEDSTRING_BINARY_name = zend_string_init_interned("FIXEDSTRING_BINARY", sizeof("FIXEDSTRING_BINARY") - 1, 1);
+	zend_declare_typed_class_constant(class_entry, const_FIXEDSTRING_BINARY_name, &const_FIXEDSTRING_BINARY_value, ZEND_ACC_PUBLIC, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_LONG));
+	zend_string_release(const_FIXEDSTRING_BINARY_name);
+
 	zval property_host_default_value;
 	zend_string *property_host_default_value_str = zend_string_init("127.0.0.1", strlen("127.0.0.1"), 1);
 	ZVAL_STR(&property_host_default_value, property_host_default_value_str);
