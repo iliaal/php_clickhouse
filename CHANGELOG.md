@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `ClickHouse::UUID_WITH_DASHES` fetch flag renders `UUID` cells — standalone columns and `Map` keys/values — as the hyphenated canonical form instead of bare 32-char hex. Applies to `select`, `selectStream`, and `selectStreamCallback`.
+- `ClickHouse::FIXEDSTRING_BINARY` fetch flag returns `FixedString` values at their full declared width, preserving trailing NUL bytes, instead of trimming them. Use it for binary payloads (IPv6, hash digests, packed structs) that legitimately end in NUL. Applies to standalone and `LowCardinality(FixedString)` reads.
 
 ### Changed
 
@@ -21,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Decimal` inserts reject a non-scalar value (array / object) with a clear exception instead of stringifying it to `"Array"` and failing server-side.
 - `FixedString` inserts reject a value longer than the declared width client-side instead of relying on an opaque server protocol error.
 - `config.w32` fails hard when `--enable-clickhouse-openssl` is set but OpenSSL is missing, instead of warning and silently building without TLS (matching `config.m4`).
+- A server-supplied column type whose metadata doesn't match its declared type code throws a clear exception across the create / insert / read paths instead of dereferencing null; hardens the wrapper against a malicious or proxied server.
+- The constructor reports an allocation failure while assembling connection options as a `ClickHouseException` instead of letting the C++ exception escape and abort the process.
+- Verbose tracing (`setVerbose`) no longer discards a query exception that was already pending when a trace event fires; only an exception raised while encoding the trace payload itself is swallowed.
 
 ## [0.8.8] - 2026-06-20
 

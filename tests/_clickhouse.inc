@@ -45,7 +45,7 @@ function clickhouse_skip_if_no_server(): void
     $p = (int)(getenv("CLICKHOUSE_PORT") ?: "9000");
     $sock = @stream_socket_client("tcp://$h:$p", $err, $errstr, 1);
     if (!$sock) {
-        print "skip ClickHouse not reachable at $h:$p";
+        print "skip ClickHouse server not reachable";
         exit;
     }
     fclose($sock);
@@ -103,7 +103,7 @@ function clickhouse_skip_if_no_tls_server(): void
     $p = (int)(getenv("CLICKHOUSE_TLS_PORT") ?: "9440");
     $sock = @stream_socket_client("tcp://$h:$p", $err, $errstr, 1);
     if (!$sock) {
-        print "skip ClickHouse TLS not reachable at $h:$p";
+        print "skip ClickHouse TLS server not reachable";
         exit;
     }
     fclose($sock);

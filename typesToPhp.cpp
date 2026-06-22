@@ -139,6 +139,25 @@ static inline std::shared_ptr<TCol> as_or_throw(const ColumnRef &c, const char *
 }
 
 /*
+ * Same contract as as_or_throw, but for the server-supplied type-metadata
+ * tree (TypeRef) rather than a column. A crafted/MITM'd server can declare a
+ * type code whose concrete Type subclass doesn't match (e.g. a Map code with
+ * non-MapType metadata); the create/insert/read paths used to chain
+ * ->As<FooType>()->GetX() and deref the null straight into a crash.
+ */
+template <typename TType>
+static inline auto type_as_or_throw(const TypeRef &t, const char *what)
+{
+    /* Type::As<>() returns a raw (const TType*), unlike Column::As<>() which
+     * returns a shared_ptr; deduce the return type so both stay correct. */
+    auto p = t->As<TType>();
+    if (!p) {
+        throw std::runtime_error(std::string(what) + ": type metadata mismatch");
+    }
+    return p;
+}
+
+/*
  * Strict numeric coercion for INSERT cells. PHP's `zval_get_long` and
  * `zval_get_double` happily produce 0 / 0.0 for non-numeric strings,
  * arrays, objects, etc., which used to land "abc" as 0 in an Int32
@@ -251,8 +270,8 @@ static uint64_t strict_zval_u64(zval *z, const char *type_label)
                 throw std::runtime_error(
                     std::string("fractional double cannot be assigned to integer column ") + type_label);
             }
-            /* 18446744073709551616.0 is the next representable double
-             * above 2^64. Anything >= it overflows uint64_t. Negatives
+            /* 18446744073709551616.0 is exactly 2^64 (uint64_t max is
+             * 2^64-1), so anything >= it overflows uint64_t. Negatives
              * are rejected explicitly. */
             if (d < 0.0 || d >= 18446744073709551616.0) {
                 throw std::runtime_error(
@@ -527,7 +546,7 @@ static std::time_t to_time_t(const std::string& str, bool is_date = true)
  * path used to_time_t alone, which dropped any sub-second part of the
  * string entirely.
  */
-static std::pair<std::time_t, int64_t> to_time_t_with_frac(const std::string &str, size_t precision, int64_t scale)
+static std::pair<std::time_t, int64_t> to_time_t_with_frac(const std::string &str, size_t precision)
 {
     auto dot = str.find('.');
     std::time_t whole = to_time_t(dot == std::string::npos ? str : str.substr(0, dot), false);
@@ -574,7 +593,6 @@ static std::pair<std::time_t, int64_t> to_time_t_with_frac(const std::string &st
     } else {
         frac = 0;
     }
-    (void)scale;
     return {whole, frac};
 }
 
@@ -667,7 +685,7 @@ ColumnRef createColumn(TypeRef type)
     }
     case Type::Code::DateTime64:
     {
-        return std::make_shared<ColumnDateTime64>(type->As<DateTime64Type>()->GetPrecision());
+        return std::make_shared<ColumnDateTime64>(type_as_or_throw<DateTime64Type>(type, "DateTime64")->GetPrecision());
     }
     case Type::Code::Date:
     {
@@ -683,7 +701,7 @@ ColumnRef createColumn(TypeRef type)
     }
     case Type::Code::Time64:
     {
-        return std::make_shared<ColumnTime64>(type->As<Time64Type>()->GetPrecision());
+        return std::make_shared<ColumnTime64>(type_as_or_throw<Time64Type>(type, "Time64")->GetPrecision());
     }
     case Type::Code::Int128:
     {
@@ -698,7 +716,7 @@ ColumnRef createColumn(TypeRef type)
     case Type::Code::Decimal64:
     case Type::Code::Decimal128:
     {
-        auto dt = type->As<DecimalType>();
+        auto dt = type_as_or_throw<DecimalType>(type, "Decimal");
         return std::make_shared<ColumnDecimal>(dt->GetPrecision(), dt->GetScale());
     }
 
@@ -722,7 +740,7 @@ ColumnRef createColumn(TypeRef type)
 
     case Type::Code::Array:
     {
-        return std::make_shared<ColumnArray>(createColumn(type->As<ArrayType>()->GetItemType()));
+        return std::make_shared<ColumnArray>(createColumn(type_as_or_throw<ArrayType>(type, "Array")->GetItemType()));
     }
 
     case Type::Code::Enum8:
@@ -736,15 +754,15 @@ ColumnRef createColumn(TypeRef type)
 
     case Type::Code::Nullable:
     {
-        return std::make_shared<ColumnNullable>(createColumn(type->As<NullableType>()->GetNestedType()), std::make_shared<ColumnUInt8>());
+        return std::make_shared<ColumnNullable>(createColumn(type_as_or_throw<NullableType>(type, "Nullable")->GetNestedType()), std::make_shared<ColumnUInt8>());
     }
 
     case Type::Code::LowCardinality:
     {
-        TypeRef nested = type->As<LowCardinalityType>()->GetNestedType();
+        TypeRef nested = type_as_or_throw<LowCardinalityType>(type, "LowCardinality")->GetNestedType();
         bool is_nullable = (nested->GetCode() == Type::Code::Nullable);
         TypeRef inner = is_nullable
-            ? nested->As<NullableType>()->GetNestedType()
+            ? type_as_or_throw<NullableType>(nested, "Nullable")->GetNestedType()
             : nested;
         if (inner->GetCode() == Type::Code::String) {
             if (is_nullable) {
@@ -764,8 +782,8 @@ ColumnRef createColumn(TypeRef type)
 
     case Type::Code::Map:
     {
-        TypeRef k = type->As<MapType>()->GetKeyType();
-        TypeRef v = type->As<MapType>()->GetValueType();
+        TypeRef k = type_as_or_throw<MapType>(type, "Map")->GetKeyType();
+        TypeRef v = type_as_or_throw<MapType>(type, "Map")->GetValueType();
         Type::Code kc = k->GetCode();
         Type::Code vc = v->GetCode();
         if (kc == Type::Code::String && vc == Type::Code::String) {
@@ -796,7 +814,7 @@ ColumnRef createColumn(TypeRef type)
         /* Build an empty ColumnTuple matching the field types so a Tuple
          * can serve as the element column of Array(Tuple) on the write
          * path. The depth guard above bounds recursion. */
-        auto tupleType = type->As<TupleType>()->GetTupleType();
+        auto tupleType = type_as_or_throw<TupleType>(type, "Tuple")->GetTupleType();
         std::vector<ColumnRef> columns;
         columns.reserve(tupleType.size());
         for (const auto &field : tupleType) {
@@ -1146,7 +1164,7 @@ static ColumnRef appendMapByValueType(HashTable *values_ht, TypeRef vtype, KFn k
         case Type::Code::UUID:
             return appendMapColumn<K, UUID,       KCol, ColumnUUID>(values_ht, key_fn, phpToUUID);
         case Type::Code::LowCardinality: {
-            TypeRef inner = vtype->As<LowCardinalityType>()->GetNestedType();
+            TypeRef inner = type_as_or_throw<LowCardinalityType>(vtype, "LowCardinality")->GetNestedType();
             if (inner->GetCode() == Type::Code::String) {
                 return appendMapColumn<K, std::string, KCol, ColumnLowCardinalityT<ColumnString>>(values_ht, key_fn, strVal);
             }
@@ -1445,7 +1463,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         return appendDateColumn<ColumnDateTime>(values_ht, /*is_date=*/false);
     case Type::Code::DateTime64:
     {
-        size_t precision = type->As<DateTime64Type>()->GetPrecision();
+        size_t precision = type_as_or_throw<DateTime64Type>(type, "DateTime64")->GetPrecision();
         /* Bound the server-supplied precision before the scale loop: a
          * precision >= 19 overflows the signed int64 scale (UB), and the
          * read path already rejects precision > 9. */
@@ -1467,7 +1485,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
             if (Z_TYPE_P(v) == IS_STRING) {
                 auto [whole, frac] = to_time_t_with_frac(
                     std::string(Z_STRVAL_P(v), Z_STRLEN_P(v)),
-                    precision, scale);
+                    precision);
                 value->Append((int64_t)whole * scale + frac);
             } else if (Z_TYPE_P(v) == IS_DOUBLE) {
                 /* The numeric paths take the value as (fractional) seconds
@@ -1529,7 +1547,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     }
     case Type::Code::Time64:
     {
-        size_t precision = type->As<Time64Type>()->GetPrecision();
+        size_t precision = type_as_or_throw<Time64Type>(type, "Time64")->GetPrecision();
         if (precision > 9) {
             throw std::runtime_error("Time64 precision out of spec range (0..9)");
         }
@@ -1640,7 +1658,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     case Type::Code::Decimal64:
     case Type::Code::Decimal128:
     {
-        auto dt = type->As<DecimalType>();
+        auto dt = type_as_or_throw<DecimalType>(type, "Decimal");
         auto value = std::make_shared<ColumnDecimal>(dt->GetPrecision(), dt->GetScale());
         ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
@@ -1660,7 +1678,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
 
     case Type::Code::Array:
     {
-        TypeRef item_type = type->As<ArrayType>()->GetItemType();
+        TypeRef item_type = type_as_or_throw<ArrayType>(type, "Array")->GetItemType();
         if (item_type->GetCode() == Type::Array)
         {
             throw std::runtime_error("can't support Multidimensional Arrays");
@@ -1725,7 +1743,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
          * (post-CR-002) reject IS_NULL outright and break every
          * Nullable insert. */
         AllowNullGuard nulls_ok;
-        ColumnRef child = insertColumn(type->As<NullableType>()->GetNestedType(), value_zval);
+        ColumnRef child = insertColumn(type_as_or_throw<NullableType>(type, "Nullable")->GetNestedType(), value_zval);
 
         return std::make_shared<ColumnNullable>(child, nulls);
     }
@@ -1736,7 +1754,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         // every input row to pull row[field]. The previous version
         // looped by row count instead of arity, so multi-row tuple
         // inserts walked off the end of tupleType when rowcount != arity.
-        auto tupleType = type->As<TupleType>()->GetTupleType();
+        auto tupleType = type_as_or_throw<TupleType>(type, "Tuple")->GetTupleType();
         size_t arity = tupleType.size();
 
         zval return_should_storage;
@@ -1813,10 +1831,10 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
 
     case Type::Code::LowCardinality:
     {
-        TypeRef nested = type->As<LowCardinalityType>()->GetNestedType();
+        TypeRef nested = type_as_or_throw<LowCardinalityType>(type, "LowCardinality")->GetNestedType();
         bool is_nullable = (nested->GetCode() == Type::Code::Nullable);
         TypeRef inner = is_nullable
-            ? nested->As<NullableType>()->GetNestedType()
+            ? type_as_or_throw<NullableType>(nested, "Nullable")->GetNestedType()
             : nested;
 
         if (inner->GetCode() == Type::Code::String) {
@@ -1841,8 +1859,8 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
 
     case Type::Code::Map:
     {
-        TypeRef k = type->As<MapType>()->GetKeyType();
-        TypeRef v = type->As<MapType>()->GetValueType();
+        TypeRef k = type_as_or_throw<MapType>(type, "Map")->GetKeyType();
+        TypeRef v = type_as_or_throw<MapType>(type, "Map")->GetValueType();
         Type::Code kc = k->GetCode();
 
         // String keys reject integer-keyed PHP entries outright; integer
@@ -1976,7 +1994,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
             case Type::Code::UUID:
                 return appendMapByValueType<ColumnUUID,    UUID>(values_ht, v, uuidKey);
             case Type::Code::LowCardinality: {
-                TypeRef inner = k->As<LowCardinalityType>()->GetNestedType();
+                TypeRef inner = type_as_or_throw<LowCardinalityType>(k, "LowCardinality")->GetNestedType();
                 if (inner->GetCode() == Type::Code::String) {
                     return appendMapByValueType<ColumnLowCardinalityT<ColumnString>, std::string>(values_ht, v, strKey);
                 }
@@ -2457,15 +2475,20 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         // ColumnFixedString::At returns a string_view over the full fixed-size
         // buffer, including trailing NULs added by ClickHouse to pad short
         // values up to the column's declared width. Trim trailing NULs so the
-        // PHP-side value matches the original input.
+        // PHP-side value matches the original input -- unless FIXEDSTRING_BINARY
+        // is set, in which case return the full declared width verbatim so
+        // binary payloads (IPv6, digests, packed structs) that legitimately end
+        // in NUL bytes survive the round-trip.
         auto fs_col = columnRef->As<ColumnFixedString>();
         if (!fs_col) {
             throw std::runtime_error("FixedString read: column type mismatch");
         }
         auto col = (*fs_col)[row];
         size_t len = col.length();
-        while (len > 0 && col.data()[len - 1] == '\0') {
-            --len;
+        if (!(fetch_mode & SC_FETCH_FIXEDSTRING_BINARY)) {
+            while (len > 0 && col.data()[len - 1] == '\0') {
+                --len;
+            }
         }
         if (is_array)
         {
@@ -2512,7 +2535,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         if (!col) {
             throw std::runtime_error("DateTime64 read: column type mismatch");
         }
-        size_t precision = columnRef->Type()->As<DateTime64Type>()->GetPrecision();
+        size_t precision = type_as_or_throw<DateTime64Type>(columnRef->Type(), "DateTime64")->GetPrecision();
         if (precision > 9) {
             throw std::runtime_error("DateTime64 precision out of spec range (0..9)");
         }
@@ -2608,7 +2631,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         if (!col) {
             throw std::runtime_error("Time64 read: column type mismatch");
         }
-        size_t precision = columnRef->Type()->As<Time64Type>()->GetPrecision();
+        size_t precision = type_as_or_throw<Time64Type>(columnRef->Type(), "Time64")->GetPrecision();
         if (precision > 9) {
             throw std::runtime_error("Time64 precision out of spec range (0..9)");
         }
@@ -2820,10 +2843,10 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         if (!lc) {
             throw std::runtime_error("LowCardinality column downcast failed");
         }
-        TypeRef nested = columnRef->Type()->As<LowCardinalityType>()->GetNestedType();
+        TypeRef nested = type_as_or_throw<LowCardinalityType>(columnRef->Type(), "LowCardinality")->GetNestedType();
         bool is_nullable = (nested->GetCode() == Type::Code::Nullable);
         TypeRef inner = is_nullable
-            ? nested->As<NullableType>()->GetNestedType()
+            ? type_as_or_throw<NullableType>(nested, "Nullable")->GetNestedType()
             : nested;
         if (inner->GetCode() != Type::Code::String &&
             inner->GetCode() != Type::Code::FixedString) {
@@ -2844,8 +2867,11 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
 
         std::string_view sv = iv.AsBinaryData();
         // FixedString views include trailing NULs from server-side padding;
-        // trim them so the round-trip preserves the original input.
-        if (inner->GetCode() == Type::Code::FixedString) {
+        // trim them so the round-trip preserves the original input, unless
+        // FIXEDSTRING_BINARY asks for the raw padded width (see the standalone
+        // FixedString case above).
+        if (inner->GetCode() == Type::Code::FixedString &&
+            !(fetch_mode & SC_FETCH_FIXEDSTRING_BINARY)) {
             size_t len = sv.length();
             while (len > 0 && sv.data()[len - 1] == '\0') {
                 --len;

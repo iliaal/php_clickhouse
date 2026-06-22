@@ -696,246 +696,251 @@ PHP_METHOD(ClickHouse, __construct)
     zval *receive_timeout = sc_zend_read_property(clickhouse_ce, this_obj, "receive_timeout", sizeof("receive_timeout") - 1, 0, &_rv);
     zval *connect_timeout = sc_zend_read_property(clickhouse_ce, this_obj, "connect_timeout", sizeof("connect_timeout") - 1, 0, &_rv);
 
-    ClientOptions Options = ClientOptions()
-                            .SetHost(std::string(Z_STRVAL_P(host), Z_STRLEN_P(host)))
-                            .SetPort((uint16_t)Z_LVAL_P(port))
-                            .SetSendRetries(Z_LVAL_P(retry_count))
-                            .SetRetryTimeout(std::chrono::seconds(Z_LVAL_P(retry_timeout)))
-                            .SetConnectionRecvTimeout(std::chrono::seconds(Z_LVAL_P(receive_timeout)))
-                            .SetConnectionConnectTimeout(std::chrono::seconds(Z_LVAL_P(connect_timeout)))
-                            .SetPingBeforeQuery(false);
-    long cv = Z_LVAL_P(compression);
-    if (cv == 1) Options = Options.SetCompressionMethod(CompressionMethod::LZ4);
-    else if (cv == 2) Options = Options.SetCompressionMethod(CompressionMethod::ZSTD);
-
-    if (php_array_get_value(_ht, "send_timeout", value)) {
-        zend_long n = zval_get_long(value);
-        if (n < 0) {
-            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
-                "send_timeout must be >= 0", 0);
-            return;
-        }
-        Options = Options.SetConnectionSendTimeout(std::chrono::seconds(n));
-    }
-    /* Millisecond variants override the seconds-based keys. Useful when
-     * sub-second precision matters (CI test guards, low-latency hops). */
-    auto apply_timeout_ms = [&](const char *key,
-                                 ClientOptions& (ClientOptions::*setter)(const std::chrono::milliseconds&)) -> bool {
-        zval *v = sc_zend_hash_find(_ht, (char*)key, strlen(key));
-        if (!v || ZVAL_IS_NULL(v)) return true;
-        zend_long n = zval_get_long(v);
-        if (n < 0) {
-            std::string msg = std::string(key) + " must be >= 0";
-            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, msg.c_str(), 0);
-            return false;
-        }
-        Options = (Options.*setter)(std::chrono::milliseconds(n));
-        return true;
-    };
-    if (!apply_timeout_ms("connect_timeout_ms", &ClientOptions::SetConnectionConnectTimeout)) return;
-    if (!apply_timeout_ms("receive_timeout_ms", &ClientOptions::SetConnectionRecvTimeout))    return;
-    if (!apply_timeout_ms("send_timeout_ms",    &ClientOptions::SetConnectionSendTimeout))   return;
-    if (php_array_get_value(_ht, "tcp_nodelay", value)) {
-        Options = Options.TcpNoDelay(zend_is_true(value));
-    }
-    if (php_array_get_value(_ht, "tcp_keepalive", value)) {
-        Options = Options.TcpKeepAlive(zend_is_true(value));
-    }
-    if (php_array_get_value(_ht, "ping_before_query", value)) {
-        Options = Options.SetPingBeforeQuery(zend_is_true(value));
-    }
-    if (php_array_get_value(_ht, "tcp_keepalive_idle", value)) {
-        zend_long n = zval_get_long(value);
-        if (n < 0) {
-            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
-                "tcp_keepalive_idle must be >= 0", 0);
-            return;
-        }
-        Options = Options.SetTcpKeepAliveIdle(std::chrono::seconds(n));
-    }
-    if (php_array_get_value(_ht, "tcp_keepalive_intvl", value)) {
-        zend_long n = zval_get_long(value);
-        if (n < 0) {
-            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
-                "tcp_keepalive_intvl must be >= 0", 0);
-            return;
-        }
-        Options = Options.SetTcpKeepAliveInterval(std::chrono::seconds(n));
-    }
-    if (php_array_get_value(_ht, "tcp_keepalive_cnt", value)) {
-        zend_long n = zval_get_long(value);
-        if (n < 0 || n > UINT_MAX) {
-            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
-                "tcp_keepalive_cnt out of range", 0);
-            return;
-        }
-        Options = Options.SetTcpKeepAliveCount((unsigned int)n);
-    }
-    if (php_array_get_value(_ht, "max_compression_chunk_size", value)) {
-        zend_long n = zval_get_long(value);
-        if (n < 0 || n > UINT_MAX) {
-            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
-                "max_compression_chunk_size out of range", 0);
-            return;
-        }
-        Options = Options.SetMaxCompressionChunkSize((unsigned int)n);
-    }
-#ifdef WITH_OPENSSL
-    bool want_ssl = false;
-    if (php_array_get_value(_ht, "ssl", value)) {
-        want_ssl = zend_is_true(value);
-    }
-    if (want_ssl) {
-        ClientOptions::SSLOptions ssl_opts;
-        // Default to TLS 1.2 minimum so a server speaking only 1.0 / 1.1
-        // is rejected without the caller having to remember to set this.
-        // Caller can override via ssl_min_protocol_version.
-        ssl_opts.SetMinProtocolVersion(0x0303);
-        if (php_array_get_value(_ht, "ssl_min_protocol_version", value)) {
-            static const struct { const char *name; int version; } tls_versions[] = {
-                {"tls1.0", 0x0301}, {"tls1.1", 0x0302},
-                {"tls1.2", 0x0303}, {"tls1.3", 0x0304},
-            };
-            int ver = 0;
-            {
-                ZStrGuard sg(value);
-                for (const auto &tv : tls_versions) {
-                    if (strcasecmp(sg.val(), tv.name) == 0) {
-                        ver = tv.version;
-                        break;
-                    }
-                }
-            }
-            if (ver == 0) {
-                sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
-                    "ssl_min_protocol_version must be one of tls1.0, tls1.1, tls1.2, tls1.3", 0);
-                return;
-            }
-            ssl_opts.SetMinProtocolVersion(ver);
-        }
-        if (php_array_get_value(_ht, "ssl_skip_verify", value)) {
-            ssl_opts.SetSkipVerification(zend_is_true(value));
-        }
-        if (php_array_get_value(_ht, "ssl_use_default_ca", value)) {
-            ssl_opts.SetUseDefaultCALocations(zend_is_true(value));
-        }
-        if (php_array_get_value(_ht, "ssl_ca_directory", value)) {
-            ZStrGuard sg(value);
-            ssl_opts.SetPathToCADirectory(std::string(sg.val(), sg.len()));
-        }
-        if (php_array_get_value(_ht, "ssl_ca_files", value)) {
-            std::vector<std::string> files;
-            if (Z_TYPE_P(value) == IS_STRING) {
-                files.emplace_back(Z_STRVAL_P(value), Z_STRLEN_P(value));
-            } else if (Z_TYPE_P(value) == IS_ARRAY) {
-                HashTable *fh = Z_ARRVAL_P(value);
-                zval *fv;
-                ZEND_HASH_FOREACH_VAL(fh, fv) {
-                    ZStrGuard sg(fv);
-                    files.emplace_back(sg.val(), sg.len());
-                } ZEND_HASH_FOREACH_END();
-            }
-            ssl_opts.SetPathToCAFiles(files);
-        }
-        Options = Options.SetSSLOptions(ssl_opts);
-    }
-#else
-    if (php_array_get_value(_ht, "ssl", value)) {
-        if (zend_is_true(value)) {
-            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
-                "php_clickhouse was built without TLS support. Reconfigure with --enable-clickhouse-openssl",
-                0);
-            return;
-        }
-    }
-#endif
-
-    if (php_array_get_value(_ht, "endpoints", value)) {
-        /* Every other config key surfaces malformed input as an exception;
-         * 'endpoints' used to silently skip bad entries and, if all were
-         * skipped, fall back to 127.0.0.1:9000 — so a single typo
-         * ('hosts' => ...) connected to localhost instead of the intended
-         * cluster with no diagnostic. Validate strictly to match. */
-        if (Z_TYPE_P(value) != IS_ARRAY) {
-            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
-                "endpoints must be a list of [host, port] arrays", 0);
-            return;
-        }
-        std::vector<Endpoint> eps;
-        HashTable *eps_ht = Z_ARRVAL_P(value);
-        zval *ep_zv;
-        ZEND_HASH_FOREACH_VAL(eps_ht, ep_zv) {
-            ZVAL_DEREF(ep_zv);
-            if (Z_TYPE_P(ep_zv) != IS_ARRAY) {
-                sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
-                    "each endpoints entry must be an array with a 'host' key", 0);
-                return;
-            }
-            HashTable *eh = Z_ARRVAL_P(ep_zv);
-            zval *hz = sc_zend_hash_find(eh, (char*)"host", 4);
-            zval *pz = sc_zend_hash_find(eh, (char*)"port", 4);
-            if (hz) ZVAL_DEREF(hz);
-            if (pz) ZVAL_DEREF(pz);
-            if (!hz || Z_TYPE_P(hz) == IS_NULL) {
-                sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
-                    "each endpoints entry requires a non-null 'host'", 0);
-                return;
-            }
-            Endpoint e;
-            {
-                ZStrGuard host_sg(hz);
-                e.host = std::string(host_sg.val(), host_sg.len());
-            }
-            if (pz) {
-                zend_long p = zval_get_long(pz);
-                if (p < 1 || p > 65535) {
-                    sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
-                        "Endpoint port out of 1..65535 range", 0);
-                    return;
-                }
-                e.port = (uint16_t)p;
-            }
-            eps.push_back(std::move(e));
-        } ZEND_HASH_FOREACH_END();
-        if (eps.empty()) {
-            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
-                "endpoints was provided but contained no usable entries", 0);
-            return;
-        }
-        /* clickhouse-cpp prepends {host,port} as the first endpoint whenever
-         * host is non-empty (modifyClientOptions). Unless the caller set host
-         * explicitly, clear it so a default/port-only config doesn't inject a
-         * phantom localhost endpoint ahead of the real endpoints list. */
-        if (!host_configured) {
-            Options = Options.SetHost(std::string());
-        }
-        Options = Options.SetEndpoints(eps);
-    }
-
-    if (php_array_get_value(_ht, "database", value))
-    {
-        ZStrGuard sg(value);
-        sc_zend_update_property_stringl(clickhouse_ce, this_obj, "database", sizeof("database") - 1,
-                                        sg.val(), sg.len());
-        Options = Options.SetDefaultDatabase(std::string(sg.val(), sg.len()));
-    }
-
-    if (php_array_get_value(_ht, "user", value))
-    {
-        ZStrGuard sg(value);
-        sc_zend_update_property_stringl(clickhouse_ce, this_obj, "user", sizeof("user") - 1,
-                                        sg.val(), sg.len());
-        Options = Options.SetUser(std::string(sg.val(), sg.len()));
-    }
-
-    if (php_array_get_value(_ht, "passwd", value))
-    {
-        ZStrGuard sg(value);
-        Options = Options.SetPassword(std::string(sg.val(), sg.len()));
-    }
-
+    /* From here on the prelude builds C++ objects (std::string, std::vector,
+     * ClientOptions copies, the Client itself) from user-supplied config. Any
+     * of those can throw (std::bad_alloc), and a C++ throw escaping this Zend
+     * dispatcher aborts the process. Keep the whole assembly inside the
+     * try/catch so an allocation failure surfaces as a PHP exception. */
     try
     {
+        ClientOptions Options = ClientOptions()
+                                .SetHost(std::string(Z_STRVAL_P(host), Z_STRLEN_P(host)))
+                                .SetPort((uint16_t)Z_LVAL_P(port))
+                                .SetSendRetries(Z_LVAL_P(retry_count))
+                                .SetRetryTimeout(std::chrono::seconds(Z_LVAL_P(retry_timeout)))
+                                .SetConnectionRecvTimeout(std::chrono::seconds(Z_LVAL_P(receive_timeout)))
+                                .SetConnectionConnectTimeout(std::chrono::seconds(Z_LVAL_P(connect_timeout)))
+                                .SetPingBeforeQuery(false);
+        long cv = Z_LVAL_P(compression);
+        if (cv == 1) Options = Options.SetCompressionMethod(CompressionMethod::LZ4);
+        else if (cv == 2) Options = Options.SetCompressionMethod(CompressionMethod::ZSTD);
+
+        if (php_array_get_value(_ht, "send_timeout", value)) {
+            zend_long n = zval_get_long(value);
+            if (n < 0) {
+                sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                    "send_timeout must be >= 0", 0);
+                return;
+            }
+            Options = Options.SetConnectionSendTimeout(std::chrono::seconds(n));
+        }
+        /* Millisecond variants override the seconds-based keys. Useful when
+         * sub-second precision matters (CI test guards, low-latency hops). */
+        auto apply_timeout_ms = [&](const char *key,
+                                     ClientOptions& (ClientOptions::*setter)(const std::chrono::milliseconds&)) -> bool {
+            zval *v = sc_zend_hash_find(_ht, (char*)key, strlen(key));
+            if (!v || ZVAL_IS_NULL(v)) return true;
+            zend_long n = zval_get_long(v);
+            if (n < 0) {
+                std::string msg = std::string(key) + " must be >= 0";
+                sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, msg.c_str(), 0);
+                return false;
+            }
+            Options = (Options.*setter)(std::chrono::milliseconds(n));
+            return true;
+        };
+        if (!apply_timeout_ms("connect_timeout_ms", &ClientOptions::SetConnectionConnectTimeout)) return;
+        if (!apply_timeout_ms("receive_timeout_ms", &ClientOptions::SetConnectionRecvTimeout))    return;
+        if (!apply_timeout_ms("send_timeout_ms",    &ClientOptions::SetConnectionSendTimeout))   return;
+        if (php_array_get_value(_ht, "tcp_nodelay", value)) {
+            Options = Options.TcpNoDelay(zend_is_true(value));
+        }
+        if (php_array_get_value(_ht, "tcp_keepalive", value)) {
+            Options = Options.TcpKeepAlive(zend_is_true(value));
+        }
+        if (php_array_get_value(_ht, "ping_before_query", value)) {
+            Options = Options.SetPingBeforeQuery(zend_is_true(value));
+        }
+        if (php_array_get_value(_ht, "tcp_keepalive_idle", value)) {
+            zend_long n = zval_get_long(value);
+            if (n < 0) {
+                sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                    "tcp_keepalive_idle must be >= 0", 0);
+                return;
+            }
+            Options = Options.SetTcpKeepAliveIdle(std::chrono::seconds(n));
+        }
+        if (php_array_get_value(_ht, "tcp_keepalive_intvl", value)) {
+            zend_long n = zval_get_long(value);
+            if (n < 0) {
+                sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                    "tcp_keepalive_intvl must be >= 0", 0);
+                return;
+            }
+            Options = Options.SetTcpKeepAliveInterval(std::chrono::seconds(n));
+        }
+        if (php_array_get_value(_ht, "tcp_keepalive_cnt", value)) {
+            zend_long n = zval_get_long(value);
+            if (n < 0 || n > UINT_MAX) {
+                sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                    "tcp_keepalive_cnt out of range", 0);
+                return;
+            }
+            Options = Options.SetTcpKeepAliveCount((unsigned int)n);
+        }
+        if (php_array_get_value(_ht, "max_compression_chunk_size", value)) {
+            zend_long n = zval_get_long(value);
+            if (n < 0 || n > UINT_MAX) {
+                sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                    "max_compression_chunk_size out of range", 0);
+                return;
+            }
+            Options = Options.SetMaxCompressionChunkSize((unsigned int)n);
+        }
+    #ifdef WITH_OPENSSL
+        bool want_ssl = false;
+        if (php_array_get_value(_ht, "ssl", value)) {
+            want_ssl = zend_is_true(value);
+        }
+        if (want_ssl) {
+            ClientOptions::SSLOptions ssl_opts;
+            // Default to TLS 1.2 minimum so a server speaking only 1.0 / 1.1
+            // is rejected without the caller having to remember to set this.
+            // Caller can override via ssl_min_protocol_version.
+            ssl_opts.SetMinProtocolVersion(0x0303);
+            if (php_array_get_value(_ht, "ssl_min_protocol_version", value)) {
+                static const struct { const char *name; int version; } tls_versions[] = {
+                    {"tls1.0", 0x0301}, {"tls1.1", 0x0302},
+                    {"tls1.2", 0x0303}, {"tls1.3", 0x0304},
+                };
+                int ver = 0;
+                {
+                    ZStrGuard sg(value);
+                    for (const auto &tv : tls_versions) {
+                        if (strcasecmp(sg.val(), tv.name) == 0) {
+                            ver = tv.version;
+                            break;
+                        }
+                    }
+                }
+                if (ver == 0) {
+                    sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                        "ssl_min_protocol_version must be one of tls1.0, tls1.1, tls1.2, tls1.3", 0);
+                    return;
+                }
+                ssl_opts.SetMinProtocolVersion(ver);
+            }
+            if (php_array_get_value(_ht, "ssl_skip_verify", value)) {
+                ssl_opts.SetSkipVerification(zend_is_true(value));
+            }
+            if (php_array_get_value(_ht, "ssl_use_default_ca", value)) {
+                ssl_opts.SetUseDefaultCALocations(zend_is_true(value));
+            }
+            if (php_array_get_value(_ht, "ssl_ca_directory", value)) {
+                ZStrGuard sg(value);
+                ssl_opts.SetPathToCADirectory(std::string(sg.val(), sg.len()));
+            }
+            if (php_array_get_value(_ht, "ssl_ca_files", value)) {
+                std::vector<std::string> files;
+                if (Z_TYPE_P(value) == IS_STRING) {
+                    files.emplace_back(Z_STRVAL_P(value), Z_STRLEN_P(value));
+                } else if (Z_TYPE_P(value) == IS_ARRAY) {
+                    HashTable *fh = Z_ARRVAL_P(value);
+                    zval *fv;
+                    ZEND_HASH_FOREACH_VAL(fh, fv) {
+                        ZStrGuard sg(fv);
+                        files.emplace_back(sg.val(), sg.len());
+                    } ZEND_HASH_FOREACH_END();
+                }
+                ssl_opts.SetPathToCAFiles(files);
+            }
+            Options = Options.SetSSLOptions(ssl_opts);
+        }
+    #else
+        if (php_array_get_value(_ht, "ssl", value)) {
+            if (zend_is_true(value)) {
+                sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                    "php_clickhouse was built without TLS support. Reconfigure with --enable-clickhouse-openssl",
+                    0);
+                return;
+            }
+        }
+    #endif
+
+        if (php_array_get_value(_ht, "endpoints", value)) {
+            /* Every other config key surfaces malformed input as an exception;
+             * 'endpoints' used to silently skip bad entries and, if all were
+             * skipped, fall back to 127.0.0.1:9000 — so a single typo
+             * ('hosts' => ...) connected to localhost instead of the intended
+             * cluster with no diagnostic. Validate strictly to match. */
+            if (Z_TYPE_P(value) != IS_ARRAY) {
+                sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                    "endpoints must be a list of [host, port] arrays", 0);
+                return;
+            }
+            std::vector<Endpoint> eps;
+            HashTable *eps_ht = Z_ARRVAL_P(value);
+            zval *ep_zv;
+            ZEND_HASH_FOREACH_VAL(eps_ht, ep_zv) {
+                ZVAL_DEREF(ep_zv);
+                if (Z_TYPE_P(ep_zv) != IS_ARRAY) {
+                    sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                        "each endpoints entry must be an array with a 'host' key", 0);
+                    return;
+                }
+                HashTable *eh = Z_ARRVAL_P(ep_zv);
+                zval *hz = sc_zend_hash_find(eh, (char*)"host", 4);
+                zval *pz = sc_zend_hash_find(eh, (char*)"port", 4);
+                if (hz) ZVAL_DEREF(hz);
+                if (pz) ZVAL_DEREF(pz);
+                if (!hz || Z_TYPE_P(hz) == IS_NULL) {
+                    sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                        "each endpoints entry requires a non-null 'host'", 0);
+                    return;
+                }
+                Endpoint e;
+                {
+                    ZStrGuard host_sg(hz);
+                    e.host = std::string(host_sg.val(), host_sg.len());
+                }
+                if (pz) {
+                    zend_long p = zval_get_long(pz);
+                    if (p < 1 || p > 65535) {
+                        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                            "Endpoint port out of 1..65535 range", 0);
+                        return;
+                    }
+                    e.port = (uint16_t)p;
+                }
+                eps.push_back(std::move(e));
+            } ZEND_HASH_FOREACH_END();
+            if (eps.empty()) {
+                sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                    "endpoints was provided but contained no usable entries", 0);
+                return;
+            }
+            /* clickhouse-cpp prepends {host,port} as the first endpoint whenever
+             * host is non-empty (modifyClientOptions). Unless the caller set host
+             * explicitly, clear it so a default/port-only config doesn't inject a
+             * phantom localhost endpoint ahead of the real endpoints list. */
+            if (!host_configured) {
+                Options = Options.SetHost(std::string());
+            }
+            Options = Options.SetEndpoints(eps);
+        }
+
+        if (php_array_get_value(_ht, "database", value))
+        {
+            ZStrGuard sg(value);
+            sc_zend_update_property_stringl(clickhouse_ce, this_obj, "database", sizeof("database") - 1,
+                                            sg.val(), sg.len());
+            Options = Options.SetDefaultDatabase(std::string(sg.val(), sg.len()));
+        }
+
+        if (php_array_get_value(_ht, "user", value))
+        {
+            ZStrGuard sg(value);
+            sc_zend_update_property_stringl(clickhouse_ce, this_obj, "user", sizeof("user") - 1,
+                                            sg.val(), sg.len());
+            Options = Options.SetUser(std::string(sg.val(), sg.len()));
+        }
+
+        if (php_array_get_value(_ht, "passwd", value))
+        {
+            ZStrGuard sg(value);
+            Options = Options.SetPassword(std::string(sg.val(), sg.len()));
+        }
+
         clickhouse_object *obj = Z_CLICKHOUSE_P(this_obj);
         if (obj->client) {
             throw std::runtime_error("ClickHouse object is already constructed");
@@ -1531,12 +1536,15 @@ static void emitVerbose(clickhouse_object *obj, const char *event, zval *ctx)
     }
     if (obj->verbose_to_stderr) {
         smart_str buf = {0};
+        zend_object *pre_exc = EG(exception);
         php_json_encode(&buf, &payload, 0);
         smart_str_0(&buf);
         /* php_json_encode can raise (non-UTF8 string in payload, etc.).
          * Don't let that exception bleed onto the next user-facing call;
-         * trace output is best-effort. */
-        if (EG(exception)) {
+         * trace output is best-effort. Swallow only an exception this encode
+         * raised -- never clobber one that was already pending before this
+         * best-effort trace ran. */
+        if (EG(exception) && EG(exception) != pre_exc) {
             zend_clear_exception();
         }
         const char *body = buf.s ? ZSTR_VAL(buf.s) : "{}";
