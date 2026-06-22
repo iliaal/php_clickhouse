@@ -1,0 +1,20 @@
+<!--
+  ClickHouse TLS drop-in for the test lane. Enables the secure native port
+  (9440) with a self-signed server certificate. verificationMode=none because
+  the phpt TLS suite connects with ssl_skip_verify=true; the cert is generated
+  fresh per run (CI) or kept under ~/clickhouse-tls/ (local dev). Mounted at
+  /etc/clickhouse-server/config.d/tls.xml; certs at /etc/clickhouse-server/certs/.
+-->
+<clickhouse>
+    <tcp_port_secure>9440</tcp_port_secure>
+    <openSSL>
+        <server>
+            <certificateFile>/etc/clickhouse-server/certs/server.crt</certificateFile>
+            <privateKeyFile>/etc/clickhouse-server/certs/server.key</privateKeyFile>
+            <verificationMode>none</verificationMode>
+            <cacheSessions>true</cacheSessions>
+            <disableProtocols>sslv2,sslv3</disableProtocols>
+            <preferServerCiphers>true</preferServerCiphers>
+        </server>
+    </openSSL>
+</clickhouse>

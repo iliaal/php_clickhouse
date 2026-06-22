@@ -112,13 +112,73 @@ jobs:
           # all-skip. Let its exit code drive the step.
           php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK tests/
 
-      - name: Rebuild with TLS (verifies SSL build path)
+      - name: Rebuild with TLS and run the TLS suite
+        env:
+          CLICKHOUSE_HOST: 127.0.0.1
+          CLICKHOUSE_TLS_PORT: 9440
+          CLICKHOUSE_USER: test
+          CLICKHOUSE_PASSWD: test
+          NO_INTERACTION: 1
         run: |
+          set -e
+          # Self-signed cert for the TLS lane. The phpt suite connects with
+          # ssl_skip_verify=true, so CN/SAN are cosmetic; generated fresh so no
+          # private key lives in the repo.
+          mkdir -p "$RUNNER_TEMP/ch-certs"
+          openssl req -x509 -nodes -newkey rsa:2048 \
+            -keyout "$RUNNER_TEMP/ch-certs/server.key" \
+            -out "$RUNNER_TEMP/ch-certs/server.crt" -days 3650 \
+            -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+          chmod 644 "$RUNNER_TEMP/ch-certs/server.key" "$RUNNER_TEMP/ch-certs/server.crt"
+
+          # The services: clickhouse container is plaintext-only, and GitHub
+          # service containers start before any step runs -- they can't mount a
+          # cert generated here. Run the TLS server manually instead. Native TLS
+          # on 9440; plaintext HTTP exposed on host 8124 (container 8123) purely
+          # as a version-agnostic readiness probe.
+          docker run -d --name clickhouse-tls \
+            --ulimit nofile=262144:262144 \
+            -p 9440:9440 -p 8124:8123 \
+            -e CLICKHOUSE_USER=test -e CLICKHOUSE_PASSWORD=test \
+            -v "$RUNNER_TEMP/ch-certs":/etc/clickhouse-server/certs:ro \
+            -v "$PWD/tests/tls/tls.xml":/etc/clickhouse-server/config.d/tls.xml:ro \
+            clickhouse/clickhouse-server:latest
+
+          # Rebuild the extension with TLS support while the server boots.
           make clean
           phpize --clean
           phpize
           ./configure --enable-clickhouse --enable-clickhouse-openssl
           make -j$(nproc)
+
+          # Wait for the TLS server to be ready (plaintext HTTP ping on 8124).
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8124/ping >/dev/null; then
+              echo "TLS server ready"; break
+            fi
+            sleep 2
+          done
+
+          # Stage the TLS-enabled .so (over the no-TLS one) and run the TLS
+          # round-trip test against 9440.
+          EXT_DIR=$(php -r 'echo ini_get("extension_dir");')
+          sudo cp modules/clickhouse.so "$EXT_DIR/"
+          export TEST_PHP_EXECUTABLE=$(which php)
+          # run-tests.php exits 0 on all-skip, so a skipped 027 (no TLS server /
+          # no TLS build) would pass this step silently. Capture the summary and
+          # require it actually ran (skipped=0) and passed (passed=1).
+          out=$(php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK tests/027.phpt 2>&1) || true
+          echo "$out"
+          skipped=$(echo "$out" | sed -n 's/.*Tests skipped *: *\([0-9]\{1,\}\).*/\1/p' | head -1)
+          passed=$(echo "$out" | sed -n 's/.*Tests passed *: *\([0-9]\{1,\}\).*/\1/p' | head -1)
+          if [ "$skipped" != "0" ]; then
+            echo "::error::027.phpt was skipped -- TLS server unreachable or extension built without TLS"; exit 1
+          fi
+          if [ "$passed" != "1" ]; then
+            echo "::error::027.phpt did not pass (passed=$passed)"; exit 1
+          fi
+
+          docker rm -f clickhouse-tls
 
   linux-zts:
     name: PHP ${{ matrix.php }} ZTS - Linux
