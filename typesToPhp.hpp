@@ -55,6 +55,20 @@ void convertToZval(zval *arr, const clickhouse::ColumnRef& columnRef, int row,
 void zvalToBlock(clickhouse::Block& blockDes, clickhouse::Block& blockSrc,
                  zend_ulong num_key, zval *value_zval);
 
+/* Shared insert-path row-cell extraction (positional then name fallback,
+ * with by-ref deref + arity/shape validation). Used by both the transpose
+ * builder and the fused builder so the rules can't drift. */
+zval *extractRowCell(zval *row_pz, size_t col_index,
+                     const std::vector<zend_string*> *col_names);
+
+/* PERF-004: build a fused-eligible numeric column directly from the
+ * row-major input (rows_ht = the $values matrix), skipping the per-column
+ * transpose array. Returns nullptr for any type not fused, so the caller
+ * falls back to the buildSingleColumnZval + insertColumn path. */
+clickhouse::ColumnRef tryBuildScalarColumnFromRows(
+    HashTable *rows_ht, size_t col_index,
+    const std::vector<zend_string*> *col_names, clickhouse::TypeRef type);
+
 /*
  * Local variables:
  * tab-width: 4
