@@ -2109,14 +2109,21 @@ static void do_select_into(zval *out, zval *this_obj,
 
         if (!(fetch_mode & SC_FETCH_ONE)) {
             array_init(out);
-            if (positional_out) {
-                array_init(positional_out);
-            }
         }
 
         size_t verbose_block_idx = 0;
         bool fetched_one = false;
-        query.OnData([out, positional_out, fetch_mode, &fetched_one, obj, &verbose_block_idx](const Block &block) {
+        /* Positional rows are a second, position-keyed copy of every row.
+         * They only matter when duplicate column names would collapse in
+         * the assoc rows (SELECT number, number); otherwise the assoc
+         * rows are an order-preserving proxy and the Statement fetch*
+         * methods fall back to them when positional_rows stays UNDEF.
+         * Decide once from the (result-stable) column names on the first
+         * data block, and skip the copy entirely in the common case. */
+        bool pos_decided = false;
+        bool pos_active = false;
+        query.OnData([out, positional_out, fetch_mode, &fetched_one, obj, &verbose_block_idx,
+                      &pos_decided, &pos_active](const Block &block) {
             if (verbose_active(obj)) {
                 zval ctx;
                 array_init(&ctx);
@@ -2141,6 +2148,18 @@ static void do_select_into(zval *out, zval *this_obj,
             col_names.reserve(col_count);
             for (size_t c = 0; c < col_count; ++c) {
                 col_names.emplace_back(block.GetColumnName(c));
+            }
+
+            if (positional_out && !pos_decided) {
+                pos_decided = true;
+                for (size_t a = 0; a < col_count && !pos_active; ++a) {
+                    for (size_t b = a + 1; b < col_count; ++b) {
+                        if (col_names[a] == col_names[b]) { pos_active = true; break; }
+                    }
+                }
+                if (pos_active) {
+                    array_init(positional_out);
+                }
             }
 
             for (size_t row = 0; row < block.GetRowCount(); ++row)
@@ -2195,13 +2214,13 @@ static void do_select_into(zval *out, zval *this_obj,
                 zval row_tmp;
                 ZVAL_UNDEF(&row_tmp);
                 if (!(fetch_mode & SC_FETCH_COLUMN)) {
-                    array_init(&row_tmp);
+                    array_init_size(&row_tmp, (uint32_t)col_count);
                 }
 
                 try {
-                    if (positional_out && !(fetch_mode & SC_FETCH_COLUMN)) {
+                    if (pos_active && !(fetch_mode & SC_FETCH_COLUMN)) {
                         zval pos_tmp;
-                        array_init(&pos_tmp);
+                        array_init_size(&pos_tmp, (uint32_t)col_count);
                         try {
                             for (size_t column = 0; column < col_count; ++column)
                             {

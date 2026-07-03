@@ -139,6 +139,31 @@ static inline std::shared_ptr<TCol> as_or_throw(const ColumnRef &c, const char *
 }
 
 /*
+ * Read-path fast downcast: reinterpret the column as its concrete class
+ * via a raw static_cast, skipping the dynamic_pointer_cast that As<>()
+ * runs on every cell. Column::As<>() is
+ * dynamic_pointer_cast(shared_from_this()) -- an atomic refcount
+ * inc/dec plus an RTTI walk -- and a decode-heavy SELECT pays it
+ * rows*columns times; a callgrind of a 2-column Int64 read attributed
+ * ~18% of decode instructions to that machinery alone.
+ *
+ * ONLY use this for the structurally-stable scalar column classes whose
+ * Type::Code provably identifies the concrete class: the ColumnVector<T>
+ * integer/float types (template-keyed one-to-one on the code) and
+ * ColumnString. Those mappings are invariant across clickhouse-cpp
+ * versions. Do NOT use it for the types whose representation has changed
+ * between vendored bumps -- IPv4/IPv6/FixedString reclassification and
+ * the geo/Enum/nested wrappers -- where the As<>() null return is a
+ * deliberate mismatch guard (see as_or_throw) that has caught real
+ * cross-version breakage. Those stay on the checked cast.
+ */
+template <typename TCol>
+static inline const TCol *fast_scalar_col(const ColumnRef &c)
+{
+    return static_cast<const TCol *>(c.get());
+}
+
+/*
  * Same contract as as_or_throw, but for the server-supplied type-metadata
  * tree (TypeRef) rather than a column. A crafted/MITM'd server can declare a
  * type code whose concrete Type subclass doesn't match (e.g. a Map code with
@@ -2118,10 +2143,7 @@ template <typename TCol>
 static inline void emitIntColumn(zval *arr, const ColumnRef& columnRef, int row,
                                  const string& column_name, int8_t is_array, long fetch_mode)
 {
-    auto col_ptr = columnRef->As<TCol>();
-    if (!col_ptr) {
-        throw std::runtime_error("Integer column downcast failed");
-    }
+    const TCol *col_ptr = fast_scalar_col<TCol>(columnRef);
     auto col = (*col_ptr)[row];
     if (is_array) {
         add_next_index_long(arr, (zend_long)col);
@@ -2167,10 +2189,7 @@ template <>
 inline void emitIntColumn<ColumnUInt64>(zval *arr, const ColumnRef& columnRef, int row,
                                         const string& column_name, int8_t is_array, long fetch_mode)
 {
-    auto col_ptr = columnRef->As<ColumnUInt64>();
-    if (!col_ptr) {
-        throw std::runtime_error("Integer column downcast failed");
-    }
+    const ColumnUInt64 *col_ptr = fast_scalar_col<ColumnUInt64>(columnRef);
     emitUInt64Cell(arr, (uint64_t)(*col_ptr)[row], column_name, is_array, fetch_mode);
 }
 
@@ -2179,7 +2198,7 @@ inline void emitIntColumn<ColumnUInt64>(zval *arr, const ColumnRef& columnRef, i
 // it (next_index, assoc, or write-into-arr).
 static void pointToZval(zval *out, const std::tuple<double, double>& pt)
 {
-    array_init(out);
+    array_init_size(out, 2);
     add_next_index_double(out, std::get<0>(pt));
     add_next_index_double(out, std::get<1>(pt));
 }
@@ -2289,10 +2308,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     }
     case Type::Code::Float32:
     {
-        auto f32_col = columnRef->As<ColumnFloat32>();
-        if (!f32_col) {
-            throw std::runtime_error("Float32 read: column type mismatch");
-        }
+        const ColumnFloat32 *f32_col = fast_scalar_col<ColumnFloat32>(columnRef);
         /* Round-trip through %.6g (matching the prior `stringstream<<float`
          * default precision) so 0.55f surfaces as 0.55 to PHP, not
          * 0.5500000119. snprintf+strtod is heap-free vs the old stringstream
@@ -2312,10 +2328,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     }
     case Type::Code::Float64:
     {
-        auto f64_col = columnRef->As<ColumnFloat64>();
-        if (!f64_col) {
-            throw std::runtime_error("Float64 read: column type mismatch");
-        }
+        const ColumnFloat64 *f64_col = fast_scalar_col<ColumnFloat64>(columnRef);
         double col = (double)(*f64_col)[row];
         if (is_array)
         {
@@ -2403,10 +2416,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     }
     case Type::Code::String:
     {
-        auto s_col = columnRef->As<ColumnString>();
-        if (!s_col) {
-            throw std::runtime_error("String read: column type mismatch");
-        }
+        const ColumnString *s_col = fast_scalar_col<ColumnString>(columnRef);
         auto col = (*s_col)[row];
         if (is_array)
         {
@@ -2713,7 +2723,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         }
         auto col = array->GetAsColumn(row);
         if (fetch_mode & SC_FETCH_ONE) {
-            array_init(arr);
+            array_init_size(arr, (uint32_t)col->Size());
             for (size_t i = 0; i < col->Size(); ++i)
             {
                 convertToZval(arr, col, i, "array", 1, 0);
@@ -2721,7 +2731,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         } else {
             zval *return_tmp;
             SC_MAKE_STD_ZVAL(return_tmp);
-            array_init(return_tmp);
+            array_init_size(return_tmp, (uint32_t)col->Size());
             for (size_t i = 0; i < col->Size(); ++i)
             {
                 convertToZval(return_tmp, col, i, "array", 1, 0);
@@ -2808,7 +2818,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             throw std::runtime_error("Tuple read: column type mismatch");
         }
         if (fetch_mode & SC_FETCH_ONE) {
-            array_init(arr);
+            array_init_size(arr, (uint32_t)tuple->TupleSize());
             for (size_t i = 0; i < tuple->TupleSize(); ++i)
             {
                 convertToZval(arr, (*tuple)[i], row, "tuple", 1, 0);
@@ -2816,7 +2826,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         } else {
             zval *return_tmp;
             SC_MAKE_STD_ZVAL(return_tmp);
-            array_init(return_tmp);
+            array_init_size(return_tmp, (uint32_t)tuple->TupleSize());
             for (size_t i = 0; i < tuple->TupleSize(); ++i)
             {
                 convertToZval(return_tmp, (*tuple)[i], row, "tuple", 1, 0);
@@ -2918,7 +2928,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
 
         zval *map_zv;
         SC_MAKE_STD_ZVAL(map_zv);
-        array_init(map_zv);
+        array_init_size(map_zv, (uint32_t)entry_count);
 
         /* Pre-cast the key and value columns once per row instead of per
          * entry. The keys_any / values_any column slices don't change
