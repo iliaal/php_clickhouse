@@ -7,9 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-03
+
 ### Added
 
-- `ClickHouse::UUID_WITH_DASHES` fetch flag renders `UUID` cells — standalone columns and `Map` keys/values — as the hyphenated canonical form instead of bare 32-char hex. Applies to `select`, `selectStream`, and `selectStreamCallback`.
+- `ClickHouse::UUID_WITH_DASHES` fetch flag renders `UUID` cells (standalone columns and `Map` keys/values) as the hyphenated canonical form instead of bare 32-char hex. Applies to `select`, `selectStream`, and `selectStreamCallback`.
 - `ClickHouse::FIXEDSTRING_BINARY` fetch flag returns `FixedString` values at their full declared width, preserving trailing NUL bytes, instead of trimming them. Use it for binary payloads (IPv6, hash digests, packed structs) that legitimately end in NUL. Applies to standalone and `LowCardinality(FixedString)` reads.
 
 ### Changed
@@ -19,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Performance
 
 - Result decoding downcast each scalar column's concrete type once per cell through `dynamic_pointer_cast` (an atomic refcount round-trip plus an RTTI walk); a callgrind of an `Int64` read attributed ~18% of decode instructions to that alone. The integer, float, and `String` read paths now use a direct static cast, safe because their `Type::Code` identifies the concrete `ColumnVector<T>` / `ColumnString` class one-to-one. The version-fragile types (`IPv4` / `IPv6` / `FixedString`, geo, `Enum`, nested) keep the checked cast that guards against cross-version reclassification. Wide integer `SELECT`s decode ~25% faster; mixed wide rows ~20%, `String` ~12%.
-- `selectStatement()` no longer builds a second, position-keyed copy of every row when all column names are distinct — the associative rows already preserve column order and the `fetchOne` / `fetchKeyPair` / `fetchColumn` methods fall back to them. Roughly halves decode time for wide statement results. The positional copy is still built when duplicate column names (`SELECT number, number`) require it.
+- `selectStatement()` no longer builds a second, position-keyed copy of every row when all column names are distinct; the associative rows already preserve column order and the `fetchOne` / `fetchKeyPair` / `fetchColumn` methods fall back to them. Roughly halves decode time for wide statement results. The positional copy is still built when duplicate column names (`SELECT number, number`) require it.
 - Result rows and nested `Array` / `Tuple` / `Map` / `Point` values are pre-sized with `array_init_size`, avoiding hash-table rehashing while decoding wide rows and large nested values.
 - Numeric insert columns (every `Int` / `UInt` width and `Float32` / `Float64`) build straight from the row-major input, skipping the per-column transpose into a temporary PHP array that the previous path built, walked a second time, and then destroyed. Their strict coercers never re-enter user code, so the live rows can be read directly with no snapshot; `String`, `UUID`, `Decimal`, date-from-string, `Enum`, and composite columns keep the transpose path (their coercion can invoke `__toString`). Insert throughput improves roughly 30–44% for numeric-heavy rows and ~10% for mixed rows, across `insert()`, `insertAssoc()`, external tables, and streaming `write()`.
 
@@ -865,7 +867,8 @@ own way.
   emits a clear "unsupported" warning. Full Windows build of the
   vendored zstd + absl + lz4 + cityhash is a separate project.
 
-[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.8.8...HEAD
+[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.9.0...HEAD
+[0.9.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.9.0
 [0.8.8]: https://github.com/iliaal/php_clickhouse/releases/tag/0.8.8
 [0.8.7]: https://github.com/iliaal/php_clickhouse/releases/tag/0.8.7
 [0.8.6]: https://github.com/iliaal/php_clickhouse/releases/tag/0.8.6
