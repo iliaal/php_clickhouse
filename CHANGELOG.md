@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A server-supplied column type whose metadata doesn't match its declared type code throws a clear exception across the create / insert / read paths instead of dereferencing null; hardens the wrapper against a malicious or proxied server.
 - The constructor reports an allocation failure while assembling connection options as a `ClickHouseException` instead of letting the C++ exception escape and abort the process.
 - Verbose tracing (`setVerbose`) no longer discards a query exception that was already pending when a trace event fires; only an exception raised while encoding the trace payload itself is swallowed.
+- The verbose `server_exception` event runs its message through the same sanitizer as the thrown exception, so a trace sink no longer receives the executing SQL (and any bound literals) that the `ClickHouseException` message strips.
+- `ping()` during an open streaming insert (`writeStart` before `writeEnd`) is rejected with the standard "insert operation is now in progress" message instead of surfacing the vendored client's cryptic error; the insert stays intact and completable.
+- `selectStream()` / `selectStreamCallback()` detach their result callbacks from the local `Query` before it unwinds, matching `select()`; this prevents the vendored client from retaining a closure over freed stack storage.
 
 ## [0.8.8] - 2026-06-20
 
