@@ -1598,7 +1598,12 @@ static void attachVerbose(Query &q, clickhouse_object *obj)
         array_init(&ctx);
         add_assoc_long(&ctx, "code", (zend_long)e.code);
         add_assoc_string(&ctx, "name", e.name.c_str());
-        add_assoc_string(&ctx, "message", e.display_text.c_str());
+        /* Strip embedded SQL (and any bound literals in it) the same way
+         * throwClickHouseError() does before it reaches the exception
+         * message. Without this the verbose sink leaks the query tail that
+         * the thrown ClickHouseException hides. */
+        std::string vmsg = sanitizeError(e.display_text.c_str());
+        add_assoc_stringl(&ctx, "message", (char*)vmsg.data(), vmsg.size());
         emitVerbose(obj, "server_exception", &ctx);
     });
 }
@@ -1606,6 +1611,25 @@ static void attachVerbose(Query &q, clickhouse_object *obj)
 static void resetStats(clickhouse_object *obj)
 {
     obj->stats = ClientStats();
+}
+
+/*
+ * Drop every event callback from a local Query before it goes out of
+ * scope. The OnData / OnProgress / ... closures capture stack locals
+ * (result zvals, per-call block counters) by reference; clearing them
+ * before the frame unwinds prevents the vendored client from holding —
+ * or, on a later reuse, invoking — a closure over dangling storage.
+ * Visible under sanitizers at shutdown or on subsequent client use.
+ */
+static void detachQueryCallbacks(Query &q)
+{
+    q.OnData(SelectCallback{});
+    q.OnDataCancelable(SelectCancelableCallback{});
+    q.OnException(ExceptionCallback{});
+    q.OnProgress(ProgressCallback{});
+    q.OnServerLog(SelectServerLogCallback{});
+    q.OnProfileEvents(ProfileEventsCallback{});
+    q.OnProfile(ProfileCallback{});
 }
 
 /*
@@ -2009,6 +2033,16 @@ PHP_METHOD(ClickHouse, ping)
         clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
         Client *client = getClient(obj);
         QueryActiveGuard guard(obj);
+        /* A streaming insert (writeStart..writeEnd) holds the wire in
+         * insert mode even though query_active is only set for the span
+         * of each individual call. Pinging mid-insert would send a Ping
+         * packet the server isn't expecting; the vendored client already
+         * refuses this, but reject it here with the same message every
+         * other query path uses so the contract is explicit and does not
+         * depend on the vendored guard surviving a lib bump. */
+        if (obj->has_insert_block) {
+            throw std::runtime_error("The insert operation is now in progress");
+        }
         client->Ping();
     } catch (const std::exception& e) {
         throwClickHouseError(e);
@@ -2224,28 +2258,10 @@ static void do_select_into(zval *out, zval *this_obj,
             tryResetConnectionReapplyDatabase(this_obj, obj, false);
             /* Clear any callbacks (which captured stack locals from this frame)
              * before the local Query is destroyed and the stack unwinds. */
-            query.OnData(SelectCallback{});
-            query.OnDataCancelable(SelectCancelableCallback{});
-            query.OnException(ExceptionCallback{});
-            query.OnProgress(ProgressCallback{});
-            query.OnServerLog(SelectServerLogCallback{});
-            query.OnProfileEvents(ProfileEventsCallback{});
-            query.OnProfile(ProfileCallback{});
+            detachQueryCallbacks(query);
             throw;
         }
-        /* Detach callbacks that captured stack variables (the OnData lambda
-         * captures 'out', local counters, etc. by reference). Clearing them
-         * before the local Query goes out of scope prevents the closures from
-         * being held (or potentially invoked) with dangling references after
-         * we return from this function. This avoids UAF-like issues visible
-         * under sanitizers at script shutdown or on subsequent client use. */
-        query.OnData(SelectCallback{});
-        query.OnDataCancelable(SelectCancelableCallback{});
-        query.OnException(ExceptionCallback{});
-        query.OnProgress(ProgressCallback{});
-        query.OnServerLog(SelectServerLogCallback{});
-        query.OnProfileEvents(ProfileEventsCallback{});
-        query.OnProfile(ProfileCallback{});
+        detachQueryCallbacks(query);
         auto t1 = std::chrono::steady_clock::now();
         obj->stats.elapsed_ms =
             std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -4956,8 +4972,10 @@ PHP_METHOD(ClickHouse, selectStream)
         } catch (...) {
             setElapsedSince(obj, t0);
             tryResetConnectionReapplyDatabase(getThis(), obj, false);
+            detachQueryCallbacks(query);
             throw;
         }
+        detachQueryCallbacks(query);
         auto t1 = std::chrono::steady_clock::now();
         obj->stats.elapsed_ms =
             std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -5100,8 +5118,10 @@ PHP_METHOD(ClickHouse, selectStreamCallback)
         } catch (...) {
             setElapsedSince(obj, t0);
             tryResetConnectionReapplyDatabase(getThis(), obj, false);
+            detachQueryCallbacks(query);
             throw;
         }
+        detachQueryCallbacks(query);
         auto t1 = std::chrono::steady_clock::now();
         obj->stats.elapsed_ms =
             std::chrono::duration<double, std::milli>(t1 - t0).count();
