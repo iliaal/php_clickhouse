@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `Map(UUID, …)` keys and `Map(…, UUID)` values read back as bare 32-char hex by default, matching standalone `UUID` columns; they previously rendered hyphenated. Pass `ClickHouse::UUID_WITH_DASHES` for the canonical dashed form.
 
+### Performance
+
+- Result decoding downcast each scalar column's concrete type once per cell through `dynamic_pointer_cast` (an atomic refcount round-trip plus an RTTI walk); a callgrind of an `Int64` read attributed ~18% of decode instructions to that alone. The integer, float, and `String` read paths now use a direct static cast, safe because their `Type::Code` identifies the concrete `ColumnVector<T>` / `ColumnString` class one-to-one. The version-fragile types (`IPv4` / `IPv6` / `FixedString`, geo, `Enum`, nested) keep the checked cast that guards against cross-version reclassification. Wide integer `SELECT`s decode ~25% faster; mixed wide rows ~20%, `String` ~12%.
+- `selectStatement()` no longer builds a second, position-keyed copy of every row when all column names are distinct — the associative rows already preserve column order and the `fetchOne` / `fetchKeyPair` / `fetchColumn` methods fall back to them. Roughly halves decode time for wide statement results. The positional copy is still built when duplicate column names (`SELECT number, number`) require it.
+- Result rows and nested `Array` / `Tuple` / `Map` / `Point` values are pre-sized with `array_init_size`, avoiding hash-table rehashing while decoding wide rows and large nested values.
+
 ### Fixed
 
 - `Time` inserts reject a value outside the int32 range instead of silently truncating it.
