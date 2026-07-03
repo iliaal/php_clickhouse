@@ -2458,6 +2458,13 @@ static Block buildExternalTableBlock(zval *entry, std::string &name_out)
 
     Block block;
     for (size_t c = 0; c < columns_count; ++c) {
+        /* Fused fast path for reentrancy-free numeric columns; same as the
+         * insert() path. */
+        ColumnRef fused = tryBuildScalarColumnFromRows(rows_ht, c, &col_names_zs, col_types[c]);
+        if (fused) {
+            block.AppendColumn(col_names[c], fused);
+            continue;
+        }
         zval inner;
         buildSingleColumnZval(rows_ht, c, &col_names_zs, &inner);
         ColumnRef column;
@@ -3008,31 +3015,14 @@ static void buildSingleColumnZval(HashTable *values_ht, size_t column_index,
                                   const std::vector<zend_string*> *column_names,
                                   zval *out)
 {
-    array_init(out);
+    array_init_size(out, zend_hash_num_elements(values_ht));
     try {
-        zval *pzval, *fzval;
+        zval *pzval;
         ZEND_HASH_FOREACH_VAL(values_ht, pzval) {
-            ZVAL_DEREF(pzval);
-            /* A by-ref row can be reassigned to a non-array mid-iteration
-             * (e.g. a cell's __toString rewrites $rows[0] through the same
-             * reference). Without this recheck Z_ARRVAL_P would read garbage. */
-            if (Z_TYPE_P(pzval) != IS_ARRAY) {
-                throw std::runtime_error(
-                    "The insert function needs to pass in a two-dimensional array");
-            }
-            fzval = sc_zend_hash_index_find(Z_ARRVAL_P(pzval), column_index);
-            if (!fzval && column_names) {
-                zend_string *col = (*column_names)[column_index];
-                fzval = sc_zend_hash_find(Z_ARRVAL_P(pzval),
-                                          ZSTR_VAL(col), ZSTR_LEN(col));
-            }
-            if (!fzval) {
-                throw std::runtime_error(
-                    "The number of parameters inserted per line is inconsistent");
-            }
-            /* Cell-level deref so the strict Z_TYPE checks in
-             * insertColumn see the underlying value, not IS_REFERENCE. */
-            ZVAL_DEREF(fzval);
+            /* Shared extraction: by-ref deref, IS_ARRAY recheck (a by-ref
+             * row can be reassigned to a non-array mid-iteration), positional
+             * lookup with column-name fallback, cell deref. */
+            zval *fzval = extractRowCell(pzval, column_index, column_names);
             sc_zval_add_ref(fzval);
             add_next_index_zval(out, fzval);
         } ZEND_HASH_FOREACH_END();
@@ -3146,6 +3136,14 @@ static void do_insert_into(zval *this_obj, zend_string *table,
              * column-by-column keeps peak intermediate memory at one
              * column. */
             for (size_t index = 0; index < columns_count; ++index) {
+                /* Fused fast path: reentrancy-free numeric columns build
+                 * straight from the row-major input, skipping the transpose. */
+                ColumnRef fused = tryBuildScalarColumnFromRows(
+                    values_ht, index, &column_names, blockQuery[index]->Type());
+                if (fused) {
+                    blockInsert.AppendColumn(blockQuery.GetColumnName(index), fused);
+                    continue;
+                }
                 zval inner;
                 buildSingleColumnZval(values_ht, index, &column_names, &inner);
                 try {
@@ -3959,6 +3957,14 @@ PHP_METHOD(ClickHouse, write)
 
         Block blockInsert;
         for (size_t index = 0; index < columns_count; ++index) {
+            /* Fused fast path for reentrancy-free numeric columns (positional
+             * only here; streaming write() has no column-name fallback). */
+            ColumnRef fused = tryBuildScalarColumnFromRows(
+                values_ht, index, NULL, blockQuery[index]->Type());
+            if (fused) {
+                blockInsert.AppendColumn(blockQuery.GetColumnName(index), fused);
+                continue;
+            }
             zval inner;
             buildSingleColumnZval(values_ht, index, NULL, &inner);
             try {

@@ -867,6 +867,28 @@ ColumnRef createColumn(TypeRef type)
 // narrowing assignment to ClickHouse's int8/int16/int32. Values are
 // pulled non-mutatingly via zval_get_long so the caller's row arrays
 // don't get their types coerced in place.
+/* Per-cell appenders. Factored out of the leaf column builders so the
+ * transpose path (insertColumn, iterating a column-major PHP array) and
+ * the fused path (tryBuildScalarColumnFromRows, pulling a column straight
+ * from the row-major input) share one validation + Append implementation
+ * and can never drift in bounds checking or coercion rules. */
+template <typename TCol>
+static inline void appendIntCell(TCol *value, zval *cell,
+                                 zend_long MinV, zend_long MaxV, const char *type_label)
+{
+    zend_long n = strict_zval_long(cell, type_label);
+    if (n < MinV || n > MaxV) {
+        throw std::runtime_error(std::string("value out of range for ") + type_label);
+    }
+    value->Append((typename TCol::ValueType)n);
+}
+
+template <typename TCol>
+static inline void appendFloatCell(TCol *value, zval *cell, const char *type_label)
+{
+    value->Append((typename TCol::ValueType)strict_zval_double(cell, type_label));
+}
+
 template <typename TCol>
 static ColumnRef appendIntColumn(HashTable *values_ht,
                                  zend_long MinV, zend_long MaxV,
@@ -875,12 +897,7 @@ static ColumnRef appendIntColumn(HashTable *values_ht,
     auto value = std::make_shared<TCol>();
     zval *array_value;
     ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
-        zend_long n = strict_zval_long(array_value, type_label);
-        if (n < MinV || n > MaxV) {
-            throw std::runtime_error(
-                std::string("value out of range for ") + type_label);
-        }
-        value->Append((typename TCol::ValueType)n);
+        appendIntCell(value.get(), array_value, MinV, MaxV, type_label);
     } ZEND_HASH_FOREACH_END();
     return value;
 }
@@ -892,6 +909,49 @@ static ColumnRef appendIntColumn(HashTable *values_ht,
 // returns 64-bit values regardless of the target column, so without a
 // width check "0x100000000" silently truncated to UInt32 0.
 template <typename TCol, typename TStrtoul>
+static inline void appendUIntHexCell(TCol *value, zval *array_value,
+                                     TStrtoul strtoul_fn, uint64_t MaxV,
+                                     const char *type_label)
+{
+    ZVAL_DEREF(array_value);
+    if (Z_TYPE_P(array_value) == IS_STRING && Z_STRLEN_P(array_value) >= 3 &&
+        *Z_STRVAL_P(array_value) == '0' &&
+        (*(Z_STRVAL_P(array_value) + 1) == 'x' || *(Z_STRVAL_P(array_value) + 1) == 'X')) {
+        const char *s = Z_STRVAL_P(array_value);
+        size_t slen = Z_STRLEN_P(array_value);
+        char *endp = NULL;
+        errno = 0;
+        auto n = strtoul_fn(s, &endp, 0);
+        /* PHP zend_string is length-prefixed and may carry embedded
+         * NUL bytes. Comparing endp against ZSTR_LEN is the right
+         * "fully consumed" check; checking *endp == '\0' would let
+         * "0xABCD\0garbage" silently parse as 0xABCD because endp
+         * lands on the NUL. Same fix CR-306 applied to Map keys. */
+        if (errno == ERANGE || endp == s ||
+            (size_t)(endp - s) != slen) {
+            throw std::runtime_error(
+                std::string("invalid hex literal for ") + type_label);
+        }
+        if ((uint64_t)n > MaxV) {
+            throw std::runtime_error(
+                std::string("hex literal out of range for ") + type_label);
+        }
+        value->Append((typename TCol::ValueType)n);
+    } else {
+        zend_long n = strict_zval_long(array_value, type_label);
+        if (n < 0) {
+            throw std::runtime_error(
+                std::string("negative value cannot fit in ") + type_label);
+        }
+        if ((uint64_t)n > MaxV) {
+            throw std::runtime_error(
+                std::string("value out of range for ") + type_label);
+        }
+        value->Append((typename TCol::ValueType)n);
+    }
+}
+
+template <typename TCol, typename TStrtoul>
 static ColumnRef appendUIntColumnWithHex(HashTable *values_ht,
                                          TStrtoul strtoul_fn,
                                          uint64_t MaxV,
@@ -900,42 +960,7 @@ static ColumnRef appendUIntColumnWithHex(HashTable *values_ht,
     auto value = std::make_shared<TCol>();
     zval *array_value;
     ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
-        ZVAL_DEREF(array_value);
-        if (Z_TYPE_P(array_value) == IS_STRING && Z_STRLEN_P(array_value) >= 3 &&
-            *Z_STRVAL_P(array_value) == '0' &&
-            (*(Z_STRVAL_P(array_value) + 1) == 'x' || *(Z_STRVAL_P(array_value) + 1) == 'X')) {
-            const char *s = Z_STRVAL_P(array_value);
-            size_t slen = Z_STRLEN_P(array_value);
-            char *endp = NULL;
-            errno = 0;
-            auto n = strtoul_fn(s, &endp, 0);
-            /* PHP zend_string is length-prefixed and may carry embedded
-             * NUL bytes. Comparing endp against ZSTR_LEN is the right
-             * "fully consumed" check; checking *endp == '\0' would let
-             * "0xABCD\0garbage" silently parse as 0xABCD because endp
-             * lands on the NUL. Same fix CR-306 applied to Map keys. */
-            if (errno == ERANGE || endp == s ||
-                (size_t)(endp - s) != slen) {
-                throw std::runtime_error(
-                    std::string("invalid hex literal for ") + type_label);
-            }
-            if ((uint64_t)n > MaxV) {
-                throw std::runtime_error(
-                    std::string("hex literal out of range for ") + type_label);
-            }
-            value->Append((typename TCol::ValueType)n);
-        } else {
-            zend_long n = strict_zval_long(array_value, type_label);
-            if (n < 0) {
-                throw std::runtime_error(
-                    std::string("negative value cannot fit in ") + type_label);
-            }
-            if ((uint64_t)n > MaxV) {
-                throw std::runtime_error(
-                    std::string("value out of range for ") + type_label);
-            }
-            value->Append((typename TCol::ValueType)n);
-        }
+        appendUIntHexCell(value.get(), array_value, strtoul_fn, MaxV, type_label);
     } ZEND_HASH_FOREACH_END();
     return value;
 }
@@ -1057,7 +1082,7 @@ static ColumnRef appendFloatColumn(HashTable *values_ht, const char *type_label)
     auto value = std::make_shared<TCol>();
     zval *array_value;
     ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
-        value->Append((typename TCol::ValueType)strict_zval_double(array_value, type_label));
+        appendFloatCell(value.get(), array_value, type_label);
     } ZEND_HASH_FOREACH_END();
     return value;
 }
@@ -1248,6 +1273,79 @@ static std::vector<std::vector<std::tuple<double, double>>> phpToPolygon(zval *z
         poly.push_back(phpToRing(r));
     } ZEND_HASH_FOREACH_END();
     return poly;
+}
+
+/* Shared row-cell extraction for the insert paths. Given one row from the
+ * row-major $values matrix, return the cell for column col_index: look it
+ * up positionally, then fall back to the column name (assoc rows). Rows
+ * and cells are dereferenced so a by-ref element surfaces its underlying
+ * value; the IS_ARRAY recheck defends against a by-ref row reassigned to a
+ * non-array mid-iteration. Both buildSingleColumnZval (transpose path) and
+ * tryBuildScalarColumnFromRows (fused path) route through here so the
+ * by-ref / arity / name-fallback rules stay identical. Throws on a
+ * malformed row or a missing cell. */
+zval *extractRowCell(zval *row_pz, size_t col_index,
+                     const std::vector<zend_string*> *col_names)
+{
+    ZVAL_DEREF(row_pz);
+    if (Z_TYPE_P(row_pz) != IS_ARRAY) {
+        throw std::runtime_error(
+            "The insert function needs to pass in a two-dimensional array");
+    }
+    zval *cell = sc_zend_hash_index_find(Z_ARRVAL_P(row_pz), col_index);
+    if (!cell && col_names) {
+        zend_string *cn = (*col_names)[col_index];
+        cell = sc_zend_hash_find(Z_ARRVAL_P(row_pz), ZSTR_VAL(cn), ZSTR_LEN(cn));
+    }
+    if (!cell) {
+        throw std::runtime_error(
+            "The number of parameters inserted per line is inconsistent");
+    }
+    ZVAL_DEREF(cell);
+    return cell;
+}
+
+/*
+ * PERF-004: build a column straight from the row-major input, pulling
+ * col_index out of each row without first transposing the column into a
+ * temporary PHP array (which the transpose path then walks a second time
+ * and destroys). Restricted to the reentrancy-free numeric types: their
+ * strict coercers (strict_zval_long / _double / _u64, and the UInt32 hex
+ * parser) never invoke user PHP, so iterating the live rows HashTable is
+ * safe -- no __toString can mutate $rows mid-walk, and no snapshot / addref
+ * is needed. String, UUID, Decimal, Date-from-string, Enum, and all
+ * composite types can re-enter user code, so they stay on the snapshotting
+ * transpose path. Returns nullptr for any type not fused here; the caller
+ * falls back to buildSingleColumnZval + insertColumn.
+ */
+ColumnRef tryBuildScalarColumnFromRows(HashTable *rows_ht, size_t col_index,
+                                       const std::vector<zend_string*> *col_names,
+                                       TypeRef type)
+{
+    /* One iteration + extraction implementation, one per-cell appender per
+     * type -- the same appenders the transpose leaf builders call. */
+    auto build = [&](auto column, auto per_cell) -> ColumnRef {
+        zval *row_pz;
+        ZEND_HASH_FOREACH_VAL(rows_ht, row_pz) {
+            per_cell(column.get(), extractRowCell(row_pz, col_index, col_names));
+        } ZEND_HASH_FOREACH_END();
+        return column;
+    };
+
+    switch (type->GetCode()) {
+    case Type::Code::Int8:   return build(std::make_shared<ColumnInt8>(),   [](ColumnInt8 *c, zval *v)  { appendIntCell(c, v, INT8_MIN,  INT8_MAX,  "Int8"); });
+    case Type::Code::Int16:  return build(std::make_shared<ColumnInt16>(),  [](ColumnInt16 *c, zval *v) { appendIntCell(c, v, INT16_MIN, INT16_MAX, "Int16"); });
+    case Type::Code::Int32:  return build(std::make_shared<ColumnInt32>(),  [](ColumnInt32 *c, zval *v) { appendIntCell(c, v, INT32_MIN, INT32_MAX, "Int32"); });
+    case Type::Code::Int64:  return build(std::make_shared<ColumnInt64>(),  [](ColumnInt64 *c, zval *v) { appendIntCell(c, v, INT64_MIN, INT64_MAX, "Int64"); });
+    case Type::Code::UInt8:  return build(std::make_shared<ColumnUInt8>(),  [](ColumnUInt8 *c, zval *v) { appendIntCell(c, v, 0, 0xFF,   "UInt8"); });
+    case Type::Code::UInt16: return build(std::make_shared<ColumnUInt16>(), [](ColumnUInt16 *c, zval *v){ appendIntCell(c, v, 0, 0xFFFF, "UInt16"); });
+    case Type::Code::UInt32: return build(std::make_shared<ColumnUInt32>(), [](ColumnUInt32 *c, zval *v){ appendUIntHexCell(c, v, strtoul, UINT32_MAX, "UInt32"); });
+    case Type::Code::UInt64: return build(std::make_shared<ColumnUInt64>(), [](ColumnUInt64 *c, zval *v){ c->Append(strict_zval_u64(v, "UInt64")); });
+    case Type::Code::Float32:return build(std::make_shared<ColumnFloat32>(),[](ColumnFloat32 *c, zval *v){ appendFloatCell(c, v, "Float32"); });
+    case Type::Code::Float64:return build(std::make_shared<ColumnFloat64>(),[](ColumnFloat64 *c, zval *v){ appendFloatCell(c, v, "Float64"); });
+    default:
+        return nullptr;
+    }
 }
 
 ColumnRef insertColumn(TypeRef type, zval *value_zval)
