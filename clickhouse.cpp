@@ -604,9 +604,18 @@ PHP_METHOD(ClickHouse, __construct)
     if (php_array_get_value(_ht, "host", value))
     {
         host_configured = true;
-        ZStrGuard sg(value);
-        sc_zend_update_property_stringl(clickhouse_ce, this_obj, "host", sizeof("host") - 1,
-                                        sg.val(), sg.len());
+        /* DR-C1: ZStrGuard converts a throwing __toString() on the host value
+         * into a C++ throw. This runs before the main try block below, so an
+         * uncaught throw here would escape the Zend dispatcher and abort the
+         * process (SIGABRT). Catch it and re-surface as a PHP exception. */
+        try {
+            ZStrGuard sg(value);
+            sc_zend_update_property_stringl(clickhouse_ce, this_obj, "host", sizeof("host") - 1,
+                                            sg.val(), sg.len());
+        } catch (const std::exception &e) {
+            throwClickHouseError(e);
+            return;
+        }
     }
 
     if (php_array_get_value(_ht, "port", value))
@@ -1061,12 +1070,31 @@ static std::string sqlQuotedIdentifier(const std::string &s)
 static std::string sanitizeError(const char *what)
 {
     std::string msg(what ? what : "");
+    auto lower_of = [](const std::string &s) {
+        std::string l(s);
+        for (char &c : l) { if (c >= 'A' && c <= 'Z') c = (char)(c + 32); }
+        return l;
+    };
+
+    /* DR-007: redact a bound parameter value echoed in a type-parse error.
+     * ClickHouse emits "Value <X> cannot be parsed as <Type> for query
+     * parameter '<name>'", leaking the caller's literal (a numeric-looking
+     * secret passes the placeholder validator). The SQL-marker strip below
+     * misses it because the value sits ahead of any marker. */
+    {
+        std::string lower = lower_of(msg);
+        std::string::size_type vp = lower.find("value ");
+        std::string::size_type cp = lower.find(" cannot be parsed");
+        if (vp != std::string::npos && cp != std::string::npos && vp + 6 <= cp) {
+            msg.replace(vp + 6, cp - (vp + 6), "<redacted>");
+        }
+    }
+
     /* Case-insensitive search: ClickHouse 26.x emits lowercase
      * "while executing 'FUNCTION ...'", which a case-sensitive match
      * missed, leaking the bound literal (e.g. a password) the marker
      * is meant to strip. */
-    std::string lower(msg);
-    for (char &ch : lower) { if (ch >= 'A' && ch <= 'Z') ch = (char)(ch + 32); }
+    std::string lower = lower_of(msg);
     static const char *sql_markers[] = {
         "while executing",
         "in query: ",
@@ -1398,11 +1426,18 @@ static std::string formatParamValue(zval *v, const std::string &type, bool insid
             }
             std::string sv = formatScalarParam(iv);
             if (quote) {
+                /* DR-C6: the array literal is sent as a bound parameter, and
+                 * ClickHouse's Array-from-parameter string reader treats a
+                 * backslash literally (unlike a SQL-source literal, which
+                 * unescapes it) and closes an element on the first single
+                 * quote. So a quote must be doubled ('' — SQL style) and a
+                 * backslash must NOT be escaped; the previous backslash-escape
+                 * scheme rejected "it's" and doubled "c\d". */
                 std::string esc;
                 esc.reserve(sv.size() + 2);
                 esc += "'";
                 for (char c : sv) {
-                    if (c == '\'' || c == '\\') esc += '\\';
+                    if (c == '\'') esc += '\'';
                     esc += c;
                 }
                 esc += "'";
@@ -3809,6 +3844,13 @@ PHP_METHOD(ClickHouse, insertFromStream)
 
         bool insert_open  = true;
         bool block_dirty  = false;
+        /* DR-005: latches true once any data block has been sent to the open
+         * insert. Distinct from block_dirty (which is only set across a single
+         * SendInsertBlock). A validation error on a parsed-but-unflushed row
+         * leaves the wire at the clean "insert opened, no data sent" state, so
+         * it must NOT reset the connection (which would drop session temp
+         * tables / SET). Reset only when a block was actually transmitted. */
+        bool sent_any_block = false;
 
         /* DR-008: see do_insert_into — keep a reentrant insert on another
          * client from inheriting this build's relaxed allow-null state. */
@@ -3838,6 +3880,7 @@ PHP_METHOD(ClickHouse, insertFromStream)
             block_dirty = true;
             client->SendInsertBlock(blockInsert);
             block_dirty = false;
+            sent_any_block = true;
             pending_rows = 0;
         };
 
@@ -3919,12 +3962,17 @@ PHP_METHOD(ClickHouse, insertFromStream)
             setElapsedSince(obj, t0);
             cleanup_col_zvals();
             if (insert_open) {
-                if (block_dirty || total_rows > 0) {
+                if (block_dirty || sent_any_block) {
+                    /* A block was (partly) transmitted, so the open insert on
+                     * the wire is dirty; only a reset can recover it. */
                     tryResetConnectionReapplyDatabase(getThis(), obj, false);
                 } else {
-                    /* Empty-insert close on the healthy-wire path; if EndInsert
-                     * throws, the vendored inserting_ flag stays set and later
-                     * queries fail. Reset to recover the handle. */
+                    /* No data block ever left the client -- the wire is at the
+                     * clean "insert opened, no data" state even if rows were
+                     * parsed and buffered. Close the empty insert instead of
+                     * reconnecting, preserving session temp tables / SET. If
+                     * EndInsert throws, the vendored inserting_ flag stays set
+                     * and later queries fail, so reset to recover the handle. */
                     try {
                         client->EndInsert();
                     } catch (...) {
@@ -5313,6 +5361,7 @@ PHP_METHOD(ClickHouse, selectStreamCallback)
 
 PHP_METHOD(ClickHouseRowIterator, rewind)
 {
+    if (zend_parse_parameters_none() == FAILURE) return;
     clickhouse_iter_object *iter = Z_CLICKHOUSE_ITER_P(getThis());
     iter->block_idx = 0;
     iter->row_idx = 0;
@@ -5321,6 +5370,7 @@ PHP_METHOD(ClickHouseRowIterator, rewind)
 
 PHP_METHOD(ClickHouseRowIterator, valid)
 {
+    if (zend_parse_parameters_none() == FAILURE) return;
     clickhouse_iter_object *iter = Z_CLICKHOUSE_ITER_P(getThis());
     if (iter->block_idx >= iter->blocks.size()) {
         RETURN_FALSE;
@@ -5333,6 +5383,7 @@ PHP_METHOD(ClickHouseRowIterator, valid)
 
 PHP_METHOD(ClickHouseRowIterator, current)
 {
+    if (zend_parse_parameters_none() == FAILURE) return;
     clickhouse_iter_object *iter = Z_CLICKHOUSE_ITER_P(getThis());
     if (iter->block_idx >= iter->blocks.size()) {
         RETURN_NULL();
@@ -5366,12 +5417,14 @@ PHP_METHOD(ClickHouseRowIterator, current)
 
 PHP_METHOD(ClickHouseRowIterator, key)
 {
+    if (zend_parse_parameters_none() == FAILURE) return;
     clickhouse_iter_object *iter = Z_CLICKHOUSE_ITER_P(getThis());
     RETURN_LONG((zend_long)iter->cumulative_row_idx);
 }
 
 PHP_METHOD(ClickHouseRowIterator, next)
 {
+    if (zend_parse_parameters_none() == FAILURE) return;
     clickhouse_iter_object *iter = Z_CLICKHOUSE_ITER_P(getThis());
     if (iter->block_idx >= iter->blocks.size()) return;
     iter->row_idx++;
@@ -5385,6 +5438,7 @@ PHP_METHOD(ClickHouseRowIterator, next)
 
 PHP_METHOD(ClickHouseRowIterator, count)
 {
+    if (zend_parse_parameters_none() == FAILURE) return;
     clickhouse_iter_object *iter = Z_CLICKHOUSE_ITER_P(getThis());
     RETURN_LONG((zend_long)iter->total_rows);
 }

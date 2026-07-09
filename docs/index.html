@@ -416,7 +416,7 @@ $stmt-&gt;toArray(); $stmt-&gt;statistics();</code></pre>
 <h3 id="m-settings">Settings &amp; observability <a class="anchor" href="#m-settings">#</a></h3>
 <pre><code>$ch-&gt;setSettings(array $settings);            // client-wide; per-call overrides; chainable
 $ch-&gt;setSetting(string $key, mixed $value);  // single-key sugar, chainable
-$ch-&gt;setDatabase(string $database);          // USE on the server, updates default; chainable
+$ch-&gt;setDatabase(string $database);          // reconnects with this default DB (survives reconnects); drops session temp tables/SET; chainable
 $ch-&gt;setProgressCallback(?callable $cb);
 $ch-&gt;setProfileCallback(?callable $cb);
 $ch-&gt;setVerbose(true);                 // JSON lifecycle lines on STDERR

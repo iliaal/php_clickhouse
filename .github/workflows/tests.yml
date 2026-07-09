@@ -90,6 +90,24 @@ jobs:
           ./configure --enable-clickhouse
           make -j$(nproc)
 
+      - name: Verify ClickHouse is reachable (guard against silent all-skip)
+        env:
+          CLICKHOUSE_HOST: 127.0.0.1
+          CLICKHOUSE_PORT: 9000
+        run: |
+          # _clickhouse.inc SKIPIFs the whole suite when the native port is
+          # unreachable, and run-tests.php exits 0 on an all-skip run -- so a
+          # dead server would turn into a falsely-green lane. Fail fast if the
+          # native protocol port is not accepting connections. (Auth failures
+          # surface as test FAILs, not skips, so the port check is sufficient.)
+          for i in $(seq 1 30); do
+            if php -r 'exit(@fsockopen(getenv("CLICKHOUSE_HOST"), (int)getenv("CLICKHOUSE_PORT"), $e, $s, 2) ? 0 : 1);'; then
+              echo "ClickHouse reachable on ${CLICKHOUSE_HOST}:${CLICKHOUSE_PORT}"; exit 0
+            fi
+            echo "waiting for ClickHouse native port... ($i)"; sleep 2
+          done
+          echo "ClickHouse not reachable on native port; failing to avoid a silent all-skip pass"; exit 1
+
       - name: Run test suite
         env:
           CLICKHOUSE_HOST: 127.0.0.1

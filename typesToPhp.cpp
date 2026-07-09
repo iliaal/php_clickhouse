@@ -455,16 +455,29 @@ static int uuid_hex_value(char c)
 
 static UUID parseUUIDString(const char *s, size_t len, const char *error_msg)
 {
+    /* DR-010: accept only the two canonical forms -- 32 hex digits (dashless)
+     * or the 8-4-4-4-12 dashed form. The prior parser skipped a '-' at any
+     * position, silently canonicalizing malformed text (e.g. dashes in the
+     * wrong places) instead of rejecting it. */
+    bool dashed;
+    if (len == 32) {
+        dashed = false;
+    } else if (len == 36 && s[8] == '-' && s[13] == '-' &&
+               s[18] == '-' && s[23] == '-') {
+        dashed = true;
+    } else {
+        throw std::runtime_error(error_msg);
+    }
+
     uint64_t high = 0;
     uint64_t low = 0;
     size_t digits = 0;
-
     for (size_t i = 0; i < len; ++i) {
-        if (s[i] == '-') {
-            continue;
+        if (dashed && (i == 8 || i == 13 || i == 18 || i == 23)) {
+            continue; // validated as '-' above
         }
         int nibble = uuid_hex_value(s[i]);
-        if (nibble < 0 || digits >= 32) {
+        if (nibble < 0) {
             throw std::runtime_error(error_msg);
         }
         if (digits < 16) {
@@ -474,10 +487,7 @@ static UUID parseUUIDString(const char *s, size_t len, const char *error_msg)
         }
         ++digits;
     }
-
-    if (digits != 32) {
-        throw std::runtime_error(error_msg);
-    }
+    /* digits is exactly 32 by construction for both accepted lengths. */
     return UUID{high, low};
 }
 
@@ -1045,11 +1055,12 @@ static ColumnRef appendEnumColumn(TypeRef type, HashTable *values_ht)
 // (or "YYYY-MM-DD HH:MM:SS" for is_date=false) string. The string path
 // goes through to_time_t which throws on parse failure.
 template <typename TCol>
-static ColumnRef appendDateColumn(HashTable *values_ht, bool is_date)
+static ColumnRef appendDateColumn(HashTable *values_ht, bool is_date,
+                                  const char *type_label,
+                                  int64_t min_epoch, int64_t max_epoch)
 {
     auto value = std::make_shared<TCol>();
     zval *array_value;
-    const char *type_label = is_date ? "Date" : "DateTime";
     ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
         ZVAL_DEREF(array_value);
         /* Any string is treated as a formatted date/datetime. The prior
@@ -1058,13 +1069,26 @@ static ColumnRef appendDateColumn(HashTable *values_ht, bool is_date)
          * to_time_t now does full validation (EOF after format, gmtime
          * round-trip). Numeric inputs go through strict_zval_long so
          * non-numeric, fractional, NaN/Inf are rejected. */
+        std::time_t t;
         if (Z_TYPE_P(array_value) == IS_STRING) {
-            value->Append((std::time_t)to_time_t(
+            t = (std::time_t)to_time_t(
                 std::string(Z_STRVAL_P(array_value), Z_STRLEN_P(array_value)),
-                is_date));
+                is_date);
         } else {
-            value->Append((std::time_t)strict_zval_long(array_value, type_label));
+            t = (std::time_t)strict_zval_long(array_value, type_label);
         }
+        /* DR-003: clickhouse-cpp narrows the epoch into the column's storage
+         * (uint16 days for Date, int32 days for Date32, uint32 seconds for
+         * DateTime) with a bare static_cast and no range check, so an
+         * out-of-range value wraps silently (Date "3000-01-01" -> 2102,
+         * DateTime "1960-..." -> 2096). Reject anything outside the column
+         * type's representable civil range. */
+        if ((int64_t)t < min_epoch || (int64_t)t > max_epoch) {
+            throw std::runtime_error(
+                std::string(type_label) + " value is outside the representable "
+                "range for this column type");
+        }
+        value->Append(t);
     } ZEND_HASH_FOREACH_END();
     return value;
 }
@@ -1365,6 +1389,48 @@ ColumnRef tryBuildScalarColumnFromRows(HashTable *rows_ht, size_t col_index,
     }
 }
 
+/* DR-002: ColumnDecimal::Append(string) scales the text into the backing
+ * int and never checks it against the declared precision/scale, so a native
+ * block insert silently stores an out-of-range value (Decimal(5,2) accepting
+ * 1000.00, or truncating 12.999 to 12.99) that the server's own VALUES parser
+ * would reject. Validate the plain-decimal form here; unusual forms
+ * (scientific notation, etc.) fall through to ColumnDecimal, which throws on
+ * anything it can't parse. */
+static void validateDecimalText(const std::string &s, size_t precision,
+                                size_t scale, const char *label)
+{
+    size_t i = 0, n = s.size();
+    if (i < n && (s[i] == '+' || s[i] == '-')) ++i;
+    size_t int_start = i;
+    while (i < n && s[i] >= '0' && s[i] <= '9') ++i;
+    size_t int_digits = i - int_start;
+    size_t frac_digits = 0;
+    if (i < n && s[i] == '.') {
+        ++i;
+        size_t f0 = i;
+        while (i < n && s[i] >= '0' && s[i] <= '9') ++i;
+        frac_digits = i - f0;
+    }
+    /* Not a plain [sign] digits [. digits] literal (e.g. an exponent form):
+     * leave it to ColumnDecimal to accept or reject. */
+    if (i != n || (int_digits == 0 && frac_digits == 0)) return;
+
+    size_t sig_int = int_digits;
+    for (size_t k = int_start; k < int_start + int_digits && s[k] == '0'; ++k) {
+        --sig_int;
+    }
+    if (frac_digits > scale) {
+        throw std::runtime_error(
+            std::string(label) + " value has more fractional digits than the "
+            "column scale allows");
+    }
+    if (precision >= scale && sig_int > precision - scale) {
+        throw std::runtime_error(
+            std::string(label) + " value exceeds the range of its Decimal "
+            "precision/scale");
+    }
+}
+
 ColumnRef insertColumn(TypeRef type, zval *value_zval)
 {
     ConvertDepthGuard _depth_guard;  // shared with createColumn / convertToZval
@@ -1611,7 +1677,9 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     }
 
     case Type::Code::DateTime:
-        return appendDateColumn<ColumnDateTime>(values_ht, /*is_date=*/false);
+        /* DateTime: uint32 seconds, 1970-01-01 .. 2106-02-07 06:28:15. */
+        return appendDateColumn<ColumnDateTime>(values_ht, /*is_date=*/false,
+                                                "DateTime", 0, 4294967295LL);
     case Type::Code::DateTime64:
     {
         size_t precision = type_as_or_throw<DateTime64Type>(type, "DateTime64")->GetPrecision();
@@ -1637,7 +1705,17 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 auto [whole, frac] = to_time_t_with_frac(
                     std::string(Z_STRVAL_P(v), Z_STRLEN_P(v)),
                     precision);
-                value->Append((int64_t)whole * scale + frac);
+                /* DR-004: guard whole*scale (+frac) against int64 overflow,
+                 * matching the integer path below. A far-future timestamp
+                 * (e.g. 2262-04-12 at precision 9) otherwise wraps silently to
+                 * a 1900-era value. frac is in [0, scale), so a one-tick
+                 * headroom on the multiply bound covers the add. */
+                int64_t w = (int64_t)whole;
+                if (w > (INT64_MAX - frac) / scale || w < INT64_MIN / scale) {
+                    throw std::runtime_error(
+                        "DateTime64 value out of representable range for this precision");
+                }
+                value->Append(w * scale + frac);
             } else if (Z_TYPE_P(v) == IS_DOUBLE) {
                 /* The numeric paths take the value as (fractional) seconds
                  * since the epoch, like DateTime. A double's 52-bit mantissa
@@ -1667,9 +1745,15 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         return value;
     }
     case Type::Code::Date:
-        return appendDateColumn<ColumnDate>(values_ht, /*is_date=*/true);
+        /* Date: uint16 days, 1970-01-01 .. 2149-06-06 (day 0..65535). */
+        return appendDateColumn<ColumnDate>(values_ht, /*is_date=*/true,
+                                            "Date", 0, 65535LL * 86400 + 86399);
     case Type::Code::Date32:
-        return appendDateColumn<ColumnDate32>(values_ht, /*is_date=*/true);
+        /* Date32: int32 days, 1900-01-01 .. 2299-12-31 (day -25567..120529). */
+        return appendDateColumn<ColumnDate32>(values_ht, /*is_date=*/true,
+                                              "Date32",
+                                              -25567LL * 86400,
+                                              120529LL * 86400 + 86399);
     case Type::Code::Time:
     {
         auto value = std::make_shared<ColumnTime>();
@@ -1831,7 +1915,9 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                     "Decimal insert requires a scalar value (string, int, or float)");
             } else {
                 ZStrGuard sg(v);
-                value->Append(std::string(sg.val(), sg.len()));
+                std::string dv(sg.val(), sg.len());
+                validateDecimalText(dv, dt->GetPrecision(), dt->GetScale(), "Decimal");
+                value->Append(dv);
             }
         }
         ZEND_HASH_FOREACH_END();
@@ -3106,6 +3192,14 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         zval *map_zv;
         SC_MAKE_STD_ZVAL(map_zv);
         array_init_size(map_zv, (uint32_t)entry_count);
+        /* DR-014: the key/value column casts, decodeKey, and the
+         * unsupported-inner-type throw below all run before map_zv is attached
+         * to the parent. Free the partially-built map on any such throw so the
+         * heap zval isn't orphaned (mirrors the Array/Tuple read guard). */
+        struct MapZvGuard {
+            zval *z;
+            ~MapZvGuard() { if (z) zval_ptr_dtor(z); }
+        } map_guard{map_zv};
 
         /* Pre-cast the key and value columns once per row instead of per
          * entry. The keys_any / values_any column slices don't change
@@ -3331,6 +3425,8 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             }
         }
 
+        /* Past every throwing step; ownership transfers to arr below. */
+        map_guard.z = nullptr;
         if (is_array) {
             add_next_index_zval(arr, map_zv);
             ZVAL_UNDEF(map_zv);
