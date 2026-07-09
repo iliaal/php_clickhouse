@@ -1309,13 +1309,37 @@ static bool typeNeedsQuoting(const std::string &t)
  * its elements into the SQL array literal unquoted. A PHP *string* element
  * must therefore be a single bare numeric literal — otherwise "1,2,3" splices
  * as three values (arity corruption) and punctuation like "1),(2" injects into
- * the literal. Integer/float/bool zvals are formatted by us and are safe; only
- * string elements need this gate. This blocks separators/injection without a
+ * the literal. Integer/float/bool zvals are formatted by us and are safe; every
+ * other element (string, Stringable object, resource) is string-coerced and
+ * untrusted, so it needs this gate. This blocks separators/injection without a
  * full grammar parse (a malformed-but-clean token like "1.2.3" is left for the
  * server to reject cleanly). */
 static bool isBareNumericLiteral(const std::string &s)
 {
     if (s.empty()) return false;
+
+    /* Accept the special float words ClickHouse recognises (inf / nan,
+     * optionally signed). Neither contains a SQL-structural character
+     * (comma, bracket, paren, quote, space), so they can't break out of the
+     * array literal, and the server accepts them for Float columns (a
+     * non-float column rejects them cleanly). Hex integer literals are
+     * deliberately not accepted: the server's array-from-text parser
+     * rejects 0x.. inside a bound Array parameter, so letting them past
+     * this gate would only swap a clear client message for a cryptic
+     * server one. */
+    size_t i = 0;
+    if (s[i] == '+' || s[i] == '-') ++i;
+    std::string rest = s.substr(i);
+    auto ieq = [](const std::string &a, const char *b) {
+        size_t n = strlen(b);
+        if (a.size() != n) return false;
+        for (size_t k = 0; k < n; ++k) {
+            if (tolower((unsigned char)a[k]) != b[k]) return false;
+        }
+        return true;
+    };
+    if (ieq(rest, "inf") || ieq(rest, "nan")) return true;
+
     bool any_digit = false;
     for (char c : s) {
         if (c >= '0' && c <= '9') { any_digit = true; continue; }
@@ -1384,11 +1408,25 @@ static std::string formatParamValue(zval *v, const std::string &type, bool insid
                 esc += "'";
                 out += esc;
             } else {
-                if (Z_TYPE_P(iv) == IS_STRING && !isBareNumericLiteral(sv)) {
-                    throw std::runtime_error(
-                        "non-numeric string element in a numeric Array typed "
-                        "parameter (each string element must be a single "
-                        "numeric literal)");
+                /* Only int/float/bool zvals are formatted by us to a
+                 * guaranteed-safe token. Anything else -- a string, a
+                 * Stringable object, a resource -- is coerced through
+                 * __toString / a string cast and is as untrusted as a raw
+                 * string element, so it must pass the bare-numeric gate
+                 * before splicing unquoted into the array literal. */
+                switch (Z_TYPE_P(iv)) {
+                    case IS_LONG:
+                    case IS_DOUBLE:
+                    case IS_TRUE:
+                    case IS_FALSE:
+                        break;
+                    default:
+                        if (!isBareNumericLiteral(sv)) {
+                            throw std::runtime_error(
+                                "non-numeric element in a numeric Array typed "
+                                "parameter (each string/object element must be "
+                                "a single numeric literal)");
+                        }
                 }
                 out += sv;
             }
