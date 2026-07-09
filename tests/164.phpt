@@ -30,6 +30,17 @@ catch (ClickHouseException $e) { echo "comma string: REJECTED\n"; }
 try { $c->select($q, ["ids" => ["1),(2"]]); echo "punct string: NO THROW\n"; }
 catch (ClickHouseException $e) { echo "punct string: REJECTED\n"; }
 
+// A Stringable object coerces via __toString to the same raw payload and
+// must not bypass the gate that a literal string hits.
+class ArityBomb { public function __toString() { return "1,2,3"; } }
+try { $c->select($q, ["ids" => [new ArityBomb()]]); echo "comma object: NO THROW\n"; }
+catch (ClickHouseException $e) { echo "comma object: REJECTED\n"; }
+
+// A Stringable returning a clean numeric literal still works.
+class NumStr { public function __toString() { return "2"; } }
+$r = $c->select($q, ["ids" => [new NumStr()]]);
+echo "numeric-object elems count: ", $r[0]['c'], "\n";
+
 // legit int elements
 $r = $c->select($q, ["ids" => [1, 2]]);
 echo "int elems count: ", $r[0]['c'], "\n";
@@ -38,10 +49,20 @@ echo "int elems count: ", $r[0]['c'], "\n";
 $r = $c->select($q, ["ids" => ["1", "3"]]);
 echo "numeric-string elems count: ", $r[0]['c'], "\n";
 
+// The special float words inf / nan (optionally signed) are valid ClickHouse
+// numeric literals and must pass the gate; the server accepts them for a
+// Float column. Verify the whole array binds (length 4) rather than a count.
+$r = $c->select("SELECT length({v:Array(Float64)}) AS n",
+                ["v" => ["inf", "-inf", "nan", "1.5"]]);
+echo "float specials len: ", $r[0]['n'], "\n";
+
 $c->execute("DROP TABLE test.dr010");
 ?>
 --EXPECT--
 comma string: REJECTED
 punct string: REJECTED
+comma object: REJECTED
+numeric-object elems count: 1
 int elems count: 2
 numeric-string elems count: 2
+float specials len: 4
