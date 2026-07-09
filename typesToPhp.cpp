@@ -206,6 +206,23 @@ struct AllowNullGuard {
     AllowNullGuard(const AllowNullGuard&) = delete;
     AllowNullGuard& operator=(const AllowNullGuard&) = delete;
 };
+
+/* DR-008: g_allow_null_in_strict is thread-local and shared by every
+ * ClickHouse client on the thread. It is bumped only transiently inside a
+ * Nullable child build, but that build runs userland (__toString /
+ * jsonSerialize) which can synchronously reenter a *second* client's
+ * insert. Without this, the second insert would observe the first's
+ * relaxed strictness and silently coerce a bare NULL to 0/"" on a
+ * non-Nullable column. Save-and-restore at each top-level insert
+ * entrypoint so a reentrant insert starts from the reject-null default;
+ * legitimate same-client nesting is unaffected because the value is
+ * restored on scope exit. */
+InsertNullScopeGuard::InsertNullScopeGuard() : saved(g_allow_null_in_strict) {
+    g_allow_null_in_strict = 0;
+}
+InsertNullScopeGuard::~InsertNullScopeGuard() {
+    g_allow_null_in_strict = saved;
+}
 static zend_long strict_zval_long(zval *z, const char *type_label)
 {
     ZVAL_DEREF(z);
@@ -1418,11 +1435,12 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         /* Auto-detect by zval type: a PHP array/object is json_encode'd;
          * a string is treated as raw JSON text and validated client-side
          * (a malformed string would otherwise fail mid-stream inside the
-         * server's block parse with an opaque protocol error). NULL maps
-         * to the empty object {} -- ClickHouse rejects empty strings and
-         * NULL for JSON, and {} is the convention ColumnNullableT<ColumnJSON>
-         * uses for null rows, so a Nullable(JSON) build under
-         * AllowNullGuard lands a valid placeholder here too. */
+         * server's block parse with an opaque protocol error). A bare
+         * NULL is rejected on a non-Nullable JSON column (storing {} would
+         * silently corrupt); only under AllowNullGuard (a Nullable(JSON)
+         * build) does NULL map to the empty object {} -- the convention
+         * ColumnNullableT<ColumnJSON> uses for null rows, which the null
+         * mask then masks out. */
         auto value = std::make_shared<ColumnJSON>();
         ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
@@ -1432,8 +1450,14 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 smart_str buf = {0};
                 if (php_json_encode(&buf, v, 0) == FAILURE || EG(exception)) {
                     smart_str_free(&buf);
+                    /* A user JsonSerializable::jsonSerialize() / __toString()
+                     * may have thrown. Leave EG(exception) set so the boundary
+                     * throwClickHouseError preserves the original type and
+                     * message (as the String path via ZStrGuard already does)
+                     * instead of replacing it with a generic wrapper. */
                     if (EG(exception)) {
-                        zend_clear_exception();
+                        throw std::runtime_error(
+                            "JSON insert: value serialization threw an exception");
                     }
                     throw std::runtime_error("JSON insert: failed to encode value to JSON");
                 }
@@ -1465,6 +1489,10 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
 #endif
                 value->Append(std::string(Z_STRVAL_P(v), Z_STRLEN_P(v)));
             } else if (Z_TYPE_P(v) == IS_NULL) {
+                if (g_allow_null_in_strict == 0) {
+                    throw std::runtime_error(
+                        "null cannot be assigned to non-Nullable column JSON");
+                }
                 value->Append(std::string("{}"));
             } else {
                 throw std::runtime_error(
@@ -1787,13 +1815,24 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         {
             zval *v = array_value;
             ZVAL_DEREF(v);
-            if (Z_TYPE_P(v) == IS_ARRAY || Z_TYPE_P(v) == IS_OBJECT ||
+            if (Z_TYPE_P(v) == IS_NULL) {
+                /* Mirror the scalar strict_zval_* helpers: a bare NULL on a
+                 * non-Nullable Decimal is rejected (ColumnDecimal parses ""
+                 * to a silent 0). Only under AllowNullGuard (a Nullable
+                 * build) emit a "0" placeholder the null mask masks out. */
+                if (g_allow_null_in_strict == 0) {
+                    throw std::runtime_error(
+                        "null cannot be assigned to non-Nullable column Decimal");
+                }
+                value->Append(std::string("0"));
+            } else if (Z_TYPE_P(v) == IS_ARRAY || Z_TYPE_P(v) == IS_OBJECT ||
                 Z_TYPE_P(v) == IS_RESOURCE) {
                 throw std::runtime_error(
                     "Decimal insert requires a scalar value (string, int, or float)");
+            } else {
+                ZStrGuard sg(v);
+                value->Append(std::string(sg.val(), sg.len()));
             }
-            ZStrGuard sg(v);
-            value->Append(std::string(sg.val(), sg.len()));
         }
         ZEND_HASH_FOREACH_END();
         return value;
@@ -2217,7 +2256,11 @@ static void emitEpoch(zval *arr, std::time_t t, const char *fmt,
 {
     if (fetch_mode & SC_FETCH_DATE_AS_STRINGS) {
         char buffer[32];
-        size_t l = strftime(buffer, sizeof(buffer), fmt, gmtime(&t));
+        struct tm tmv;
+        if (!gmtime_r(&t, &tmv)) {
+            throw std::runtime_error("gmtime_r failed for date/time value");
+        }
+        size_t l = strftime(buffer, sizeof(buffer), fmt, &tmv);
         if (is_array) {
             sc_add_next_index_stringl(arr, buffer, l, 1);
         } else {
@@ -2661,7 +2704,11 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
 
         if (fetch_mode & SC_FETCH_DATE_AS_STRINGS) {
             char buffer[64];
-            size_t l = strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", gmtime(&whole));
+            struct tm tmv;
+            if (!gmtime_r(&whole, &tmv)) {
+                throw std::runtime_error("gmtime_r failed for DateTime64 value");
+            }
+            size_t l = strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &tmv);
             if (precision > 0 && l < sizeof(buffer)) {
                 int written = snprintf(buffer + l, sizeof(buffer) - l, ".%0*lld",
                                        (int)precision, (long long)frac);
@@ -2820,19 +2867,32 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             throw std::runtime_error("Array read: column type mismatch");
         }
         auto col = array->GetAsColumn(row);
+        /* Forward only the value-shaping flags (DATE_AS_STRINGS,
+         * UUID_WITH_DASHES, FIXEDSTRING_BINARY, JSON_AS_*) into nested
+         * cells; row-shape flags (FETCH_ONE/KEY_PAIR/COLUMN) must not leak
+         * into element decoding. */
+        long nested_mode = fetch_mode & SC_FETCH_VALUE_FLAGS;
         if (fetch_mode & SC_FETCH_ONE) {
             array_init_size(arr, (uint32_t)col->Size());
             for (size_t i = 0; i < col->Size(); ++i)
             {
-                convertToZval(arr, col, i, "array", 1, 0);
+                convertToZval(arr, col, i, "array", 1, nested_mode);
             }
         } else {
             zval *return_tmp;
             SC_MAKE_STD_ZVAL(return_tmp);
             array_init_size(return_tmp, (uint32_t)col->Size());
-            for (size_t i = 0; i < col->Size(); ++i)
-            {
-                convertToZval(return_tmp, col, i, "array", 1, 0);
+            /* return_tmp holds a heap HashTable not yet attached to arr; a
+             * throw mid-loop (nested depth cap, type mismatch) would orphan
+             * it. Free on unwind, mirroring do_select_into's row guard. */
+            try {
+                for (size_t i = 0; i < col->Size(); ++i)
+                {
+                    convertToZval(return_tmp, col, i, "array", 1, nested_mode);
+                }
+            } catch (...) {
+                zval_ptr_dtor(return_tmp);
+                throw;
             }
             if (is_array)
             {
@@ -2915,19 +2975,26 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         if (!tuple) {
             throw std::runtime_error("Tuple read: column type mismatch");
         }
+        long nested_mode = fetch_mode & SC_FETCH_VALUE_FLAGS;
         if (fetch_mode & SC_FETCH_ONE) {
             array_init_size(arr, (uint32_t)tuple->TupleSize());
             for (size_t i = 0; i < tuple->TupleSize(); ++i)
             {
-                convertToZval(arr, (*tuple)[i], row, "tuple", 1, 0);
+                convertToZval(arr, (*tuple)[i], row, "tuple", 1, nested_mode);
             }
         } else {
             zval *return_tmp;
             SC_MAKE_STD_ZVAL(return_tmp);
             array_init_size(return_tmp, (uint32_t)tuple->TupleSize());
-            for (size_t i = 0; i < tuple->TupleSize(); ++i)
-            {
-                convertToZval(return_tmp, (*tuple)[i], row, "tuple", 1, 0);
+            /* Same orphan-on-throw guard as the Array read path. */
+            try {
+                for (size_t i = 0; i < tuple->TupleSize(); ++i)
+                {
+                    convertToZval(return_tmp, (*tuple)[i], row, "tuple", 1, nested_mode);
+                }
+            } catch (...) {
+                zval_ptr_dtor(return_tmp);
+                throw;
             }
             if (is_array)
             {

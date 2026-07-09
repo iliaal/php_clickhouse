@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `selectStatement()` accepts an optional trailing `$fetch_mode` argument. Only the value-shaping flags apply (`DATE_AS_STRINGS`, `JSON_AS_ARRAY` / `JSON_AS_OBJECT`, `UUID_WITH_DASHES`, `FIXEDSTRING_BINARY`); the row-shape flags (`FETCH_ONE` / `FETCH_KEY_PAIR` / `FETCH_COLUMN`) are ignored, since a statement always materializes full rows for array and iterator access.
+
+### Fixed
+
+- Inserting a PHP `null` into a non-Nullable `JSON` column now throws instead of silently storing the empty object `{}`; a non-Nullable `Decimal` column likewise rejects `null` instead of storing `0`. The `Nullable(JSON)` and `Nullable(Decimal)` variants still accept `null`.
+- Value-shaping fetch flags (`DATE_AS_STRINGS`, `UUID_WITH_DASHES`, `FIXEDSTRING_BINARY`, `JSON_AS_*`) now apply to values nested inside `Array` and `Tuple` columns, not only to top-level cells. A `select(..., DATE_AS_STRINGS)` over an `Array(Date)` returns date strings, matching a top-level `Date`.
+- A clean server error (bad SQL, missing table) no longer reconnects and discards session-scoped state such as temporary tables and session-level `SET` settings. This holds on every query and stream entry point (`select`, `selectStatement`, `execute`, `selectWithExternalData`, `selectStream`, `selectStreamCallback`, `selectToStream`). Transport faults and callback / OnData aborts still reset the connection to recover a dirty wire.
+- A reentrant insert on a second client no longer inherits the first client's relaxed null handling and silently coerces `null` to `0` / `""`. This happens when a value's `__toString()` / `jsonSerialize()` runs during a `Nullable` insert build on the first client.
+- A `JsonSerializable::jsonSerialize()` that throws during a `JSON` insert now surfaces the original exception type and message instead of a generic "failed to encode value to JSON" wrapper.
+- Numeric `Array(Int* | UInt* | Float* | Decimal* | Bool)` typed query parameters reject a non-numeric string element (e.g. `"1,2,3"`) instead of splicing it raw into the SQL array literal, where it would corrupt element arity or inject punctuation.
+- Reading a value that throws partway through building a nested `Array` or `Tuple` (for example the nested-type depth cap firing) no longer leaks the partially-built array.
+- `DATE_AS_STRINGS` date formatting on the read path uses the reentrant `gmtime_r` with a failure check, matching the write path, rather than the shared-state `gmtime`.
+- `insertFromStream()` rejects a `batch_rows` above 10,000,000 (large enough to buffer the whole stream in memory and defeat batching) in addition to the existing lower-bound check.
+- The external-table build and row-iterator `current()` error paths route through the central error sanitizer (query-marker stripping and length cap) instead of throwing the raw library message.
+- API documentation: corrected the version brand, the `DateTime64` write-unit note (an integer is whole seconds scaled to the column precision, not raw ticks), and the missing `FIXEDSTRING_BINARY` fetch-mode row.
+
 ## [0.9.0] - 2026-07-03
 
 ### Added
