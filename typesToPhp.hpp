@@ -45,6 +45,18 @@ struct ZStrGuard {
     size_t      len() const { return ZSTR_LEN(s); }
 };
 
+/* DR-008: reset the thread-local allow-null strictness at each top-level
+ * insert entrypoint so a userland-reentrant insert on a second client can't
+ * inherit a first client's relaxed (Nullable-build) state. Saves/restores
+ * to keep legitimate same-thread nesting correct. */
+struct InsertNullScopeGuard {
+    int saved;
+    InsertNullScopeGuard();
+    ~InsertNullScopeGuard();
+    InsertNullScopeGuard(const InsertNullScopeGuard&) = delete;
+    InsertNullScopeGuard& operator=(const InsertNullScopeGuard&) = delete;
+};
+
 clickhouse::ColumnRef createColumn(clickhouse::TypeRef type);
 
 clickhouse::ColumnRef insertColumn(clickhouse::TypeRef type, zval *value_zval);

@@ -1305,6 +1305,26 @@ static bool typeNeedsQuoting(const std::string &t)
     return true;
 }
 
+/* DR-010: an Array(Int*|UInt*|Float*|Decimal*|Bool) typed parameter splices
+ * its elements into the SQL array literal unquoted. A PHP *string* element
+ * must therefore be a single bare numeric literal — otherwise "1,2,3" splices
+ * as three values (arity corruption) and punctuation like "1),(2" injects into
+ * the literal. Integer/float/bool zvals are formatted by us and are safe; only
+ * string elements need this gate. This blocks separators/injection without a
+ * full grammar parse (a malformed-but-clean token like "1.2.3" is left for the
+ * server to reject cleanly). */
+static bool isBareNumericLiteral(const std::string &s)
+{
+    if (s.empty()) return false;
+    bool any_digit = false;
+    for (char c : s) {
+        if (c >= '0' && c <= '9') { any_digit = true; continue; }
+        if (c == '+' || c == '-' || c == '.' || c == 'e' || c == 'E') continue;
+        return false;
+    }
+    return any_digit;
+}
+
 static bool typeAllowsNull(const std::string &t)
 {
     if (t.compare(0, 9, "Nullable(") == 0 && t.back() == ')') {
@@ -1364,6 +1384,12 @@ static std::string formatParamValue(zval *v, const std::string &type, bool insid
                 esc += "'";
                 out += esc;
             } else {
+                if (Z_TYPE_P(iv) == IS_STRING && !isBareNumericLiteral(sv)) {
+                    throw std::runtime_error(
+                        "non-numeric string element in a numeric Array typed "
+                        "parameter (each string element must be a single "
+                        "numeric literal)");
+                }
                 out += sv;
             }
         } ZEND_HASH_FOREACH_END();
@@ -2267,13 +2293,23 @@ static void do_select_into(zval *out, zval *this_obj,
             } else {
                 client->Select(query);
             }
+        } catch (const ServerException &) {
+            /* DR-005: a server Exception packet is the terminal packet of the
+             * result stream — clickhouse-cpp drained the wire up to it, so the
+             * socket is at a clean packet boundary. Resetting here would
+             * needlessly drop session state (temporary tables, session-level
+             * SET settings) after an ordinary query error (bad SQL, missing
+             * table). Leave the connection intact and let the error propagate. */
+            setElapsedSince(obj, t0);
+            detachQueryCallbacks(query);
+            throw;
         } catch (...) {
             setElapsedSince(obj, t0);
-            /* OnData lambda throws (KEY_PAIR shape mismatch, etc.) bubble
-             * out mid-stream and leave the native client with unread
-             * blocks on the wire. Subsequent queries on the same handle
-             * would then receive the residual data and appear corrupted.
-             * Reset to recover; the original throw still propagates. */
+            /* A client-side OnData lambda throw (KEY_PAIR shape mismatch, etc.)
+             * or a transport fault bubbles out mid-stream and leaves the native
+             * client with unread blocks on the wire. Subsequent queries on the
+             * same handle would then receive the residual data and appear
+             * corrupted. Reset to recover; the original throw still propagates. */
             tryResetConnectionReapplyDatabase(this_obj, obj, false);
             /* Clear any callbacks (which captured stack locals from this frame)
              * before the local Query is destroyed and the stack unwinds. */
@@ -2549,8 +2585,9 @@ PHP_METHOD(ClickHouse, selectWithExternalData)
             });
         } ZEND_HASH_FOREACH_END();
     } catch (const std::exception &e) {
-        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
-            e.what(), 0);
+        /* DR-016: route through the central helper for error-marker
+         * sanitization, length cap, and pending-exception preservation. */
+        throwClickHouseError(e);
         return;
     }
 
@@ -2835,14 +2872,22 @@ static zend_long do_select_to_stream(zval *this_obj,
         auto t0 = std::chrono::steady_clock::now();
         try {
             client->Select(query);
+        } catch (const ServerException &) {
+            /* DR-005: a server Exception packet is the terminal packet of the
+             * result stream; clickhouse-cpp drained the wire up to it, so the
+             * socket is clean. Don't reconnect and drop session state (temp
+             * tables, session SET). Discard the buffered output and rethrow. */
+            setElapsedSince(obj, t0);
+            smart_str_free(&buf);
+            throw;
         } catch (...) {
             setElapsedSince(obj, t0);
             /* OnData lambda throws (unsupported column type, short stream
-             * write) bubble out mid-stream and leave the native client
-             * with unread blocks on the wire. Subsequent queries on the
-             * same handle would then receive the residual data and
-             * appear corrupted. Reset to recover; the original throw
-             * still propagates. */
+             * write) or a transport fault bubble out mid-stream and leave
+             * the native client with unread blocks on the wire. Subsequent
+             * queries on the same handle would then receive the residual
+             * data and appear corrupted. Reset to recover; the original
+             * throw still propagates. */
             smart_str_free(&buf);
             tryResetConnectionReapplyDatabase(this_obj, obj, false);
             throw;
@@ -2941,20 +2986,27 @@ PHP_METHOD(ClickHouse, selectStatement)
     zval *params = NULL;
     zend_string *query_id = NULL;
     zval *settings = NULL;
+    zend_long fetch_mode = 0;
 
-    ZEND_PARSE_PARAMETERS_START(1, 4)
+    ZEND_PARSE_PARAMETERS_START(1, 5)
         Z_PARAM_STR(sql)
         Z_PARAM_OPTIONAL
         Z_PARAM_ARRAY(params)
         Z_PARAM_STR(query_id)
         Z_PARAM_ARRAY(settings)
+        Z_PARAM_LONG(fetch_mode)
     ZEND_PARSE_PARAMETERS_END();
     std::string qid = makeQid(query_id);
 
     object_init_ex(return_value, clickhouse_statement_ce);
     clickhouse_statement_object *stmt = Z_CLICKHOUSE_STATEMENT_P(return_value);
 
-    do_select_into(&stmt->rows, getThis(), ZSTR_VAL(sql), ZSTR_LEN(sql), params, 0, qid, settings, NULL, &stmt->positional_rows);
+    /* DR-015: a Statement always materializes full rows for array/iterator
+     * access, so only the value-shaping flags (DATE_AS_STRINGS, JSON_AS_*,
+     * UUID_WITH_DASHES, FIXEDSTRING_BINARY) apply; row-shape flags
+     * (FETCH_ONE / KEY_PAIR / COLUMN) are ignored, as on the stream readers. */
+    do_select_into(&stmt->rows, getThis(), ZSTR_VAL(sql), ZSTR_LEN(sql), params,
+                   fetch_mode & SC_FETCH_VALUE_FLAGS, qid, settings, NULL, &stmt->positional_rows);
     if (EG(exception)) {
         zval_ptr_dtor(return_value);
         ZVAL_UNDEF(return_value);
@@ -3125,6 +3177,12 @@ static void do_insert_into(zval *this_obj, zend_string *table,
         }
         bool insert_open = true;
         bool block_sent = false;
+
+        /* DR-008: reset the thread-local allow-null strictness so a
+         * userland-reentrant insert on another client during this build
+         * (a cell's __toString / jsonSerialize) can't inherit our relaxed
+         * Nullable-build state and silently coerce NULL. */
+        InsertNullScopeGuard null_scope;
 
         try {
             Block blockInsert;
@@ -3634,6 +3692,19 @@ PHP_METHOD(ClickHouse, insertFromStream)
             "insertFromStream: batch_rows must be >= 1", 0);
         return;
     }
+    /* DR-006: batch_rows is the flush threshold — rows accumulate in
+     * per-column PHP zval buffers until it is reached, so a very large
+     * value (e.g. PHP_INT_MAX) defeats the streaming design and buffers the
+     * whole input in memory. Cap it to keep peak intermediate memory bounded;
+     * the limit is far above any batching sweet spot (10k-100k). */
+    const zend_long MAX_BATCH_ROWS = 10000000; /* 10M rows */
+    if (batch_rows > MAX_BATCH_ROWS) {
+        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+            "insertFromStream: batch_rows exceeds the maximum of 10000000 "
+            "(a larger value would buffer the whole stream in memory, "
+            "defeating batching)", 0);
+        return;
+    }
 
     php_stream *stream = NULL;
     php_stream_from_zval_no_verify(stream, stream_zv);
@@ -3700,6 +3771,10 @@ PHP_METHOD(ClickHouse, insertFromStream)
 
         bool insert_open  = true;
         bool block_dirty  = false;
+
+        /* DR-008: see do_insert_into — keep a reentrant insert on another
+         * client from inheriting this build's relaxed allow-null state. */
+        InsertNullScopeGuard null_scope;
 
         /* Per-column packed-zval accumulators. One IS_ARRAY zval per
          * column; each insert from the row handler appends one cell. */
@@ -3955,6 +4030,10 @@ PHP_METHOD(ClickHouse, write)
         validateRowShapes(values_ht, columns_count);
         Block &blockQuery = obj->insert_block;
 
+        /* DR-008: see do_insert_into — keep a reentrant insert on another
+         * client from inheriting this build's relaxed allow-null state. */
+        InsertNullScopeGuard null_scope;
+
         Block blockInsert;
         for (size_t index = 0; index < columns_count; ++index) {
             /* Fused fast path for reentrancy-free numeric columns (positional
@@ -4153,6 +4232,12 @@ static void do_execute_into(zval *this_obj,
         auto t0 = std::chrono::steady_clock::now();
         try {
             client->Execute(query);
+        } catch (const ServerException &) {
+            /* DR-005: clean server error (bad SQL, missing table) leaves the
+             * wire at a clean packet boundary; don't reconnect and drop session
+             * state. Only transport/protocol faults fall through to the reset. */
+            setElapsedSince(obj, t0);
+            throw;
         } catch (...) {
             setElapsedSince(obj, t0);
             tryResetConnectionReapplyDatabase(this_obj, obj, false);
@@ -4994,6 +5079,14 @@ PHP_METHOD(ClickHouse, selectStream)
         auto t0 = std::chrono::steady_clock::now();
         try {
             client->Select(query);
+        } catch (const ServerException &) {
+            /* DR-005: clean server error leaves the wire at a clean packet
+             * boundary; don't reconnect and drop session state. Only a
+             * client-side OnData throw or transport fault (below) needs a
+             * reset. */
+            setElapsedSince(obj, t0);
+            detachQueryCallbacks(query);
+            throw;
         } catch (...) {
             setElapsedSince(obj, t0);
             tryResetConnectionReapplyDatabase(getThis(), obj, false);
@@ -5140,6 +5233,14 @@ PHP_METHOD(ClickHouse, selectStreamCallback)
         auto t0 = std::chrono::steady_clock::now();
         try {
             client->Select(query);
+        } catch (const ServerException &) {
+            /* DR-005: clean server error leaves the wire clean; don't reset
+             * and drop session state. A thrown row callback surfaces as a
+             * std::runtime_error ("row callback aborted query"), not a
+             * ServerException, so a callback abort still resets below. */
+            setElapsedSince(obj, t0);
+            detachQueryCallbacks(query);
+            throw;
         } catch (...) {
             setElapsedSince(obj, t0);
             tryResetConnectionReapplyDatabase(getThis(), obj, false);
@@ -5219,7 +5320,8 @@ PHP_METHOD(ClickHouseRowIterator, current)
         }
     } catch (const std::exception &e) {
         zval_ptr_dtor(return_value);
-        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, e.what(), 0);
+        /* DR-016: route through the central helper (sanitize + cap). */
+        throwClickHouseError(e);
         RETURN_NULL();
     }
 }

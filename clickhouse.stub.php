@@ -151,7 +151,8 @@ final class ClickHouse
         string $sql,
         array $params = [],
         string $query_id = "",
-        array $settings = []
+        array $settings = [],
+        int $fetch_mode = 0
     ): ClickHouseStatement {}
 
     public function selectStreamCallback(

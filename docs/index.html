@@ -94,7 +94,7 @@ h2:hover .anchor, h3:hover .anchor { opacity: 1; }
 <div class="topbar"><span class="brand">php_clickhouse</span><span class="muted">docs</span></div>
 <div class="layout">
 <nav class="side">
-  <div class="brand">php_clickhouse <span class="v">v0.8.7</span></div>
+  <div class="brand">php_clickhouse <span class="v">v0.9.0</span></div>
   <div class="muted" style="font-size:0.82rem">Native ClickHouse client for PHP</div>
   <ul>
     <li><a href="#intro">Overview</a></li>
@@ -232,7 +232,7 @@ foreach ($ch-&gt;select("SELECT id, ts, tag FROM events ORDER BY id",
 <ul>
 <li><code>Date</code>, <code>DateTime</code>, <code>IPv4</code>, <code>IPv6</code> treat a PHP string as a <em>textual</em> representation (a <code>Y-m-d</code> date, a dotted-quad/colon address), not a numeric form. To pass the integer form, pass an actual int.</li>
 <li><code>Time</code> and <code>Time64</code> accept <strong>numeric seconds only</strong>; a <code>"HH:MM:SS"</code> string is rejected on write.</li>
-<li><code>DateTime64</code> / <code>Time64</code> at precision ≥ 7 (sub-microsecond) reject float input, since a float can't represent nanosecond-since-epoch values exactly. Pass integer ticks or a formatted string instead.</li>
+<li><code>DateTime64</code> / <code>Time64</code> at precision ≥ 7 (sub-microsecond) reject float input, since a float can't represent nanosecond-since-epoch values exactly. Pass an integer — interpreted as <strong>whole seconds</strong> and scaled to the column's precision on write (not raw ticks) — or a formatted string instead. (Reads return raw ticks by default; see the coercion table above for the write-seconds / read-ticks asymmetry.)</li>
 </ul>
 <p>Nested-type recursion (arrays, tuples, maps) is capped at depth 32.</p>
 
@@ -248,10 +248,11 @@ foreach ($ch-&gt;select("SELECT id, ts, tag FROM events ORDER BY id",
 <tr><td><code>ClickHouse::JSON_AS_ARRAY</code></td><td>16</td><td>value</td><td>JSON cells decode to a nested assoc array (wins if both JSON bits are set).</td></tr>
 <tr><td><code>ClickHouse::JSON_AS_OBJECT</code></td><td>32</td><td>value</td><td>JSON cells decode to a nested <code>stdClass</code>.</td></tr>
 <tr><td><code>ClickHouse::UUID_WITH_DASHES</code></td><td>64</td><td>value</td><td>UUID cells (standalone and <code>Map</code> keys/values) render as the hyphenated canonical form instead of bare 32-char hex.</td></tr>
+<tr><td><code>ClickHouse::FIXEDSTRING_BINARY</code></td><td>128</td><td>value</td><td><code>FixedString(N)</code> cells return the full <em>N</em>-byte value including trailing NUL padding; by default the trailing NUL bytes are trimmed.</td></tr>
 </tbody>
 </table>
 <div class="note">
-<p>On the streaming readers (<code>selectStream</code>, <code>selectStreamCallback</code>), <code>fetch_mode</code> is the <strong>trailing</strong> argument, after <code>settings</code>. The shape flags (<code>FETCH_ONE</code> / <code>FETCH_KEY_PAIR</code> / <code>FETCH_COLUMN</code>) are <strong>ignored</strong> there; the iterator always yields full rows. Only the value flags (<code>DATE_AS_STRINGS</code>, <code>JSON_AS_*</code>, <code>UUID_WITH_DASHES</code>) take effect.</p>
+<p>On the streaming readers (<code>selectStream</code>, <code>selectStreamCallback</code>), <code>fetch_mode</code> is the <strong>trailing</strong> argument, after <code>settings</code>. The shape flags (<code>FETCH_ONE</code> / <code>FETCH_KEY_PAIR</code> / <code>FETCH_COLUMN</code>) are <strong>ignored</strong> there; the iterator always yields full rows. Only the value flags (<code>DATE_AS_STRINGS</code>, <code>JSON_AS_*</code>, <code>UUID_WITH_DASHES</code>, <code>FIXEDSTRING_BINARY</code>) take effect.</p>
 </div>
 
 <h2 id="config">Configuration <a class="anchor" href="#config">#</a></h2>
