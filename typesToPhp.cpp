@@ -2243,6 +2243,18 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         sc_add_assoc_stringl_ex(arr, column_name.c_str(), column_name.length(), val, len, 1); \
     }
 
+/* Portable reentrant UTC gmtime: POSIX gmtime_r vs MSVC gmtime_s, which
+ * reverses the argument order and returns an errno_t. Mirrors the write
+ * path's _WIN32 split in to_time_t(). Returns true on success. */
+static bool gmtimeUtc(const std::time_t *t, struct tm *out)
+{
+#ifdef _WIN32
+    return gmtime_s(out, t) == 0;
+#else
+    return gmtime_r(t, out) != nullptr;
+#endif
+}
+
 // Emit a Unix epoch as either a long or a strftime-formatted string,
 // dispatched on fetch_mode and is_array. Used by DateTime, Date, and
 // Date32 reads which all share the same shape modulo the format string.
@@ -2257,8 +2269,8 @@ static void emitEpoch(zval *arr, std::time_t t, const char *fmt,
     if (fetch_mode & SC_FETCH_DATE_AS_STRINGS) {
         char buffer[32];
         struct tm tmv;
-        if (!gmtime_r(&t, &tmv)) {
-            throw std::runtime_error("gmtime_r failed for date/time value");
+        if (!gmtimeUtc(&t, &tmv)) {
+            throw std::runtime_error("gmtime failed for date/time value");
         }
         size_t l = strftime(buffer, sizeof(buffer), fmt, &tmv);
         if (is_array) {
@@ -2705,8 +2717,8 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         if (fetch_mode & SC_FETCH_DATE_AS_STRINGS) {
             char buffer[64];
             struct tm tmv;
-            if (!gmtime_r(&whole, &tmv)) {
-                throw std::runtime_error("gmtime_r failed for DateTime64 value");
+            if (!gmtimeUtc(&whole, &tmv)) {
+                throw std::runtime_error("gmtime failed for DateTime64 value");
             }
             size_t l = strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &tmv);
             if (precision > 0 && l < sizeof(buffer)) {
