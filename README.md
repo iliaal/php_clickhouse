@@ -62,7 +62,7 @@ Add `extension=clickhouse.so` to your `php.ini`. The build needs a C++17-capable
 | Platform | Status | Notes |
 |----------|--------|-------|
 | Linux NTS | first-class | PHP 7.4 through 8.5, CI matrix |
-| Linux ZTS | first-class | PHP 8.4 ZTS in CI |
+| Linux ZTS | build-verified, not a release target | PHP 8.4 ZTS build canary in CI; `composer.json` sets `support-zts: false` |
 | Windows (NTS, TS) | supported | PHP 8.4 x86 / x64 in CI; pre-built `.dll` released via PIE |
 | macOS | unverified | should build (POSIX path); no CI lane |
 
