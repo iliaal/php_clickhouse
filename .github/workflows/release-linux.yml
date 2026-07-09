@@ -25,6 +25,17 @@ name: Release Linux & macOS binaries
 on:
   release:
     types: [published]
+  # Manual trigger. Two uses:
+  #   - blank release_tag  -> build every lane (build-only validation step
+  #     below), no upload. The /release-ext Step 9.5 pre-tag gate.
+  #   - release_tag set    -> build that tag's source and upload to it (backfill,
+  #     e.g. when this workflow was added after the tag existed).
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Existing tag to build + upload to. Blank = build-only validation (no upload).'
+        required: false
+        default: ''
 
 jobs:
   build:
@@ -46,7 +57,10 @@ jobs:
           - '8.4'
           - '8.5'
     steps:
+      # release -> the tag; dispatch-with-tag -> that tag; blank -> triggering branch.
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.release_tag }}
 
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
@@ -54,9 +68,21 @@ jobs:
           php-version: ${{ matrix.php }}
           coverage: none
 
+      # pie-ext-binary-builder fuses build + upload, so it only runs when there
+      # is a tag to upload to (a real release, or a dispatch that names one).
       - name: Build and upload prebuilt binary
+        if: github.event_name == 'release' || inputs.release_tag != ''
         uses: php/pie-ext-binary-builder@0.0.3
         with:
-          release-tag: ${{ github.event.release.tag_name }}
+          release-tag: ${{ github.event.release.tag_name || inputs.release_tag }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           configure-flags: '--enable-clickhouse'
+
+      # Blank-tag dispatch: compile on the real runner without uploading, so the
+      # Step 9.5 pre-tag gate ("build jobs green") is meaningful for this lane too.
+      - name: Build-only validation (blank-tag dispatch)
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag == ''
+        run: |
+          phpize
+          ./configure --enable-clickhouse
+          make -j"$(nproc)"
