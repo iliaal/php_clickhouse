@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-09
+
 ### Added
 
 - `selectStatement()` accepts an optional trailing `$fetch_mode` argument. Only the value-shaping flags apply (`DATE_AS_STRINGS`, `JSON_AS_ARRAY` / `JSON_AS_OBJECT`, `UUID_WITH_DASHES`, `FIXEDSTRING_BINARY`); the row-shape flags (`FETCH_ONE` / `FETCH_KEY_PAIR` / `FETCH_COLUMN`) are ignored, since a statement always materializes full rows for array and iterator access.
@@ -30,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A typed-parameter parse error no longer leaks the bound value: ClickHouse's `Value <X> cannot be parsed as <Type>` message has the value fragment redacted, closing the gap the SQL-fragment sanitizer left (the value precedes any SQL marker).
 - `ClickHouseRowIterator` methods (`rewind`, `valid`, `current`, `key`, `next`, `count`) reject surplus arguments instead of silently ignoring them (a fatal arginfo/zpp mismatch on debug builds).
 - `insertFromStream()` no longer reconnects and drops session state (temporary tables, `SET`) when a validation error occurs on a parsed-but-unflushed row: the recovery reset is now keyed on whether a data block was actually transmitted, not on the parsed-row count.
-- UUID string inserts accept only the two canonical forms — 32 hex digits (dashless) or the `8-4-4-4-12` dashed form — and reject misplaced dashes instead of silently canonicalizing malformed text.
+- UUID string inserts accept only the two canonical forms (32 hex digits, or the `8-4-4-4-12` dashed form) and reject misplaced dashes instead of silently canonicalizing malformed text.
 - A `Map` read that throws on an unsupported inner value type (e.g. `Map(String, Date)`) no longer leaks the partially-built result array.
 - API documentation: corrected the version brand, the `DateTime64` write-unit note (an integer is whole seconds scaled to the column precision, not raw ticks), the missing `FIXEDSTRING_BINARY` fetch-mode row, and the `setDatabase()` note (it reconnects with a new default database rather than issuing a session `USE`, so session temp tables / `SET` do not carry over).
 
@@ -894,7 +896,8 @@ own way.
   emits a clear "unsupported" warning. Full Windows build of the
   vendored zstd + absl + lz4 + cityhash is a separate project.
 
-[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.9.0...HEAD
+[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.10.0...HEAD
+[0.10.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.10.0
 [0.9.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.9.0
 [0.8.8]: https://github.com/iliaal/php_clickhouse/releases/tag/0.8.8
 [0.8.7]: https://github.com/iliaal/php_clickhouse/releases/tag/0.8.7
