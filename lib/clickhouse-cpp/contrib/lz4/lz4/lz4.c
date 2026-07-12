@@ -819,7 +819,7 @@ LZ4_FORCE_INLINE int LZ4_compress_generic(
 
     int const maybe_extMem = (dictDirective == usingExtDict) || (dictDirective == usingDictCtx);
     U32 const prefixIdxLimit = startIndex - dictSize;   /* used when dictDirective == dictSmall */
-    const BYTE* const dictEnd = dictionary + dictSize;
+    const BYTE* const dictEnd = dictSize == 0 ? dictionary : dictionary + dictSize;
     const BYTE* anchor = (const BYTE*) source;
     const BYTE* const iend = ip + inputSize;
     const BYTE* const mflimitPlusOne = iend - MFLIMIT + 1;
@@ -828,8 +828,8 @@ LZ4_FORCE_INLINE int LZ4_compress_generic(
     /* the dictCtx currentOffset is indexed on the start of the dictionary,
      * while a dictionary in the current context precedes the currentOffset */
     const BYTE* dictBase = (dictDirective == usingDictCtx) ?
-                            dictionary + dictSize - dictCtx->currentOffset :
-                            dictionary + dictSize - startIndex;
+                            dictEnd - dictCtx->currentOffset :
+                            dictEnd - startIndex;
 
     BYTE* op = (BYTE*) dest;
     BYTE* const olimit = op + maxOutputSize;
@@ -2193,7 +2193,9 @@ int LZ4_setStreamDecode (LZ4_streamDecode_t* LZ4_streamDecode, const char* dicti
 {
     LZ4_streamDecode_t_internal* lz4sd = &LZ4_streamDecode->internal_donotuse;
     lz4sd->prefixSize = (size_t) dictSize;
-    lz4sd->prefixEnd = (const BYTE*) dictionary + dictSize;
+    lz4sd->prefixEnd = dictSize == 0
+        ? (const BYTE*)dictionary
+        : (const BYTE*)dictionary + dictSize;
     lz4sd->externalDict = NULL;
     lz4sd->extDictSize  = 0;
     return 1;

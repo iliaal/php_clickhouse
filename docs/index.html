@@ -237,7 +237,7 @@ foreach ($ch-&gt;select("SELECT id, ts, tag FROM events ORDER BY id",
 <p>Nested-type recursion (arrays, tuples, maps) is capped at depth 32.</p>
 
 <h2 id="fetch-modes">Fetch modes <a class="anchor" href="#fetch-modes">#</a></h2>
-<p><code>fetch_mode</code> is a bitmask combining the constants below. <code>select</code>, <code>selectStream</code>, <code>selectStreamCallback</code>, and <code>selectWithExternalData</code> all accept it. There are two categories: <strong>shape flags</strong> restructure the whole result, and <strong>value flags</strong> change how a single cell is rendered.</p>
+<p><code>fetch_mode</code> is a bitmask combining the constants below. <code>select</code>, <code>selectStatement</code>, <code>selectStream</code>, <code>selectStreamCallback</code>, and <code>selectWithExternalData</code> all accept it. There are two categories: <strong>shape flags</strong> restructure the whole result, and <strong>value flags</strong> change how a single cell is rendered.</p>
 <table>
 <thead><tr><th>Constant</th><th>Value</th><th>Category</th><th>Effect</th></tr></thead>
 <tbody>
@@ -407,7 +407,8 @@ $ch-&gt;selectToStream(string $sql, array $params, mixed $stream,
 // or to keep stats around after running other queries. Plain $ch-&gt;select()
 // is faster when you just need the array.
 $stmt = $ch-&gt;selectStatement(string $sql, array $params = [],
-                             string $query_id = "", array $settings = []);
+                             string $query_id = "", array $settings = [],
+                             int $fetch_mode = 0);
 foreach ($stmt as $row) { /* ... */ }
 $stmt[0]; count($stmt); json_encode($stmt);
 $stmt-&gt;fetchOne(); $stmt-&gt;fetchKeyPair(); $stmt-&gt;fetchColumn();
@@ -457,7 +458,8 @@ $ch-&gt;dropPartition(string $table, string $partition);</code></pre>
 ]);
 
 // Insert: a PHP array or object is JSON-encoded; a string is stored as
-// raw JSON text (validated client-side); null becomes the empty object {}.
+// raw JSON text (validated client-side). PHP null is accepted only by
+// Nullable(JSON); a non-Nullable JSON column rejects it.
 $ch-&gt;insert("events", ["id", "payload"], [
     [1, ["level" =&gt; "info", "tags" =&gt; ["a", "b"]]],
     [2, '{"level":"warn"}'],
@@ -488,7 +490,7 @@ echo "$n rows written\n";</code></pre>
 </div>
 
 <h3>Writing: <code>insertFromStream()</code></h3>
-<p>Parses a TSV/CSV stream and inserts rows in batches of <code>$batch_rows</code> (default 10000), returning the number of rows inserted. Only one batch of per-column zvals exists at a time, so inputs larger than memory work. Cells arrive as strings and run through the same write coercion as <code>insert()</code> for each server-supplied column type, so a numeric column still needs a valid numeric string.</p>
+<p>Parses a TSV/CSV stream and inserts rows in batches of <code>$batch_rows</code> (default 10000), returning the number of rows inserted. Only one batch of per-column zvals exists at a time, so the total stream can exceed memory; one complete record and the configured batch must still fit. Cells arrive as strings and run through the same write coercion as <code>insert()</code> for each server-supplied column type, so a numeric column still needs a valid numeric string.</p>
 <pre><code>$f = fopen("/tmp/events.csv", "rb");
 $n = $ch-&gt;insertFromStream(
     "events", ["id", "ts", "tag"], $f,
@@ -526,7 +528,7 @@ $ch-&gt;select("SELECT * FROM users WHERE id IN ({ids:Array(UInt32)})",
             ["ids" =&gt; [1, 2, 3]]);</code></pre>
 
 <h2 id="settings">Settings <a class="anchor" href="#settings">#</a></h2>
-<p><code>setSettings()</code> applies client-wide. The 5th argument on <code>select</code> / <code>insert</code> / <code>execute</code> / <code>writeStart</code> overrides per call. Both accept plain <code>string =&gt; string</code> pairs; PHP scalars are stringified for you.</p>
+<p><code>setSettings()</code> applies client-wide. Per-call settings are the 5th argument on <code>select</code> / <code>insert</code>, and the 4th argument on <code>execute</code> / <code>writeStart</code>. Both accept plain <code>string =&gt; string</code> pairs; PHP scalars are stringified for you.</p>
 <pre><code>$ch-&gt;setSettings(["max_execution_time" =&gt; "30"]);
 
 // Per-call override.

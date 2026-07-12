@@ -164,14 +164,11 @@ static zend_always_inline void zend_declare_typed_class_constant(
  *   exists on 7.4 but its expansion references the `type` argument, so
  *   passing IS_MIXED through it fails at compile time even though the
  *   outer macro is recognized.
- * - Override the macro on pre-8.0 to drop the type argument entirely
- *   (returning untyped reflection). Then IS_MIXED never reaches the
- *   compiler and the rest of the arginfo header compiles cleanly.
+ * - PHP 7.4 can represent the scalar/array/object return types generated
+ *   for this extension. Define only the PHP 8-only mixed/static tags as
+ *   untyped so the native 7.4 macro preserves every representable type.
  */
 #if PHP_VERSION_ID < 80000
-# undef ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX
-# define ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(name, return_reference, required_num_args, type, allow_null) \
-    ZEND_BEGIN_ARG_INFO_EX(name, 0, return_reference, required_num_args)
 /* ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE is wholly new in 8.0; pre-8.0
  * keeps the type info but drops the default-value annotation. */
 # define ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(pass_by_ref, name, type, allow_null, default_value) \
@@ -183,21 +180,19 @@ static zend_always_inline void zend_declare_typed_class_constant(
  * place. Define it to 0 (= IS_UNDEF, "no type constraint") so the
  * argument compiles untyped on 7.4, matching pre-8.0 reflection. */
 # define IS_MIXED 0
+# define IS_STATIC 0
 /* gen_stub builds typed properties / typed class constants via
  * (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_<TYPE>[|MAY_BE_NULL]). 7.4
- * has typed properties but uses a different zend_type construction
- * pathway and lacks both the MAY_BE_* mask constants in this form
- * and the ZEND_TYPE_INIT_MASK macro. Shim them all to compile-time
- * zeros: the property/constant gets registered with no type info,
- * matching pre-7.4 behavior even where the runtime would have
- * supported the typed declaration on 7.4. */
-# define ZEND_TYPE_INIT_MASK(mask) ((zend_type) 0)
-# define MAY_BE_LONG 0
-# define MAY_BE_STRING 0
-# define MAY_BE_NULL 0
-# define MAY_BE_BOOL 0
-# define MAY_BE_DOUBLE 0
-# define MAY_BE_ARRAY 0
+ * has typed properties but represents zend_type as an encoded integer
+ * rather than PHP 8's mask structure. Map the generated single-type
+ * masks to that encoding; nullable properties add the existing low bit. */
+# define ZEND_TYPE_INIT_MASK(mask) (mask)
+# define MAY_BE_LONG ZEND_TYPE_ENCODE(IS_LONG, 0)
+# define MAY_BE_STRING ZEND_TYPE_ENCODE(IS_STRING, 0)
+# define MAY_BE_NULL ((zend_type) 1)
+# define MAY_BE_BOOL ZEND_TYPE_ENCODE(_IS_BOOL, 0)
+# define MAY_BE_DOUBLE ZEND_TYPE_ENCODE(IS_DOUBLE, 0)
+# define MAY_BE_ARRAY ZEND_TYPE_ENCODE(IS_ARRAY, 0)
 #endif
 
 /*

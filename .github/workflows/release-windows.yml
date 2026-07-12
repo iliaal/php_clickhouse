@@ -7,9 +7,8 @@ name: Release Windows binaries
 # naming convention (php_<ext>-<version>-<php_x.y>-<ts|nts>-vs17-<arch>.zip).
 #
 # Mirrors the Linux test matrix in build_matrix expansion so we ship
-# binaries for every PHP version we claim to support. Tests are off in
-# this lane -- the test workflow already validated the same arch/ts/php
-# combinations on master.
+# binaries for every PHP version we claim to support. The offline PHPTs
+# run in this lane so every produced DLL is loaded before packaging.
 
 on:
   release:
@@ -58,7 +57,7 @@ jobs:
           php-version: ${{ matrix.php-version }}
           arch: ${{ matrix.arch }}
           ts: ${{ matrix.ts }}
-          run-tests: 'false'
+          run-tests: 'true'
 
   release:
     name: Upload binaries to the release

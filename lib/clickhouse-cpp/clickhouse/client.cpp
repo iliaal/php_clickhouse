@@ -648,6 +648,12 @@ void Client::Impl::ResetConnectionEndpoint() {
                 current_endpoint_.reset();
                 throw;
             }
+        } catch (const ProtocolError&) {
+            if (++i == options_.endpoints.size())
+            {
+                current_endpoint_.reset();
+                throw;
+            }
         }
     }
 }

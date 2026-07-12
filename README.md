@@ -62,9 +62,9 @@ Add `extension=clickhouse.so` to your `php.ini`. The build needs a C++17-capable
 | Platform | Status | Notes |
 |----------|--------|-------|
 | Linux NTS | first-class | PHP 7.4 through 8.5, CI matrix |
-| Linux ZTS | build-verified, not a release target | PHP 8.4 ZTS build canary in CI; `composer.json` sets `support-zts: false` |
-| Windows (NTS, TS) | supported | PHP 8.4 x86 / x64 in CI; pre-built `.dll` released via PIE |
-| macOS | unverified | should build (POSIX path); no CI lane |
+| Linux ZTS | supported | PHP 7.4 through 8.5, full CI matrix; PIE source builds |
+| Windows (NTS, TS) | supported | PHP 8.3 through 8.5, x86 / x64 release matrix with offline load tests; pre-built `.dll` assets |
+| macOS arm64 NTS | build-verified | PHP 8.4 and 8.5 release lane; pre-built binaries, no ClickHouse runtime test |
 
 Per-Client state lives on the `zend_object` itself (custom `create_object` / `free_obj` handlers), so ZTS works without locking. There is no module-global state to thread-isolate.
 

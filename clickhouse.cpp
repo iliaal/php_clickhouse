@@ -655,12 +655,12 @@ PHP_METHOD(ClickHouse, __construct)
     /* php_array_get_value is a string-literal-only macro (it uses
      * sizeof(str)-1 for the key length) so it can't be passed a const
      * char* runtime key. The lambda goes through sc_zend_hash_find. */
-    auto load_nonneg_long = [&](const char *key, zend_long &out) -> bool {
+    auto load_bounded_nonneg_long = [&](const char *key, zend_long max, zend_long &out) -> bool {
         zval *v = sc_zend_hash_find(_ht, (char*)key, strlen(key));
         if (!v || ZVAL_IS_NULL(v)) return false;
         zend_long n = zval_get_long(v);
-        if (n < 0) {
-            std::string msg = std::string(key) + " must be >= 0";
+        if (n < 0 || n > max) {
+            std::string msg = std::string(key) + " out of range";
             sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, msg.c_str(), 0);
             return false; // caller checks EG(exception)
         }
@@ -670,25 +670,25 @@ PHP_METHOD(ClickHouse, __construct)
 
     {
         zend_long n;
-        if (load_nonneg_long("retry_timeout", n)) {
+        if (load_bounded_nonneg_long("retry_timeout", ZEND_LONG_MAX, n)) {
             sc_zend_update_property_long(clickhouse_ce, this_obj, "retry_timeout", sizeof("retry_timeout") - 1, n);
         } else if (EG(exception)) { return; }
     }
     {
         zend_long n;
-        if (load_nonneg_long("retry_count", n)) {
+        if (load_bounded_nonneg_long("retry_count", (zend_long)UINT_MAX, n)) {
             sc_zend_update_property_long(clickhouse_ce, this_obj, "retry_count", sizeof("retry_count") - 1, n);
         } else if (EG(exception)) { return; }
     }
     {
         zend_long n;
-        if (load_nonneg_long("connect_timeout", n)) {
+        if (load_bounded_nonneg_long("connect_timeout", (zend_long)(INT_MAX / 1000), n)) {
             sc_zend_update_property_long(clickhouse_ce, this_obj, "connect_timeout", sizeof("connect_timeout") - 1, n);
         } else if (EG(exception)) { return; }
     }
     {
         zend_long n;
-        if (load_nonneg_long("receive_timeout", n)) {
+        if (load_bounded_nonneg_long("receive_timeout", (zend_long)(UINT_MAX / 1000U), n)) {
             sc_zend_update_property_long(clickhouse_ce, this_obj, "receive_timeout", sizeof("receive_timeout") - 1, n);
         } else if (EG(exception)) { return; }
     }
@@ -726,9 +726,9 @@ PHP_METHOD(ClickHouse, __construct)
 
         if (php_array_get_value(_ht, "send_timeout", value)) {
             zend_long n = zval_get_long(value);
-            if (n < 0) {
+            if (n < 0 || n > (zend_long)(UINT_MAX / 1000U)) {
                 sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
-                    "send_timeout must be >= 0", 0);
+                    "send_timeout out of range", 0);
                 return;
             }
             Options = Options.SetConnectionSendTimeout(std::chrono::seconds(n));
@@ -736,21 +736,22 @@ PHP_METHOD(ClickHouse, __construct)
         /* Millisecond variants override the seconds-based keys. Useful when
          * sub-second precision matters (CI test guards, low-latency hops). */
         auto apply_timeout_ms = [&](const char *key,
+                                     zend_long max,
                                      ClientOptions& (ClientOptions::*setter)(const std::chrono::milliseconds&)) -> bool {
             zval *v = sc_zend_hash_find(_ht, (char*)key, strlen(key));
             if (!v || ZVAL_IS_NULL(v)) return true;
             zend_long n = zval_get_long(v);
-            if (n < 0) {
-                std::string msg = std::string(key) + " must be >= 0";
+            if (n < 0 || n > max) {
+                std::string msg = std::string(key) + " out of range";
                 sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, msg.c_str(), 0);
                 return false;
             }
             Options = (Options.*setter)(std::chrono::milliseconds(n));
             return true;
         };
-        if (!apply_timeout_ms("connect_timeout_ms", &ClientOptions::SetConnectionConnectTimeout)) return;
-        if (!apply_timeout_ms("receive_timeout_ms", &ClientOptions::SetConnectionRecvTimeout))    return;
-        if (!apply_timeout_ms("send_timeout_ms",    &ClientOptions::SetConnectionSendTimeout))   return;
+        if (!apply_timeout_ms("connect_timeout_ms", INT_MAX, &ClientOptions::SetConnectionConnectTimeout)) return;
+        if (!apply_timeout_ms("receive_timeout_ms", (zend_long)UINT_MAX, &ClientOptions::SetConnectionRecvTimeout)) return;
+        if (!apply_timeout_ms("send_timeout_ms", (zend_long)UINT_MAX, &ClientOptions::SetConnectionSendTimeout)) return;
         if (php_array_get_value(_ht, "tcp_nodelay", value)) {
             Options = Options.TcpNoDelay(zend_is_true(value));
         }
@@ -762,25 +763,25 @@ PHP_METHOD(ClickHouse, __construct)
         }
         if (php_array_get_value(_ht, "tcp_keepalive_idle", value)) {
             zend_long n = zval_get_long(value);
-            if (n < 0) {
+            if (n < 0 || n > INT_MAX) {
                 sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
-                    "tcp_keepalive_idle must be >= 0", 0);
+                    "tcp_keepalive_idle out of range", 0);
                 return;
             }
             Options = Options.SetTcpKeepAliveIdle(std::chrono::seconds(n));
         }
         if (php_array_get_value(_ht, "tcp_keepalive_intvl", value)) {
             zend_long n = zval_get_long(value);
-            if (n < 0) {
+            if (n < 0 || n > INT_MAX) {
                 sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
-                    "tcp_keepalive_intvl must be >= 0", 0);
+                    "tcp_keepalive_intvl out of range", 0);
                 return;
             }
             Options = Options.SetTcpKeepAliveInterval(std::chrono::seconds(n));
         }
         if (php_array_get_value(_ht, "tcp_keepalive_cnt", value)) {
             zend_long n = zval_get_long(value);
-            if (n < 0 || n > UINT_MAX) {
+            if (n < 0 || n > INT_MAX) {
                 sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
                     "tcp_keepalive_cnt out of range", 0);
                 return;
@@ -789,7 +790,7 @@ PHP_METHOD(ClickHouse, __construct)
         }
         if (php_array_get_value(_ht, "max_compression_chunk_size", value)) {
             zend_long n = zval_get_long(value);
-            if (n < 0 || n > UINT_MAX) {
+            if (n < 0 || n > INT_MAX) {
                 sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
                     "max_compression_chunk_size out of range", 0);
                 return;
@@ -1176,7 +1177,13 @@ static void resetConnectionReapplyDatabase(zval *this_obj, clickhouse_object *ob
                                            bool clear_insert_state)
 {
     Client *client = getClient(obj);
-    client->ResetConnection();
+    try {
+        client->ResetConnection();
+    } catch (const std::system_error &) {
+        client->ResetConnectionEndpoint();
+    } catch (const ProtocolError &) {
+        client->ResetConnectionEndpoint();
+    }
     if (clear_insert_state && obj->has_insert_block) {
         clearStreamingInsertState(obj);
     }
@@ -2504,8 +2511,22 @@ static Block buildExternalTableBlock(zval *entry, std::string &name_out)
                        "external table name", /*allow_dot=*/false);
     name_out.assign(Z_STRVAL_P(name_zv), Z_STRLEN_P(name_zv));
 
-    HashTable *columns_ht = Z_ARRVAL_P(columns_zv);
-    HashTable *rows_ht    = Z_ARRVAL_P(rows_zv);
+    /* Cell coercion may execute userland and replace a referenced member of
+     * the external-table descriptor. Own the dereferenced arrays until the
+     * native block is complete so their HashTables and keys cannot disappear
+     * under the per-column walk. */
+    struct ZvalHold {
+        zval value;
+        explicit ZvalHold(zval *source) { ZVAL_COPY(&value, source); }
+        ~ZvalHold() { zval_ptr_dtor(&value); }
+        ZvalHold(const ZvalHold &) = delete;
+        ZvalHold &operator=(const ZvalHold &) = delete;
+    };
+    ZvalHold columns_hold(columns_zv);
+    ZvalHold rows_hold(rows_zv);
+
+    HashTable *columns_ht = Z_ARRVAL(columns_hold.value);
+    HashTable *rows_ht    = Z_ARRVAL(rows_hold.value);
     size_t columns_count  = zend_hash_num_elements(columns_ht);
     if (columns_count == 0) {
         throw std::runtime_error("external table '" + name_out + "' has no columns");

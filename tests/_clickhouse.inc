@@ -65,9 +65,18 @@ function clickhouse_skip_if_no_json(): void
         $c->execute("DROP TABLE IF EXISTS test._json_probe");
         $c->execute("CREATE TABLE test._json_probe (j JSON) ENGINE = Memory");
         $c->execute("DROP TABLE test._json_probe");
-    } catch (\Throwable $e) {
-        print "skip JSON type not supported by server: " . $e->getMessage();
-        exit;
+    } catch (ClickHouseException $e) {
+        $message = strtolower($e->getMessage());
+        $json_error = strpos($message, "json") !== false;
+        $capability_error = strpos($message, "unknown data type") !== false
+            || strpos($message, "not supported") !== false
+            || strpos($message, "experimental") !== false
+            || strpos($message, "allow_experimental_json_type") !== false;
+        if ($json_error && $capability_error) {
+            print "skip JSON type not supported by server: " . $e->getMessage();
+            exit;
+        }
+        throw $e;
     }
 }
 

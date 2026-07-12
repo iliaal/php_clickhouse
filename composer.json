@@ -34,7 +34,7 @@
                 "needs-value": false
             }
         ],
-        "support-zts": false,
+        "support-zts": true,
         "support-nts": true,
         "download-url-method": ["pre-packaged-binary", "composer-default"]
     }

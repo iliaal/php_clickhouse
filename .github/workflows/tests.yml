@@ -128,7 +128,11 @@ jobs:
           export TEST_PHP_EXECUTABLE=$(which php)
           # run-tests.php exits non-zero on failures, zero on all-pass /
           # all-skip. Let its exit code drive the step.
-          php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK tests/
+          set -o pipefail
+          php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK,SKIP tests/ \
+            | tee "$RUNNER_TEMP/phpt.out"
+          scripts/assert-phpt-summary.sh "$RUNNER_TEMP/phpt.out" \
+            tests/027.phpt tests/064.phpt tests/070.phpt tests/188.phpt
 
       - name: Rebuild with TLS and run the TLS suite
         env:
@@ -148,6 +152,11 @@ jobs:
             -out "$RUNNER_TEMP/ch-certs/server.crt" -days 3650 \
             -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
           chmod 644 "$RUNNER_TEMP/ch-certs/server.key" "$RUNNER_TEMP/ch-certs/server.crt"
+          openssl req -x509 -nodes -newkey rsa:2048 \
+            -keyout "$RUNNER_TEMP/ch-certs/wrong.key" \
+            -out "$RUNNER_TEMP/ch-certs/wrong.crt" -days 3650 \
+            -subj "/CN=wrong-ca"
+          chmod 644 "$RUNNER_TEMP/ch-certs/wrong.key" "$RUNNER_TEMP/ch-certs/wrong.crt"
 
           # The services: clickhouse container is plaintext-only, and GitHub
           # service containers start before any step runs -- they can't mount a
@@ -182,18 +191,21 @@ jobs:
           EXT_DIR=$(php -r 'echo ini_get("extension_dir");')
           sudo cp modules/clickhouse.so "$EXT_DIR/"
           export TEST_PHP_EXECUTABLE=$(which php)
+          export CLICKHOUSE_TLS_SKIP_VERIFY=0
+          export CLICKHOUSE_TLS_CA_FILE="$RUNNER_TEMP/ch-certs/server.crt"
+          export CLICKHOUSE_TLS_WRONG_CA_FILE="$RUNNER_TEMP/ch-certs/wrong.crt"
           # run-tests.php exits 0 on all-skip, so a skipped 027 (no TLS server /
           # no TLS build) would pass this step silently. Capture the summary and
           # require it actually ran (skipped=0) and passed (passed=1).
-          out=$(php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK tests/027.phpt 2>&1) || true
+          out=$(php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK tests/027.phpt tests/188.phpt 2>&1) || true
           echo "$out"
           skipped=$(echo "$out" | sed -n 's/.*Tests skipped *: *\([0-9]\{1,\}\).*/\1/p' | head -1)
           passed=$(echo "$out" | sed -n 's/.*Tests passed *: *\([0-9]\{1,\}\).*/\1/p' | head -1)
           if [ "$skipped" != "0" ]; then
             echo "::error::027.phpt was skipped -- TLS server unreachable or extension built without TLS"; exit 1
           fi
-          if [ "$passed" != "1" ]; then
-            echo "::error::027.phpt did not pass (passed=$passed)"; exit 1
+          if [ "$passed" != "2" ]; then
+            echo "::error::TLS verification suite did not pass both tests (passed=$passed)"; exit 1
           fi
 
           docker rm -f clickhouse-tls
@@ -220,7 +232,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php: ['8.4']
+        php: ['7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5']
 
     steps:
       - uses: actions/checkout@v6
@@ -233,8 +245,16 @@ jobs:
           git clone --depth=1 --branch=PHP-${{ matrix.php }} https://github.com/php/php-src.git /tmp/php-src
           cd /tmp/php-src
           ./buildconf --force
+          php_extra=()
+          if [ "${{ matrix.php }}" = "7.4" ]; then
+            zts_flag=--enable-maintainer-zts
+            php_extra+=(--enable-json)
+          else
+            zts_flag=--enable-zts
+          fi
           ./configure \
-            --enable-zts \
+            "$zts_flag" \
+            "${php_extra[@]}" \
             --disable-all \
             --enable-cli \
             --prefix=/tmp/php-zts
@@ -260,7 +280,11 @@ jobs:
           mkdir -p "$EXT_DIR"
           cp modules/clickhouse.so "$EXT_DIR/"
           export TEST_PHP_EXECUTABLE=/tmp/php-zts/bin/php
-          /tmp/php-zts/bin/php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK tests/
+          set -o pipefail
+          /tmp/php-zts/bin/php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK,SKIP tests/ \
+            | tee "$RUNNER_TEMP/phpt-zts.out"
+          scripts/assert-phpt-summary.sh "$RUNNER_TEMP/phpt-zts.out" \
+            tests/027.phpt tests/064.phpt tests/070.phpt tests/188.phpt
 
   # Windows extension builds need the official PHP SDK + matching MSVC
   # toolset, not the autotools phpize/configure flow. The php-org
@@ -332,9 +356,9 @@ jobs:
         php: ['8.4']
 
     env:
-      # detect_leaks=0: vendored clickhouse-cpp creates a NonSecureSocketFactory
-      #   per Client that's only freed at process exit; suppress until upstream
-      #   releases a fix.
+      # detect_leaks=0: PHP's PHPT runner/tracer does not provide a reliable
+      #   LeakSanitizer process boundary. A separate client lifecycle probe below
+      #   runs with leak detection enabled.
       # detect_odr_violation=0: clickhouse-cpp templates produce duplicate
       #   symbols across translation units, harmless but noisy.
       # exitcode=139: keep ASan abort on the conventional SIGSEGV exit code so
@@ -388,13 +412,11 @@ jobs:
           # build does) and `vptr` (the vptr check needs
           # __ubsan_vptr_type_cache, which the dlopen'd extension can't
           # resolve against the host PHP's runtime). Also disable
-          # `pointer-overflow`: vendored LZ4 evaluates `dictionary + dictSize`
-          # which is `NULL + 0` when no compression dictionary is set. This
-          # is technically UB per C, harmless in practice, and a known
-          # false positive that every LZ4 + UBSan integration suppresses.
+          # The vendored LZ4 NULL+0 expression is patched locally, so keep
+          # pointer-overflow enabled for both extension and vendor sources.
           CC=clang CXX=clang++ \
-          CFLAGS="-fsanitize=address,undefined -fno-sanitize=function,vptr,pointer-overflow -shared-libasan -DZEND_TRACK_ARENA_ALLOC" \
-          CXXFLAGS="-fsanitize=address,undefined -fno-sanitize=function,vptr,pointer-overflow -shared-libasan -DZEND_TRACK_ARENA_ALLOC" \
+          CFLAGS="-fsanitize=address,undefined -fno-sanitize=function,vptr -shared-libasan -DZEND_TRACK_ARENA_ALLOC" \
+          CXXFLAGS="-fsanitize=address,undefined -fno-sanitize=function,vptr -shared-libasan -DZEND_TRACK_ARENA_ALLOC" \
           LDFLAGS="-fsanitize=address,undefined -shared-libasan" \
           ./configure --enable-clickhouse --with-php-config=/tmp/php-asan/bin/php-config
           make -j$(nproc)
@@ -415,4 +437,33 @@ jobs:
           mkdir -p "$EXT_DIR"
           cp modules/clickhouse.so "$EXT_DIR/"
           export TEST_PHP_EXECUTABLE=/tmp/php-asan/bin/php
-          /tmp/php-asan/bin/php run-tests.php --show-diff --asan -g FAIL,BORK,LEAK,XLEAK tests/
+          set -o pipefail
+          /tmp/php-asan/bin/php run-tests.php --show-diff --asan -g FAIL,BORK,LEAK,XLEAK,SKIP tests/ \
+            | tee "$RUNNER_TEMP/phpt-asan.out"
+          scripts/assert-phpt-summary.sh "$RUNNER_TEMP/phpt-asan.out" \
+            tests/027.phpt tests/064.phpt tests/070.phpt tests/188.phpt
+
+      - name: Run leak-enabled client lifecycle probe
+        env:
+          LD_LIBRARY_PATH: ${{ steps.clang_rt.outputs.dir }}
+          CLICKHOUSE_HOST: 127.0.0.1
+          CLICKHOUSE_PORT: 9000
+          CLICKHOUSE_USER: test
+          CLICKHOUSE_PASSWD: test
+          ASAN_OPTIONS: exitcode=139:detect_odr_violation=0:detect_leaks=1
+          LSAN_OPTIONS: exitcode=23
+        run: |
+          /tmp/php-asan/bin/php -n -d extension="$PWD/modules/clickhouse.so" -r '
+            $c = new ClickHouse([
+              "host" => getenv("CLICKHOUSE_HOST"),
+              "port" => (int) getenv("CLICKHOUSE_PORT"),
+              "user" => getenv("CLICKHOUSE_USER"),
+              "passwd" => getenv("CLICKHOUSE_PASSWD"),
+              "compression" => true,
+            ]);
+            if (!$c->ping() || count($c->select("SELECT number FROM numbers(2)")) !== 2) {
+              exit(1);
+            }
+            unset($c);
+            gc_collect_cycles();
+          '

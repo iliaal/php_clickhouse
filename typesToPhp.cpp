@@ -48,6 +48,7 @@ extern "C" {
 #include <cmath>
 #include <cerrno>
 #include <cinttypes>
+#include <limits>
 
 #include "typesToPhp.hpp"
 
@@ -526,10 +527,10 @@ static int parseFixedStringWidth(TypeRef type)
 /*
  * Parse "YYYY-MM-DD" or "YYYY-MM-DD HH:MM:SS" into a Unix epoch.
  *
- * Use timegm, not mktime: the read paths in convertToZval all format
- * via gmtime, so the round-trip needs to be UTC symmetric. Using
- * mktime would reinterpret the parsed components as local time and
- * shift the stored value by the runner's TZ offset.
+ * Convert validated civil components directly to UTC epoch seconds.
+ * timegm/_mkgmtime use -1 for both failure and the valid second before
+ * the Unix epoch, and the Windows implementation rejects all pre-epoch
+ * inputs.
  */
 static std::time_t to_time_t(const std::string& str, bool is_date = true)
 {
@@ -554,41 +555,45 @@ static std::time_t to_time_t(const std::string& str, bool is_date = true)
             std::string("Invalid ") + (is_date ? "Date" : "DateTime") +
             " string (trailing characters): " + str);
     }
-    /* Capture the parsed components before timegm so we can detect the
-     * normalization that February 30 → March 2 silently performs. */
-    int p_year = t.tm_year, p_mon = t.tm_mon, p_mday = t.tm_mday,
-        p_hour = t.tm_hour, p_min = t.tm_min, p_sec = t.tm_sec;
-#ifdef _WIN32
-    /* MSVC has no timegm(); _mkgmtime() is the documented equivalent. */
-    std::time_t out = _mkgmtime(&t);
-#else
-    std::time_t out = timegm(&t);
-#endif
-    if (out == (std::time_t)-1) {
+    int64_t year = (int64_t)t.tm_year + 1900;
+    unsigned month = (unsigned)t.tm_mon + 1;
+    unsigned day = (unsigned)t.tm_mday;
+    unsigned hour = (unsigned)t.tm_hour;
+    unsigned minute = (unsigned)t.tm_min;
+    unsigned second = (unsigned)t.tm_sec;
+    static const unsigned month_days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    bool leap = (year % 4 == 0) && (year % 100 != 0 || year % 400 == 0);
+    unsigned max_day = month >= 1 && month <= 12
+        ? month_days[month - 1] + (month == 2 && leap ? 1U : 0U)
+        : 0;
+    if (day < 1 || day > max_day || hour > 23 || minute > 59 || second > 59) {
+        throw std::runtime_error(
+            std::string("Invalid ") + (is_date ? "Date" : "DateTime") +
+            " string (invalid civil time): " + str);
+    }
+
+    int64_t adjusted_year = year - (month <= 2 ? 1 : 0);
+    int64_t era = (adjusted_year >= 0 ? adjusted_year : adjusted_year - 399) / 400;
+    unsigned year_of_era = (unsigned)(adjusted_year - era * 400);
+    unsigned shifted_month = month > 2 ? month - 3 : month + 9;
+    unsigned day_of_year = (153 * shifted_month + 2) / 5 + day - 1;
+    unsigned day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    int64_t days = era * 146097 + (int64_t)day_of_era - 719468;
+    int64_t seconds = days * 86400 + (int64_t)hour * 3600 + (int64_t)minute * 60 + second;
+    bool out_of_range;
+    if constexpr (std::numeric_limits<std::time_t>::is_signed) {
+        out_of_range = seconds < (int64_t)std::numeric_limits<std::time_t>::min() ||
+            seconds > (int64_t)std::numeric_limits<std::time_t>::max();
+    } else {
+        out_of_range = seconds < 0 ||
+            (uint64_t)seconds > (uint64_t)std::numeric_limits<std::time_t>::max();
+    }
+    if (out_of_range) {
         throw std::runtime_error(
             std::string("Invalid ") + (is_date ? "Date" : "DateTime") +
             " string (out of range): " + str);
     }
-    /* Round-trip-validate: convert back to UTC components and compare.
-     * This catches "2024-02-30" → 2024-03-01 normalization that timegm
-     * does silently. */
-    std::tm rt = {};
-#ifdef _WIN32
-    if (gmtime_s(&rt, &out) != 0) {
-#else
-    if (!gmtime_r(&out, &rt)) {
-#endif
-        throw std::runtime_error(
-            std::string("Invalid ") + (is_date ? "Date" : "DateTime") +
-            " string (gmtime failed): " + str);
-    }
-    if (rt.tm_year != p_year || rt.tm_mon != p_mon || rt.tm_mday != p_mday ||
-        rt.tm_hour != p_hour || rt.tm_min != p_min || rt.tm_sec != p_sec) {
-        throw std::runtime_error(
-            std::string("Invalid ") + (is_date ? "Date" : "DateTime") +
-            " string (normalized to a different value): " + str);
-    }
-    return out;
+    return (std::time_t)seconds;
 }
 
 /*
@@ -913,7 +918,12 @@ static inline void appendIntCell(TCol *value, zval *cell,
 template <typename TCol>
 static inline void appendFloatCell(TCol *value, zval *cell, const char *type_label)
 {
-    value->Append((typename TCol::ValueType)strict_zval_double(cell, type_label));
+    double n = strict_zval_double(cell, type_label);
+    double max = (double)std::numeric_limits<typename TCol::ValueType>::max();
+    if (n < -max || n > max) {
+        throw std::runtime_error(std::string("value out of range for ") + type_label);
+    }
+    value->Append((typename TCol::ValueType)n);
 }
 
 template <typename TCol>
@@ -1215,6 +1225,14 @@ static ColumnRef appendMapByValueType(HashTable *values_ht, TypeRef vtype, KFn k
     auto f64Val = [](zval *mv) -> double {
         return strict_zval_double(mv, "Map value Float");
     };
+    auto f32Val = [](zval *mv) -> double {
+        double n = strict_zval_double(mv, "Map value Float32");
+        double max = (double)std::numeric_limits<float>::max();
+        if (n < -max || n > max) {
+            throw std::runtime_error("Map value out of range for Float32");
+        }
+        return n;
+    };
 
     Type::Code vc = vtype->GetCode();
     switch (vc) {
@@ -1249,7 +1267,7 @@ static ColumnRef appendMapByValueType(HashTable *values_ht, TypeRef vtype, KFn k
         case Type::Code::UInt64:
             return appendMapColumn<K, uint64_t,   KCol, ColumnUInt64>(values_ht, key_fn, u64Val);
         case Type::Code::Float32:
-            return appendMapColumn<K, double,     KCol, ColumnFloat32>(values_ht, key_fn, f64Val);
+            return appendMapColumn<K, double,     KCol, ColumnFloat32>(values_ht, key_fn, f32Val);
         case Type::Code::Float64:
             return appendMapColumn<K, double,     KCol, ColumnFloat64>(values_ht, key_fn, f64Val);
         case Type::Code::UUID:
@@ -2127,7 +2145,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
          * "123\x00garbage" silently parse as 123 because endp would
          * land on the NUL. */
         auto i64Key = [](zend_string *zk, zend_ulong nk) -> int64_t {
-            if (!zk) return (int64_t)nk;
+            if (!zk) return (int64_t)(zend_long)nk;
             const char *s = ZSTR_VAL(zk);
             char *endp = NULL;
             errno = 0;
@@ -2140,7 +2158,13 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
             return (int64_t)v;
         };
         auto u64Key = [](zend_string *zk, zend_ulong nk) -> uint64_t {
-            if (!zk) return (uint64_t)nk;
+            if (!zk) {
+                zend_long signed_key = (zend_long)nk;
+                if (signed_key < 0) {
+                    throw std::runtime_error("Map unsigned key cannot be negative");
+                }
+                return (uint64_t)signed_key;
+            }
             const char *s = ZSTR_VAL(zk);
             char *endp = NULL;
             errno = 0;
@@ -2153,7 +2177,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
             return (uint64_t)v;
         };
         auto f64Key = [](zend_string *zk, zend_ulong nk) -> double {
-            if (!zk) return (double)nk;
+            if (!zk) return (double)(zend_long)nk;
             const char *s = ZSTR_VAL(zk);
             char *endp = NULL;
             errno = 0;
@@ -2162,6 +2186,14 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 throw std::runtime_error(
                     std::string("Map float key is not a valid number: ") +
                     std::string(s, ZSTR_LEN(zk)));
+            }
+            return v;
+        };
+        auto f32Key = [&](zend_string *zk, zend_ulong nk) -> double {
+            double v = f64Key(zk, nk);
+            double max = (double)std::numeric_limits<float>::max();
+            if (v < -max || v > max) {
+                throw std::runtime_error("Map key out of range for Float32");
             }
             return v;
         };
@@ -2236,7 +2268,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
             case Type::Code::UInt64:
                 return appendMapByValueType<ColumnUInt64,  uint64_t>(values_ht, v, u64Key);
             case Type::Code::Float32:
-                return appendMapByValueType<ColumnFloat32, double>(values_ht, v, f64Key);
+                return appendMapByValueType<ColumnFloat32, double>(values_ht, v, f32Key);
             case Type::Code::Float64:
                 return appendMapByValueType<ColumnFloat64, double>(values_ht, v, f64Key);
             case Type::Code::UUID:
@@ -2858,9 +2890,9 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         }
         int32_t v = col->At(row);
         if (fetch_mode & SC_FETCH_DATE_AS_STRINGS) {
-            int abs_v = v < 0 ? -v : v;
+            uint32_t abs_v = v < 0 ? uint32_t(0) - uint32_t(v) : uint32_t(v);
             char buffer[16];
-            int l = snprintf(buffer, sizeof(buffer), "%s%02d:%02d:%02d",
+            int l = snprintf(buffer, sizeof(buffer), "%s%02" PRIu32 ":%02" PRIu32 ":%02" PRIu32,
                              v < 0 ? "-" : "", abs_v / 3600, (abs_v / 60) % 60, abs_v % 60);
             if (is_array) {
                 sc_add_next_index_stringl(arr, buffer, l, 1);
@@ -2897,19 +2929,19 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
              * whole==0, so `whole < 0` would drop the leading '-' and render
              * "00:00:00.5" instead of "-00:00:00.5". */
             bool neg = raw < 0;
-            int64_t araw = neg ? -raw : raw;
-            int64_t abs_whole = araw / scale;
-            int64_t frac = araw % scale;
+            uint64_t araw = neg ? uint64_t(0) - uint64_t(raw) : uint64_t(raw);
+            uint64_t abs_whole = araw / (uint64_t)scale;
+            uint64_t frac = araw % (uint64_t)scale;
             char buffer[64];
-            int l = snprintf(buffer, sizeof(buffer), "%s%02lld:%02lld:%02lld",
+            int l = snprintf(buffer, sizeof(buffer), "%s%02" PRIu64 ":%02" PRIu64 ":%02" PRIu64,
                              neg ? "-" : "",
-                             (long long)(abs_whole / 3600),
-                             (long long)((abs_whole / 60) % 60),
-                             (long long)(abs_whole % 60));
+                             abs_whole / 3600,
+                             (abs_whole / 60) % 60,
+                             abs_whole % 60);
             if (l < 0 || (size_t)l >= sizeof(buffer)) l = (int)sizeof(buffer) - 1;
             if (precision > 0 && l > 0 && (size_t)l < sizeof(buffer)) {
-                int w = snprintf(buffer + l, sizeof(buffer) - l, ".%0*lld",
-                                 (int)precision, (long long)frac);
+                int w = snprintf(buffer + l, sizeof(buffer) - l, ".%0*" PRIu64,
+                                 (int)precision, frac);
                 if (w > 0 && (size_t)w < sizeof(buffer) - (size_t)l) l += w;
             }
             if (is_array) {

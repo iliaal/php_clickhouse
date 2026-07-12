@@ -9,6 +9,33 @@ when the vendored library is bumped.
   Upstream now includes the `if (str.size() > 0)` short-circuit (with essentially
   the same comment). Dropped from this list.
 
+## contrib/lz4/lz4/lz4.c: avoid null-pointer arithmetic for empty dictionaries
+
+The bundled LZ4 computes `dictionary + dictSize` even when the empty-dictionary
+state is represented as `dictionary == NULL` and `dictSize == 0`. The resulting
+pointer is never dereferenced, but arithmetic on a null pointer is undefined and
+Clang's pointer-overflow sanitizer reports it. CI previously disabled
+`pointer-overflow` for every extension and vendored translation unit, hiding the
+same defect class in binding-owned code.
+
+Patch: preserve `dictionary` unchanged when `dictSize == 0`, reuse the guarded
+`dictEnd` value in the dependent expressions, and apply the same guard when
+assigning `prefixEnd`. This permits full pointer-overflow instrumentation for the
+binding and the rest of the vendored client.
+
+## clickhouse/client.cpp: endpoint rotation stops on malformed handshakes
+
+`Client::Impl::ResetConnectionEndpoint()` retries only `std::system_error`.
+After a peer accepts TCP but returns a malformed native handshake,
+`ResetConnection()` throws `ProtocolError` and endpoint rotation stops even when
+the next configured peer is healthy. The same gap affects initial construction
+because `CreateConnection()` delegates endpoint traversal to this method.
+
+Patch: treat `ProtocolError` like a transport failure while traversing the
+configured endpoint list. Server exceptions such as authentication failures still
+propagate without rotation. `tests/189.phpt` starts a malformed native peer before
+the healthy ClickHouse endpoint and verifies constructor-time failover.
+
 ## clickhouse/client.cpp: `Client::Impl::BeginInsert` drops `query_id`
 
 `Client::Impl::BeginInsert(Query query)` constructs the wire-level

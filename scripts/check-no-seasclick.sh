@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Fail if a "SeasClick" / "SEASCLICK" / "seasclick" reference shows up
 # anywhere outside the documented compat surface. The compat surface is:
 #
@@ -22,34 +22,55 @@
 # Vendored library (lib/clickhouse-cpp/) and build artifacts are
 # excluded.
 
-set -u
+set -Eeuo pipefail
+shopt -s inherit_errexit
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$ROOT"
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+readonly ROOT
+_tmpfile=$(mktemp)
+trap 'rm -f -- "${_tmpfile:-}"' EXIT
+cd "${ROOT}"
 
-UNEXPECTED=$(grep -rn "SeasClick\|SEASCLICK\|seasclick" \
-    --include="*.cpp" --include="*.hpp" --include="*.h" \
-    --include="*.m4" --include="*.yml" --include="*.json" \
-    --include="*.phpt" --include="*.inc" --include="*.php" \
-    . 2>/dev/null \
-    | grep -v '/lib/clickhouse-cpp/' \
-    | grep -v '/scripts/' \
-    | grep -v '\.dep$' \
-    | grep -v '\.loT$' \
-    | grep -vE '^\./php_clickhouse\.h:.*(Original SeasClick|RES_NAME_LEGACY|EXCEPTION_NAME_LEGACY|aliases for the original SeasClick)' \
-    | grep -vE '^\./clickhouse\.cpp:.*(Original SeasClick|aliases for the original SeasClick)' \
-    | grep -vE '^\./tests/_clickhouse\.inc:.*(seasclick_test_config|seasclick_skip_if_no_server)' \
-    | grep -vE '^\./tests/026\.phpt:' \
-    | grep -vE '^\./tests/051\.phpt:' \
-    | grep -vE '^\./bench/bench_mark\.php:.*for SeasClick\.' \
-    | grep -vE '^\./composer\.json:.*(SeasX Group \(original SeasClick\)|Original author of SeasClick)')
+git ls-files -z --cached --others --exclude-standard -- \
+	'*.cpp' '*.hpp' '*.h' '*.m4' '*.yml' '*.json' '*.phpt' '*.inc' '*.php' \
+	>"${_tmpfile}"
+mapfile -d '' CANDIDATE_FILES <"${_tmpfile}"
+SOURCE_FILES=()
+for path in "${CANDIDATE_FILES[@]}"; do
+	[[ -f "${path}" ]] && SOURCE_FILES+=("${path}")
+done
 
-if [ -n "$UNEXPECTED" ]; then
-    echo "::error::Unexpected SeasClick reference(s) found outside the documented compat surface:"
-    echo "$UNEXPECTED"
-    echo
-    echo "If a reference is intentional, allowlist it in scripts/check-no-seasclick.sh."
-    exit 1
+RAW_MATCHES=""
+if ((${#SOURCE_FILES[@]} > 0)); then
+	set +e
+	RAW_MATCHES=$(grep -nH -E "SeasClick|SEASCLICK|seasclick" "${SOURCE_FILES[@]}")
+	GREP_STATUS=$?
+	set -e
+	if ((GREP_STATUS > 1)); then
+		printf '%s\n' "::error::Failed to scan repository source files for legacy names." >&2
+		exit "${GREP_STATUS}"
+	fi
 fi
 
-echo "OK: no unexpected SeasClick references."
+UNEXPECTED=$(printf '%s\n' "${RAW_MATCHES}" |
+	grep -v '^lib/clickhouse-cpp/' |
+	grep -v '^scripts/' |
+	grep -vE '^php_clickhouse\.h:.*(Original SeasClick|RES_NAME_LEGACY|EXCEPTION_NAME_LEGACY|aliases for the original SeasClick)' |
+	grep -vE '^clickhouse\.cpp:.*(Original SeasClick|aliases for the original SeasClick)' |
+	grep -vE '^tests/_clickhouse\.inc:.*(seasclick_test_config|seasclick_skip_if_no_server)' |
+	grep -vE '^tests/026\.phpt:' |
+	grep -vE '^tests/051\.phpt:' |
+	grep -vE '^bench/bench_mark\.php:.*for SeasClick\.' |
+	grep -vE '^\.github/workflows/tests\.yml:.*scripts/check-no-seasclick\.sh' |
+	grep -vE '^composer\.json:.*(SeasX Group \(original SeasClick\)|Original author of SeasClick)' ||
+	true)
+
+if [[ -n "${UNEXPECTED}" ]]; then
+	printf '%s\n' "::error::Unexpected SeasClick reference(s) found outside the documented compat surface:"
+	printf '%s\n' "${UNEXPECTED}"
+	printf '\n'
+	printf '%s\n' "If a reference is intentional, allowlist it in scripts/check-no-seasclick.sh."
+	exit 1
+fi
+
+printf '%s\n' "OK: no unexpected SeasClick references."

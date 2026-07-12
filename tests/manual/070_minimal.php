@@ -13,7 +13,7 @@
  *   CLICKHOUSE_USER=test CLICKHOUSE_PASSWD=test \
  *   ~/php-install-PHP-8.4/bin/php \
  *       -d extension=modules/clickhouse.so \
- *       tests/070_minimal.php
+ *       tests/manual/070_minimal.php
  *
  * For better ASAN output:
  *   ASAN_OPTIONS="print_stacktrace=1:abort_on_error=1:detect_leaks=0:handle_segv=1:fast_unwind_on_fatal=0" \
