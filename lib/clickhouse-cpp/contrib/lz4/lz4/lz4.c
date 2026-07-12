@@ -827,7 +827,8 @@ LZ4_FORCE_INLINE int LZ4_compress_generic(
 
     /* the dictCtx currentOffset is indexed on the start of the dictionary,
      * while a dictionary in the current context precedes the currentOffset */
-    const BYTE* dictBase = (dictDirective == usingDictCtx) ?
+    const BYTE* dictBase = dictSize == 0 ? dictionary :
+                           (dictDirective == usingDictCtx) ?
                             dictEnd - dictCtx->currentOffset :
                             dictEnd - startIndex;
 

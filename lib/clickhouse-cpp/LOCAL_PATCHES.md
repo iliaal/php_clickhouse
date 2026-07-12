@@ -18,10 +18,11 @@ Clang's pointer-overflow sanitizer reports it. CI previously disabled
 `pointer-overflow` for every extension and vendored translation unit, hiding the
 same defect class in binding-owned code.
 
-Patch: preserve `dictionary` unchanged when `dictSize == 0`, reuse the guarded
-`dictEnd` value in the dependent expressions, and apply the same guard when
-assigning `prefixEnd`. This permits full pointer-overflow instrumentation for the
-binding and the rest of the vendored client.
+Patch: preserve `dictionary` unchanged when `dictSize == 0`, guard `dictBase`
+before subtracting its offset, reuse the guarded `dictEnd` value in the
+non-empty expressions, and apply the same guard when assigning `prefixEnd`.
+This permits full pointer-overflow instrumentation for the binding and the rest
+of the vendored client.
 
 ## clickhouse/client.cpp: endpoint rotation stops on malformed handshakes
 
