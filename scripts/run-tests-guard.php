@@ -23,6 +23,7 @@ $phpArgs = trim((string)getenv("TEST_PHP_ARGS"));
 $base = escapeshellarg($php) . ($phpArgs === "" ? "" : " " . $phpArgs);
 
 $smoke = <<<'PHP'
+<?php
 if (!extension_loaded("clickhouse") ||
     !class_exists("ClickHouse", false) ||
     !class_exists("ClickHouseException", false) ||
@@ -33,15 +34,24 @@ if (!extension_loaded("clickhouse") ||
     exit(1);
 }
 PHP;
+$smokeFile = tempnam(sys_get_temp_dir(), "clickhouse-smoke-");
+if ($smokeFile === false || file_put_contents($smokeFile, $smoke) === false) {
+    if ($smokeFile !== false) {
+        @unlink($smokeFile);
+    }
+    fwrite(STDERR, "Unable to create PHP module smoke script\n");
+    exit(1);
+}
 list($smokeStatus, $smokeOutput) = runCommand(
-    $base . " -r " . escapeshellarg($smoke)
+    $base . " -f " . escapeshellarg($smokeFile)
 );
 if ($smokeStatus !== 0) {
     list($smokeStatus, $smokeOutput) = runCommand(
         $base . " -d " . escapeshellarg("extension=clickhouse") .
-        " -r " . escapeshellarg($smoke)
+        " -f " . escapeshellarg($smokeFile)
     );
 }
+@unlink($smokeFile);
 if ($smokeStatus !== 0) {
     fwrite(STDERR, $smokeOutput);
     exit($smokeStatus ?: 1);
