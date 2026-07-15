@@ -41,10 +41,12 @@ try {
     new ClickHouse($wrongHost);
     echo "wrong_host=accepted\n";
 } catch (ClickHouseException $e) {
-    echo "wrong_host=rejected\n";
+    echo "wrong_host=", stripos($e->getMessage(), "mismatch") !== false
+        ? "verified_mismatch\n"
+        : "transport_error\n";
 }
 ?>
 --EXPECT--
 valid=ok
 wrong_ca=rejected
-wrong_host=rejected
+wrong_host=verified_mismatch

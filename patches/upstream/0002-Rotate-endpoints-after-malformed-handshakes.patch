@@ -1,0 +1,26 @@
+From 14c55004f70a5e915e7bd3dddce90bd6606e98d7 Mon Sep 17 00:00:00 2001
+From: Ilia Alshanetsky <ilia@ilia.ws>
+Date: Wed, 15 Jul 2026 10:25:24 -0400
+Subject: [PATCH 2/9] Rotate endpoints after malformed handshakes
+
+---
+ clickhouse/client.cpp | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/clickhouse/client.cpp b/clickhouse/client.cpp
+index b5d287b..8385c72 100644
+--- a/clickhouse/client.cpp
++++ b/clickhouse/client.cpp
+@@ -629,6 +629,12 @@ void Client::Impl::ResetConnectionEndpoint() {
+                 current_endpoint_.reset();
+                 throw;
+             }
++        } catch (const ProtocolError&) {
++            if (++i == options_.endpoints.size())
++            {
++                current_endpoint_.reset();
++                throw;
++            }
+         }
+     }
+ }

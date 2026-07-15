@@ -1,0 +1,23 @@
+From 257e2deb32cfe15d09a1b02360bd9713c1ad0cd0 Mon Sep 17 00:00:00 2001
+From: Ilia Alshanetsky <ilia@ilia.ws>
+Date: Wed, 15 Jul 2026 10:25:24 -0400
+Subject: [PATCH 4/9] Guard CityHash config include for vendored builds
+
+---
+ contrib/cityhash/cityhash/city.cc | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/contrib/cityhash/cityhash/city.cc b/contrib/cityhash/cityhash/city.cc
+index e157ea0..e4ec85b 100644
+--- a/contrib/cityhash/cityhash/city.cc
++++ b/contrib/cityhash/cityhash/city.cc
+@@ -27,7 +27,9 @@
+ // possible hash functions, by using SIMD instructions, or by
+ // compromising on hash quality.
+ 
++#ifdef HAVE_CONFIG_H
+ #include "config.h"
++#endif
+ #include "city.h"
+ 
+ #include <algorithm>

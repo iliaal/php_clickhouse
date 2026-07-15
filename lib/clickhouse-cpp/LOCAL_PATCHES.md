@@ -132,6 +132,20 @@ call, so a failed reconnect still neutralizes the destructor's implicit
 
 Exercised by `tests/123.phpt` (dirty-insert reconnect-failure recovery).
 
+## clickhouse/client.cpp: `ResetConnection()` cannot recover after endpoint exhaustion
+
+The query retry path clears `current_endpoint_` after every configured endpoint
+fails. A later explicit `Client::ResetConnection()` unconditionally calls
+`current_endpoint_.value()`, so a server that has recovered cannot be reached
+through the same client; the method throws `std::bad_optional_access` instead.
+
+Patch: when no current endpoint exists, route `ResetConnection()` through
+`ResetConnectionEndpoint()` so it selects from the configured endpoint list
+before reconnecting. The normal current-endpoint reconnect path is unchanged.
+
+Exercised by `tests/198_reset_after_endpoint_exhaustion.phpt`, which drops and
+restores a local TCP proxy around a live ClickHouse connection.
+
 ## clickhouse/client.cpp: `VariantIndex` aggregate `std::variant` construction breaks VS2019
 
 The 2.6.2 `VariantIndex` trait computes its value from

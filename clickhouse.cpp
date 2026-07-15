@@ -364,6 +364,28 @@ static std::string sanitizeError(const char *what);
 static void throwClickHouseError(const std::exception &e, const std::string &query_id = std::string());
 static std::string currentDatabase(zval *this_obj);
 
+struct DerefZvalHold {
+    zval value;
+
+    explicit DerefZvalHold(zval *source) {
+        if (source) {
+            ZVAL_COPY_DEREF(&value, source);
+        } else {
+            ZVAL_UNDEF(&value);
+        }
+    }
+    ~DerefZvalHold() {
+        if (Z_TYPE(value) != IS_UNDEF) {
+            zval_ptr_dtor(&value);
+        }
+    }
+    zval *get() {
+        return Z_TYPE(value) == IS_UNDEF ? nullptr : &value;
+    }
+    DerefZvalHold(const DerefZvalHold&) = delete;
+    DerefZvalHold& operator=(const DerefZvalHold&) = delete;
+};
+
 #ifdef COMPILE_DL_CLICKHOUSE
 extern "C" {
 #ifdef ZTS
@@ -522,7 +544,15 @@ PHP_MINIT_FUNCTION(clickhouse)
     clickhouse_iter_object_handlers.free_obj = clickhouse_iter_free_obj;
     clickhouse_iter_object_handlers.clone_obj = NULL;
 
-    clickhouse_statement_ce = register_class_ClickHouseStatement(zend_ce_iterator, zend_ce_countable, zend_ce_arrayaccess, php_json_serializable_ce);
+    zend_class_entry *json_serializable_ce = static_cast<zend_class_entry *>(
+        zend_hash_str_find_ptr(
+            CG(class_table), "jsonserializable", sizeof("JsonSerializable") - 1));
+    if (!json_serializable_ce) {
+        return FAILURE;
+    }
+    clickhouse_statement_ce = register_class_ClickHouseStatement(
+        zend_ce_iterator, zend_ce_countable, zend_ce_arrayaccess,
+        json_serializable_ce);
     clickhouse_mark_not_serializable(clickhouse_statement_ce);
     clickhouse_statement_ce->create_object = clickhouse_statement_create_object;
 #if PHP_VERSION_ID >= 80400
@@ -559,9 +589,15 @@ PHP_MINFO_FUNCTION(clickhouse)
 
 /* {{{ clickhouse_module_entry
  */
+static const zend_module_dep clickhouse_deps[] = {
+    ZEND_MOD_REQUIRED("json")
+    ZEND_MOD_END
+};
+
 zend_module_entry clickhouse_module_entry =
 {
-    STANDARD_MODULE_HEADER,
+    STANDARD_MODULE_HEADER_EX, NULL,
+    clickhouse_deps,
     CLICKHOUSE_RES_NAME,
     clickhouse_functions,
     PHP_MINIT(clickhouse),
@@ -898,13 +934,15 @@ PHP_METHOD(ClickHouse, __construct)
                         "each endpoints entry requires a non-null 'host'", 0);
                     return;
                 }
+                DerefZvalHold host_hold(hz);
+                DerefZvalHold port_hold(pz);
                 Endpoint e;
                 {
-                    ZStrGuard host_sg(hz);
+                    ZStrGuard host_sg(host_hold.get());
                     e.host = std::string(host_sg.val(), host_sg.len());
                 }
-                if (pz) {
-                    zend_long p = zval_get_long(pz);
+                if (port_hold.get()) {
+                    zend_long p = zval_get_long(port_hold.get());
                     if (p < 1 || p > 65535) {
                         sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
                             "Endpoint port out of 1..65535 range", 0);
@@ -1249,7 +1287,8 @@ static void throwClickHouseError(const std::exception &e, const std::string &que
  * through verbatim (the wire layer adds the surrounding quotes); arrays
  * are formatted as ClickHouse array literals so Array(T) parses cleanly.
  */
-static std::string formatParamValue(zval *v, const std::string &type, bool inside_array);
+static std::string formatParamValue(zval *v, const std::string &type,
+                                    bool inside_array, unsigned array_depth = 0);
 
 static std::string formatScalarParam(zval *v)
 {
@@ -1395,13 +1434,18 @@ static bool typeAllowsNull(const std::string &t)
     return false;
 }
 
-static std::string formatParamValue(zval *v, const std::string &type, bool inside_array)
+static std::string formatParamValue(zval *v, const std::string &type,
+                                    bool inside_array, unsigned array_depth)
 {
     if (Z_TYPE_P(v) == IS_NULL) {
         return std::string();
     }
 
     if (Z_TYPE_P(v) == IS_ARRAY) {
+        if (array_depth >= 32) {
+            throw std::runtime_error(
+                "Array typed parameter nesting depth exceeds limit of 32");
+        }
         std::string inner;
         arrayInnerType(type, inner);
         bool quote = inner.empty() ? true : typeNeedsQuoting(inner);
@@ -1410,8 +1454,9 @@ static std::string formatParamValue(zval *v, const std::string &type, bool insid
         bool nested_array = !inner.empty() && arrayInnerType(inner, nested_inner);
         std::string out = "[";
         bool first = true;
+        DerefZvalHold values_hold(v);
         zval *iv;
-        ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(v), iv) {
+        ZEND_HASH_FOREACH_VAL(Z_ARRVAL(values_hold.value), iv) {
             ZVAL_DEREF(iv);
             if (!first) out += ",";
             first = false;
@@ -1428,7 +1473,7 @@ static std::string formatParamValue(zval *v, const std::string &type, bool insid
                     throw std::runtime_error(
                         "Array typed parameter element must be an array");
                 }
-                out += formatParamValue(iv, inner, true);
+                out += formatParamValue(iv, inner, true, array_depth + 1);
                 continue;
             }
             std::string sv = formatScalarParam(iv);
@@ -2400,8 +2445,6 @@ static void do_select_into(zval *out, zval *this_obj,
         auto t1 = std::chrono::steady_clock::now();
         obj->stats.elapsed_ms =
             std::chrono::duration<double, std::milli>(t1 - t0).count();
-        recordQuerySuccess(obj, sql_s, qid);
-
         if (verbose_active(obj)) {
             zval ctx;
             array_init(&ctx);
@@ -2411,6 +2454,7 @@ static void do_select_into(zval *out, zval *this_obj,
             add_assoc_long(&ctx, "blocks", (zend_long)verbose_block_idx);
             emitVerbose(obj, "select_finish", &ctx);
         }
+        recordQuerySuccess(obj, sql_s, qid);
     }
     catch (const std::exception& e)
     {
@@ -3419,6 +3463,25 @@ static bool acceptsNullCell(const TypeRef &t)
     }
 }
 
+static void enforceStreamCellMemoryLimit(size_t native_capacity,
+                                         size_t zend_copy_size)
+{
+    if (native_capacity < 64 * 1024) {
+        return;
+    }
+    zend_long configured = PG(memory_limit);
+    if (configured < 0) {
+        return;
+    }
+    size_t limit = (size_t)configured;
+    size_t used = zend_memory_usage(true);
+    if (used >= limit || native_capacity > limit - used ||
+        zend_copy_size > limit - used - native_capacity) {
+        throw std::runtime_error(
+            "insertFromStream: cell exceeds the available PHP memory_limit");
+    }
+}
+
 /* Push the just-parsed cell into the current row. TSV uses the
  * parser's cell_is_null flag (set when `\N` is decoded at cell start),
  * so `\\N` — which decodes to the literal byte sequence `\N` — round-
@@ -3438,6 +3501,7 @@ static void pushCell(std::string &cell_buf, bool cell_is_quoted,
                cell_buf[1] == 'N') {
         ZVAL_NULL(&z);
     } else {
+        enforceStreamCellMemoryLimit(cell_buf.capacity(), cell_buf.size());
         ZVAL_STRINGL(&z, cell_buf.data(), cell_buf.size());
     }
     row_cells.push_back(z);
@@ -3465,6 +3529,26 @@ struct InsertStreamParser {
      * are a parse error. Without this strictness, `\Nx` silently became
      * the literal three-character string `\Nx` for String columns. */
     bool cell_is_null = false;
+
+    void appendCellByte(char value) {
+        if (cell_buf.size() == cell_buf.max_size()) {
+            throw std::runtime_error(
+                "insertFromStream: cell exceeds the available PHP memory_limit");
+        }
+        size_t required = cell_buf.size() + 1;
+        if (required > cell_buf.capacity()) {
+            size_t target = cell_buf.capacity() > cell_buf.max_size() / 2
+                ? required
+                : cell_buf.capacity() * 2;
+            if (target < required) {
+                target = required;
+            }
+            enforceStreamCellMemoryLimit(target, required);
+            cell_buf.reserve(target);
+            enforceStreamCellMemoryLimit(cell_buf.capacity(), required);
+        }
+        cell_buf.push_back(value);
+    }
 
     /* Owned by the parser between calls; transferred to the caller via
      * finishRow() and consumed there. */
@@ -3523,23 +3607,23 @@ struct InsertStreamParser {
          * same way it would inside a single chunk. */
         auto decode_escape_byte = [&](char n) -> bool {
             switch (n) {
-                case '\\': cell_buf.push_back('\\'); return true;
-                case 't':  cell_buf.push_back('\t'); return true;
-                case 'n':  cell_buf.push_back('\n'); return true;
-                case 'r':  cell_buf.push_back('\r'); return true;
-                case '0':  cell_buf.push_back('\0'); return true;
-                case 'b':  cell_buf.push_back('\b'); return true;
-                case 'f':  cell_buf.push_back('\f'); return true;
-                case 'a':  cell_buf.push_back('\a'); return true;
-                case 'v':  cell_buf.push_back('\v'); return true;
+                case '\\': appendCellByte('\\'); return true;
+                case 't':  appendCellByte('\t'); return true;
+                case 'n':  appendCellByte('\n'); return true;
+                case 'r':  appendCellByte('\r'); return true;
+                case '0':  appendCellByte('\0'); return true;
+                case 'b':  appendCellByte('\b'); return true;
+                case 'f':  appendCellByte('\f'); return true;
+                case 'a':  appendCellByte('\a'); return true;
+                case 'v':  appendCellByte('\v'); return true;
                 case 'N':
                     if (cell_buf.empty()) {
-                        cell_buf.push_back('\\');
-                        cell_buf.push_back('N');
+                        appendCellByte('\\');
+                        appendCellByte('N');
                         cell_is_null = true;
                         return true;
                     }
-                    cell_buf.push_back('\\');
+                    appendCellByte('\\');
                     return false;
                 default:
                     /* ClickHouse TabSeparated folds an unrecognized escape
@@ -3547,7 +3631,7 @@ struct InsertStreamParser {
                      * `"`, `\/` -> `/`. The writer escapes apostrophes as
                      * `\'`, so keeping the backslash here corrupted every
                      * round-tripped value with a quote. */
-                    cell_buf.push_back(n);
+                    appendCellByte(n);
                     return true;
             }
         };
@@ -3588,14 +3672,18 @@ struct InsertStreamParser {
                 if (c == '"') {
                     state = State::QuotePending;
                 } else {
-                    cell_buf.push_back(c);
+                    if (UNEXPECTED(cell_buf.capacity() >= 64 * 1024)) {
+                        appendCellByte(c);
+                    } else {
+                        cell_buf.push_back(c);
+                    }
                 }
                 continue;
             }
             if (csv && state == State::QuotePending) {
                 if (c == '"') {
                     /* Doubled quote -> literal " inside cell, stay quoted. */
-                    cell_buf.push_back('"');
+                    appendCellByte('"');
                     state = State::InQuoted;
                     continue;
                 }
@@ -3690,7 +3778,11 @@ struct InsertStreamParser {
                 continue;
             }
 
-            cell_buf.push_back(c);
+            if (UNEXPECTED(cell_buf.capacity() >= 64 * 1024)) {
+                appendCellByte(c);
+            } else {
+                cell_buf.push_back(c);
+            }
         }
     }
 
@@ -3704,7 +3796,7 @@ struct InsertStreamParser {
              * literal trailing character of the current cell; matches
              * how a `\X` at end of a single chunk would have been
              * handled if the next byte were not an escape letter. */
-            cell_buf.push_back('\\');
+            appendCellByte('\\');
             pending_backslash = false;
             if (state == State::CellStart) state = State::InCell;
         }
@@ -3937,6 +4029,13 @@ PHP_METHOD(ClickHouse, insertFromStream)
         };
 
         try {
+            stream = (php_stream *)zend_fetch_resource2_ex(
+                stream_zv, NULL, php_file_le_stream(), php_file_le_pstream());
+            if (!stream) {
+                throw std::runtime_error(
+                    "insertFromStream: argument 3 must remain an open stream resource");
+            }
+
             InsertStreamParser parser;
             parser.fmt = fmt;
             parser.expected_cols = columns_count;
@@ -4353,14 +4452,13 @@ static void do_execute_into(zval *this_obj,
         auto t1 = std::chrono::steady_clock::now();
         obj->stats.elapsed_ms =
             std::chrono::duration<double, std::milli>(t1 - t0).count();
-        recordQuerySuccess(obj, sql_s, qid);
-
         if (verbose_active(obj)) {
             zval ctx;
             array_init(&ctx);
             add_assoc_double(&ctx, "elapsed_ms", obj->stats.elapsed_ms);
             emitVerbose(obj, "execute_finish", &ctx);
         }
+        recordQuerySuccess(obj, sql_s, qid);
     }
     catch (const std::exception& e)
     {
@@ -5358,8 +5456,6 @@ PHP_METHOD(ClickHouse, selectStreamCallback)
         auto t1 = std::chrono::steady_clock::now();
         obj->stats.elapsed_ms =
             std::chrono::duration<double, std::milli>(t1 - t0).count();
-        recordQuerySuccess(obj, sql_s, qid);
-
         if (verbose_active(obj)) {
             zval ctx;
             array_init(&ctx);
@@ -5369,6 +5465,7 @@ PHP_METHOD(ClickHouse, selectStreamCallback)
             add_assoc_long(&ctx, "blocks", (zend_long)verbose_block_idx);
             emitVerbose(obj, "select_finish", &ctx);
         }
+        recordQuerySuccess(obj, sql_s, qid);
     }
     catch (const std::exception &e) {
         recordQueryError(obj, log_sql, qid, e);
@@ -5391,7 +5488,7 @@ PHP_METHOD(ClickHouseRowIterator, rewind)
 
 PHP_METHOD(ClickHouseRowIterator, valid)
 {
-    if (zend_parse_parameters_none() == FAILURE) return;
+    if (zend_parse_parameters_none() == FAILURE) RETURN_FALSE;
     clickhouse_iter_object *iter = Z_CLICKHOUSE_ITER_P(getThis());
     if (iter->block_idx >= iter->blocks.size()) {
         RETURN_FALSE;
@@ -5438,7 +5535,7 @@ PHP_METHOD(ClickHouseRowIterator, current)
 
 PHP_METHOD(ClickHouseRowIterator, key)
 {
-    if (zend_parse_parameters_none() == FAILURE) return;
+    if (zend_parse_parameters_none() == FAILURE) RETURN_LONG(0);
     clickhouse_iter_object *iter = Z_CLICKHOUSE_ITER_P(getThis());
     RETURN_LONG((zend_long)iter->cumulative_row_idx);
 }
@@ -5459,7 +5556,7 @@ PHP_METHOD(ClickHouseRowIterator, next)
 
 PHP_METHOD(ClickHouseRowIterator, count)
 {
-    if (zend_parse_parameters_none() == FAILURE) return;
+    if (zend_parse_parameters_none() == FAILURE) RETURN_LONG(0);
     clickhouse_iter_object *iter = Z_CLICKHOUSE_ITER_P(getThis());
     RETURN_LONG((zend_long)iter->total_rows);
 }

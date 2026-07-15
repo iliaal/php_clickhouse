@@ -1,0 +1,22 @@
+From ade558e55b9da3c5276fe66db1ea409cc95fe867 Mon Sep 17 00:00:00 2001
+From: Ilia Alshanetsky <ilia@ilia.ws>
+Date: Wed, 15 Jul 2026 10:25:24 -0400
+Subject: [PATCH 3/9] Preserve Query metadata in BeginInsert
+
+---
+ clickhouse/client.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/clickhouse/client.cpp b/clickhouse/client.cpp
+index 8385c72..bbef7ef 100644
+--- a/clickhouse/client.cpp
++++ b/clickhouse/client.cpp
+@@ -546,7 +546,7 @@ Block Client::Impl::BeginInsert(Query query) {
+         return true;
+     });
+ 
+-    SendQuery(query.GetText());
++    SendQuery(query);
+ 
+     // Wait for a data packet and return
+     uint64_t server_packet = 0;

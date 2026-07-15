@@ -5,4 +5,4 @@ pinned: 2.6.2
 vendored_at: lib/clickhouse-cpp
 resolver: github
 repo: ClickHouse/clickhouse-cpp
-note: "2.6.2 + 5 local patches (see patches/upstream/ and LOCAL_PATCHES.md); empty string_view memcpy UB guard now upstream"
+note: "2.6.2 + 9 local patches (see patches/upstream/ and LOCAL_PATCHES.md); empty string_view memcpy UB guard now upstream"

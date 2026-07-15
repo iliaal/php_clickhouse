@@ -11,8 +11,8 @@ if test "$PHP_CLICKHOUSE" != "no"; then
   PHP_REQUIRE_CXX()
   PHP_SUBST(CLICKHOUSE_SHARED_LIBADD)
   PHP_ADD_LIBRARY(stdc++, 1, CLICKHOUSE_SHARED_LIBADD)
-  CXXFLAGS="$CXXFLAGS -Wall -Wno-unused-function -Wno-deprecated -Wno-deprecated-declarations -std=c++17 -DZSTD_DISABLE_ASM"
-  CFLAGS="$CFLAGS -DZSTD_DISABLE_ASM"
+  CXXFLAGS="$CXXFLAGS -fvisibility=hidden -Wall -Wno-unused-function -Wno-deprecated -Wno-deprecated-declarations -std=c++17 -DZSTD_DISABLE_ASM"
+  CFLAGS="$CFLAGS -fvisibility=hidden -DZSTD_DISABLE_ASM"
 
   CLICKHOUSE_SSL_SRC=""
   if test "$PHP_CLICKHOUSE_OPENSSL" != "no"; then
@@ -38,6 +38,15 @@ if test "$PHP_CLICKHOUSE" != "no"; then
       AC_MSG_ERROR([--enable-clickhouse-openssl requires libssl, which was not found. Install the OpenSSL development package (e.g. libssl-dev / openssl-devel).])
     ])
   fi
+
+  case "$host_os" in
+    darwin*)
+      LDFLAGS="$LDFLAGS -Wl,-exported_symbol,_get_module"
+      ;;
+    linux*|gnu*)
+      LDFLAGS="$LDFLAGS -Wl,--version-script=$srcdir/clickhouse.exports"
+      ;;
+  esac
 
   clickhouse_source_file="clickhouse.cpp \
         typesToPhp.cpp \

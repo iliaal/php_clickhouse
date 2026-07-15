@@ -94,7 +94,7 @@ h2:hover .anchor, h3:hover .anchor { opacity: 1; }
 <div class="topbar"><span class="brand">php_clickhouse</span><span class="muted">docs</span></div>
 <div class="layout">
 <nav class="side">
-  <div class="brand">php_clickhouse <span class="v">v0.9.0</span></div>
+  <div class="brand">php_clickhouse <span class="v">v0.10.0</span></div>
   <div class="muted" style="font-size:0.82rem">Native ClickHouse client for PHP</div>
   <ul>
     <li><a href="#intro">Overview</a></li>
@@ -152,8 +152,8 @@ $ch = new ClickHouse([
     "host"        =&gt; "127.0.0.1",
     "port"        =&gt; 9000,
     "database"    =&gt; "test",
-    "user"        =&gt; "default",
-    "passwd"      =&gt; "",
+    "user"        =&gt; "test",
+    "passwd"      =&gt; "test",
     "compression" =&gt; "lz4",   // or "zstd" / true / false
 ]);
 
@@ -213,7 +213,7 @@ foreach ($ch-&gt;select("SELECT id, ts, tag FROM events ORDER BY id",
 <tr><td><code>Tuple(...)</code></td><td>PHP list array; arity must match the column</td><td>PHP positional list array</td><td>inner fields may be <code>Nullable</code></td><td>Arity mismatch throws. <code>Array(Tuple)</code> works.</td></tr>
 <tr><td><code>Map(K, V)</code></td><td>PHP assoc array per row</td><td>PHP assoc array (int or string keys)</td><td>—</td><td>Supported K/V set below.</td></tr>
 <tr><td><code>LowCardinality(String)</code> and <code>FixedString</code> / <code>Nullable</code> variants</td><td>string (or <code>null</code> in the <code>Nullable</code> forms)</td><td>string (or <code>null</code>)</td><td>only the <code>LC(Nullable(...))</code> forms</td><td>Only <code>String</code> / <code>FixedString</code> inner types; anything else throws.</td></tr>
-<tr><td><code>JSON</code></td><td>PHP <strong>array/object → JSON-encoded</strong>; <strong>string → raw JSON</strong> (validated client-side); <code>null</code> → <code>"{}"</code></td><td>raw JSON <strong>string</strong> by default; nested <strong>assoc array</strong> with <code>JSON_AS_ARRAY</code>; nested <strong>stdClass</strong> with <code>JSON_AS_OBJECT</code></td><td>yes, as <code>Nullable(JSON)</code></td><td>Reads require <code>output_format_native_write_json_as_string = 1</code>. See <a href="#json">JSON columns</a>.</td></tr>
+<tr><td><code>JSON</code></td><td>PHP <strong>array/object → JSON-encoded</strong>; <strong>string → raw JSON</strong> (validated client-side); <code>null</code> is accepted only by <code>Nullable(JSON)</code></td><td>raw JSON <strong>string</strong> by default; nested <strong>assoc array</strong> with <code>JSON_AS_ARRAY</code>; nested <strong>stdClass</strong> with <code>JSON_AS_OBJECT</code></td><td>yes, as <code>Nullable(JSON)</code></td><td>Reads require <code>output_format_native_write_json_as_string = 1</code>. See <a href="#json">JSON columns</a>.</td></tr>
 <tr><td><code>Point</code></td><td><code>[x, y]</code> (two numeric elements)</td><td><code>[x, y]</code> float pair</td><td>—</td><td>Server needs <code>allow_experimental_geo_types = 1</code>.</td></tr>
 <tr><td><code>Ring</code></td><td>array of points</td><td>array of points</td><td>—</td><td>—</td></tr>
 <tr><td><code>Polygon</code></td><td>array of rings</td><td>array of rings</td><td>—</td><td>—</td></tr>
@@ -252,7 +252,7 @@ foreach ($ch-&gt;select("SELECT id, ts, tag FROM events ORDER BY id",
 </tbody>
 </table>
 <div class="note">
-<p>On the streaming readers (<code>selectStream</code>, <code>selectStreamCallback</code>), <code>fetch_mode</code> is the <strong>trailing</strong> argument, after <code>settings</code>. The shape flags (<code>FETCH_ONE</code> / <code>FETCH_KEY_PAIR</code> / <code>FETCH_COLUMN</code>) are <strong>ignored</strong> there; the iterator always yields full rows. Only the value flags (<code>DATE_AS_STRINGS</code>, <code>JSON_AS_*</code>, <code>UUID_WITH_DASHES</code>, <code>FIXEDSTRING_BINARY</code>) take effect.</p>
+<p>On <code>selectStatement</code> and the streaming readers (<code>selectStream</code>, <code>selectStreamCallback</code>), the shape flags (<code>FETCH_ONE</code> / <code>FETCH_KEY_PAIR</code> / <code>FETCH_COLUMN</code>) are <strong>ignored</strong>: statements and iterators always retain full rows. Only the value flags (<code>DATE_AS_STRINGS</code>, <code>JSON_AS_*</code>, <code>UUID_WITH_DASHES</code>, <code>FIXEDSTRING_BINARY</code>) take effect. For the streaming readers, <code>fetch_mode</code> is the <strong>trailing</strong> argument, after <code>settings</code>.</p>
 </div>
 
 <h2 id="config">Configuration <a class="anchor" href="#config">#</a></h2>
@@ -418,8 +418,8 @@ $stmt-&gt;toArray(); $stmt-&gt;statistics();</code></pre>
 <pre><code>$ch-&gt;setSettings(array $settings);            // client-wide; per-call overrides; chainable
 $ch-&gt;setSetting(string $key, mixed $value);  // single-key sugar, chainable
 $ch-&gt;setDatabase(string $database);          // reconnects with this default DB (survives reconnects); drops session temp tables/SET; chainable
-$ch-&gt;setProgressCallback(?callable $cb);
-$ch-&gt;setProfileCallback(?callable $cb);
+$ch-&gt;setProgressCallback(?callable $cb); // callback throws propagate; the connection resets automatically
+$ch-&gt;setProfileCallback(?callable $cb);  // callback throws propagate; the connection resets automatically
 $ch-&gt;setVerbose(true);                 // JSON lifecycle lines on STDERR
 $ch-&gt;setVerbose(fn($e, $ctx) =&gt; ...);  // or custom sink
 $ch-&gt;setVerbose(false);                // disable
@@ -548,7 +548,7 @@ $stats = $ch-&gt;getStatistics();
 // rows_read, bytes_read, total_rows, written_rows, written_bytes,
 // blocks, rows_before_limit, applied_limit, elapsed_ms</code></pre>
 <div class="note warn">
-<p>A progress or profile callback that throws unwinds the client's packet loop mid-stream. Call <code>resetConnection()</code> before reusing the client after a callback throws.</p>
+<p>A progress, profile, or streaming row callback that throws unwinds the packet loop. The extension resets the connection before propagating the exception, so the client can be reused immediately.</p>
 </div>
 
 <h2 id="logging">Query log <a class="anchor" href="#logging">#</a></h2>

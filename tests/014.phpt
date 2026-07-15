@@ -89,6 +89,9 @@ $data = [
 $fields = array_keys(current($data));
 
 $expected = $data;
+$expected[0]['float32null_c'] = unpack('f', pack('f', $data[0]['float32null_c']))[1];
+$expected[0]['float32_c'] = unpack('f', pack('f', $data[0]['float32_c']))[1];
+$expected[1]['float32_c'] = unpack('f', pack('f', $data[1]['float32_c']))[1];
 $expected[0]['uuid_c'] = '31249a1b7b0542709f37c609b48a9bb2';
 $expected[0]['enum8_c'] = 'One8';
 $expected[1]['enum16_c'] = 'Two16';
@@ -166,10 +169,10 @@ enumnull_c: array (
   '' => NULL,
 ) - OK
 float32null_c: array (
-  '7.77' => 7.77,
+  '7.7699999809265' => 7.769999980926514,
   '' => NULL,
 ) - array (
-  '7.77' => 7.77,
+  '7.7699999809265' => 7.769999980926514,
   '' => NULL,
 ) - OK
 uuidnull_c: array (
@@ -208,11 +211,11 @@ uint16_c: array (
   220 => 220,
 ) - OK
 float32_c: array (
-  '32.32' => 32.32,
-  '232.32' => 232.32,
+  '32.319999694824' => 32.31999969482422,
+  '232.32000732422' => 232.32000732421875,
 ) - array (
-  '32.32' => 32.32,
-  '232.32' => 232.32,
+  '32.319999694824' => 32.31999969482422,
+  '232.32000732422' => 232.32000732421875,
 ) - OK
 float64_c: array (
   '64.64' => 64.64,

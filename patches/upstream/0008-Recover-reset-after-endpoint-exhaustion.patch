@@ -1,0 +1,25 @@
+From 42ebc217913fb1362f429eccce34a6b51dbfaacb Mon Sep 17 00:00:00 2001
+From: Ilia Alshanetsky <ilia@ilia.ws>
+Date: Wed, 15 Jul 2026 10:25:24 -0400
+Subject: [PATCH 8/9] Recover reset after endpoint exhaustion
+
+---
+ clickhouse/client.cpp | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/clickhouse/client.cpp b/clickhouse/client.cpp
+index 95c4faf..1a44638 100644
+--- a/clickhouse/client.cpp
++++ b/clickhouse/client.cpp
+@@ -606,6 +606,11 @@ void Client::Impl::Ping() {
+ }
+ 
+ void Client::Impl::ResetConnection() {
++    if (!current_endpoint_) {
++        ResetConnectionEndpoint();
++        return;
++    }
++
+     // Clear the insert state BEFORE attempting to reconnect. If connect()
+     // throws (server at max_connections, ephemeral-port exhaustion, DNS blip,
+     // etc. — all cases where the original dirty socket may still be healthy),

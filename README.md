@@ -78,6 +78,7 @@ docker run -d --name clickhouse-test \
     -p 9000:9000 -p 8123:8123 -p 9440:9440 \
     -e CLICKHOUSE_USER=test \
     -e CLICKHOUSE_PASSWORD=test \
+    -e CLICKHOUSE_DB=test \
     clickhouse/clickhouse-server:latest
 ```
 
@@ -91,8 +92,8 @@ $ch = new ClickHouse([
     "host"        => "127.0.0.1",
     "port"        => 9000,
     "database"    => "test",
-    "user"        => "default",
-    "passwd"      => "",
+    "user"        => "test",
+    "passwd"      => "test",
     "compression" => "lz4",   // or "zstd" / true / false
 ]);
 

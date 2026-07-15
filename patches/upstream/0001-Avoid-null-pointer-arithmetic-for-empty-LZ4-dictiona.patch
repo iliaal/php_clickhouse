@@ -1,0 +1,47 @@
+From f5453c9077599a07a71c3d20b8a16ae7a0157a63 Mon Sep 17 00:00:00 2001
+From: Ilia Alshanetsky <ilia@ilia.ws>
+Date: Wed, 15 Jul 2026 10:25:24 -0400
+Subject: [PATCH 1/9] Avoid null-pointer arithmetic for empty LZ4 dictionaries
+
+---
+ contrib/lz4/lz4/lz4.c | 13 ++++++++-----
+ 1 file changed, 8 insertions(+), 5 deletions(-)
+
+diff --git a/contrib/lz4/lz4/lz4.c b/contrib/lz4/lz4/lz4.c
+index 82ab490..798a2cd 100644
+--- a/contrib/lz4/lz4/lz4.c
++++ b/contrib/lz4/lz4/lz4.c
+@@ -819,7 +819,7 @@ LZ4_FORCE_INLINE int LZ4_compress_generic(
+ 
+     int const maybe_extMem = (dictDirective == usingExtDict) || (dictDirective == usingDictCtx);
+     U32 const prefixIdxLimit = startIndex - dictSize;   /* used when dictDirective == dictSmall */
+-    const BYTE* const dictEnd = dictionary + dictSize;
++    const BYTE* const dictEnd = dictSize == 0 ? dictionary : dictionary + dictSize;
+     const BYTE* anchor = (const BYTE*) source;
+     const BYTE* const iend = ip + inputSize;
+     const BYTE* const mflimitPlusOne = iend - MFLIMIT + 1;
+@@ -827,9 +827,10 @@ LZ4_FORCE_INLINE int LZ4_compress_generic(
+ 
+     /* the dictCtx currentOffset is indexed on the start of the dictionary,
+      * while a dictionary in the current context precedes the currentOffset */
+-    const BYTE* dictBase = (dictDirective == usingDictCtx) ?
+-                            dictionary + dictSize - dictCtx->currentOffset :
+-                            dictionary + dictSize - startIndex;
++    const BYTE* dictBase = dictSize == 0 ? dictionary :
++                           (dictDirective == usingDictCtx) ?
++                            dictEnd - dictCtx->currentOffset :
++                            dictEnd - startIndex;
+ 
+     BYTE* op = (BYTE*) dest;
+     BYTE* const olimit = op + maxOutputSize;
+@@ -2193,7 +2194,9 @@ int LZ4_setStreamDecode (LZ4_streamDecode_t* LZ4_streamDecode, const char* dicti
+ {
+     LZ4_streamDecode_t_internal* lz4sd = &LZ4_streamDecode->internal_donotuse;
+     lz4sd->prefixSize = (size_t) dictSize;
+-    lz4sd->prefixEnd = (const BYTE*) dictionary + dictSize;
++    lz4sd->prefixEnd = dictSize == 0
++        ? (const BYTE*)dictionary
++        : (const BYTE*)dictionary + dictSize;
+     lz4sd->externalDict = NULL;
+     lz4sd->extDictSize  = 0;
+     return 1;

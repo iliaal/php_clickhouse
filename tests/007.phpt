@@ -53,33 +53,33 @@ function testFloat($client, $deleteTable = false) {
 }
 
 ?>
---EXPECT--
+--EXPECTF--
 array(4) {
   [0]=>
   array(2) {
     ["float32_c"]=>
-    float(32.31)
+    float(%f)
     ["float64_c"]=>
     float(64.68)
   }
   [1]=>
   array(2) {
     ["float32_c"]=>
-    float(32.32)
+    float(%f)
     ["float64_c"]=>
     float(64.64)
   }
   [2]=>
   array(2) {
     ["float32_c"]=>
-    float(32.32)
+    float(%f)
     ["float64_c"]=>
     float(0)
   }
   [3]=>
   array(2) {
     ["float32_c"]=>
-    float(32.31)
+    float(%f)
     ["float64_c"]=>
     float(0)
   }

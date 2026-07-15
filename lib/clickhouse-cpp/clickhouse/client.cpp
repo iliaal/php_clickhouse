@@ -619,6 +619,11 @@ void Client::Impl::Ping() {
 }
 
 void Client::Impl::ResetConnection() {
+    if (!current_endpoint_) {
+        ResetConnectionEndpoint();
+        return;
+    }
+
     // Clear the insert state BEFORE attempting to reconnect. If connect()
     // throws (server at max_connections, ephemeral-port exhaustion, DNS blip,
     // etc. — all cases where the original dirty socket may still be healthy),

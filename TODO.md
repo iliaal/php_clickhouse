@@ -6,18 +6,6 @@ HTTP-only features (sessions, curl options, file-based `WHERE IN`/write-to-file,
 
 ## Real functional gaps
 
-### Async query execution
-
-`selectAsync()` / `executeAsync()` style. Queue several queries, then block until all complete. clickhouse-cpp exposes the primitives (`Client::ExecuteAsync` and friends); we don't bind them.
-
-Scope: architectural. Needs a `ClickHouseFuture` (or similar) result handle, a way to drive completion (poll vs blocking wait-all), and per-future statistics capture. Most natural fit is a 0.9.0 release with its own design pass.
-
-### Cluster / replica awareness
-
-Multi-node cluster support: replica health checks, automatic node selection, table-on-replica discovery, shard/replica counting. smi2's `Cluster` class is the reference shape.
-
-Scope: large. Likely a separate `ClickHouseCluster` class on top of N `ClickHouse` instances, with health probes via the existing `ping()`. 0.9.0+ scope.
-
 ### Totals / Extremes capture
 
 `SELECT ... WITH TOTALS` and `SETTINGS extremes=1` currently throw `unimplemented 7` / `unimplemented 8` from the vendored library. clickhouse-cpp (through at least v2.6.2) doesn't dispatch the Totals / Extremes packet types ([upstream issue #297](https://github.com/ClickHouse/clickhouse-cpp/issues/297)).
@@ -40,7 +28,7 @@ True byte-level wire tracing (raw packet hex dumps) was not implemented. The eve
 Landed in 0.8.0:
 - `setSettings()` returns `$this` (was `bool`).
 - `setSetting(string $key, mixed $value): static` for chainable single-key writes.
-- `setDatabase(string $database): static` issues `USE` on the server.
+- `setDatabase(string $database): static` rebuilds the client with the new default database so reconnects preserve it.
 - `ClickHouseException::getServerCode()` / `getServerName()` / `getQueryId()` getter aliases.
 - `selectStatement(): ClickHouseStatement` opt-in result wrapper. New `ClickHouseStatement` class implements Iterator, Countable, ArrayAccess, JsonSerializable plus `fetchOne` / `fetchKeyPair` / `fetchColumn` / `toArray` / `statistics`. `select()` is unchanged.
 

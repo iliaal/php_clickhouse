@@ -247,7 +247,8 @@ static zend_long strict_zval_long(zval *z, const char *type_label)
                 throw std::runtime_error(
                     std::string("fractional double cannot be assigned to integer column ") + type_label);
             }
-            if (d < (double)ZEND_LONG_MIN || d > (double)ZEND_LONG_MAX) {
+            const double max_exclusive = -(double)ZEND_LONG_MIN;
+            if (d < (double)ZEND_LONG_MIN || d >= max_exclusive) {
                 throw std::runtime_error(
                     std::string("double out of range for integer column ") + type_label);
             }
@@ -887,6 +888,24 @@ ColumnRef createColumn(TypeRef type)
 
     default:
         return CreateColumnByType(type->GetName());
+    }
+}
+
+static bool canReuseArrayChild(const TypeRef& type)
+{
+    switch (type->GetCode()) {
+    case Type::Code::Nullable:
+        return canReuseArrayChild(
+            type_as_or_throw<NullableType>(type, "Nullable")->GetNestedType());
+    case Type::Code::Tuple:
+    case Type::Code::Map:
+    case Type::Code::Point:
+    case Type::Code::Ring:
+    case Type::Code::Polygon:
+    case Type::Code::MultiPolygon:
+        return false;
+    default:
+        return true;
     }
 }
 
@@ -1952,12 +1971,8 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
 
         auto value = std::make_shared<ColumnArray>(createColumn(item_type));
 
-        /* For scalar element types, reuse one child column across rows and
-         * Clear() its rows between them — one allocation total. ColumnTuple
-         * can't take this path: its Clear() drops the sub-columns (leaving a
-         * zero-arity tuple), so a reused tuple child is unusable after the
-         * first row. Build a fresh column per row only in that case. */
-        bool reuse_child = (item_type->GetCode() != Type::Code::Tuple);
+        /* Tuple-backed columns lose their nested shape when Clear() runs. */
+        bool reuse_child = canReuseArrayChild(item_type);
         ColumnRef child = reuse_child ? createColumn(item_type) : nullptr;
 
         ZEND_HASH_FOREACH_VAL(values_ht, array_value)
@@ -2580,13 +2595,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     case Type::Code::Float32:
     {
         const ColumnFloat32 *f32_col = fast_scalar_col<ColumnFloat32>(columnRef);
-        /* Round-trip through %.6g (matching the prior `stringstream<<float`
-         * default precision) so 0.55f surfaces as 0.55 to PHP, not
-         * 0.5500000119. snprintf+strtod is heap-free vs the old stringstream
-         * pair. */
-        char buf[32];
-        snprintf(buf, sizeof(buf), "%.6g", (double)(*f32_col)[row]);
-        double d = strtod(buf, nullptr);
+        double d = static_cast<double>((*f32_col)[row]);
         if (is_array)
         {
             add_next_index_double(arr, d);

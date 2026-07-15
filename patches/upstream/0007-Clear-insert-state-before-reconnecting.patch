@@ -1,0 +1,30 @@
+From c028b26340b73e89eeee62a657c92f3a1f595f94 Mon Sep 17 00:00:00 2001
+From: Ilia Alshanetsky <ilia@ilia.ws>
+Date: Wed, 15 Jul 2026 10:25:24 -0400
+Subject: [PATCH 7/9] Clear insert state before reconnecting
+
+---
+ clickhouse/client.cpp | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/clickhouse/client.cpp b/clickhouse/client.cpp
+index fe4f189..95c4faf 100644
+--- a/clickhouse/client.cpp
++++ b/clickhouse/client.cpp
+@@ -606,9 +606,15 @@ void Client::Impl::Ping() {
+ }
+ 
+ void Client::Impl::ResetConnection() {
+-    InitializeStreams(socket_factory_->connect(options_, current_endpoint_.value()));
++    // Clear the insert state BEFORE attempting to reconnect. If connect()
++    // throws (server at max_connections, ephemeral-port exhaustion, DNS blip,
++    // etc. — all cases where the original dirty socket may still be healthy),
++    // a still-Inserting state would make ~Impl's automatic EndInsert() fire
++    // on the old dirty wire and commit a partially-streamed insert.
+     state_ = State::Idle;
+ 
++    InitializeStreams(socket_factory_->connect(options_, current_endpoint_.value()));
++
+     if (!Handshake()) {
+         throw ProtocolError("fail to connect to " + options_.host);
+     }

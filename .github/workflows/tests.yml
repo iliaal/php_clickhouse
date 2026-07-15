@@ -65,7 +65,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php: ['7.4', '8.1', '8.2', '8.3', '8.4', '8.5']
+        php: ['7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5']
 
     steps:
       - uses: actions/checkout@v6
@@ -89,6 +89,7 @@ jobs:
           phpize
           ./configure --enable-clickhouse
           make -j$(nproc)
+          ./scripts/check-exported-symbols.sh modules/clickhouse.so
 
       - name: Verify ClickHouse is reachable (guard against silent all-skip)
         env:
@@ -143,9 +144,9 @@ jobs:
           NO_INTERACTION: 1
         run: |
           set -e
-          # Self-signed cert for the TLS lane. The phpt suite connects with
-          # ssl_skip_verify=true, so CN/SAN are cosmetic; generated fresh so no
-          # private key lives in the repo.
+          # Self-signed cert for the TLS lane. The verification test trusts this
+          # CA and checks both the valid 127.0.0.1 SAN and a 127.0.0.2 mismatch;
+          # generate it fresh so no private key lives in the repo.
           mkdir -p "$RUNNER_TEMP/ch-certs"
           openssl req -x509 -nodes -newkey rsa:2048 \
             -keyout "$RUNNER_TEMP/ch-certs/server.key" \
@@ -187,7 +188,7 @@ jobs:
           done
 
           # Stage the TLS-enabled .so (over the no-TLS one) and run the TLS
-          # round-trip test against 9440.
+          # round-trip and certificate-verification tests against 9440.
           EXT_DIR=$(php -r 'echo ini_get("extension_dir");')
           sudo cp modules/clickhouse.so "$EXT_DIR/"
           export TEST_PHP_EXECUTABLE=$(which php)
@@ -196,7 +197,7 @@ jobs:
           export CLICKHOUSE_TLS_WRONG_CA_FILE="$RUNNER_TEMP/ch-certs/wrong.crt"
           # run-tests.php exits 0 on all-skip, so a skipped 027 (no TLS server /
           # no TLS build) would pass this step silently. Capture the summary and
-          # require it actually ran (skipped=0) and passed (passed=1).
+          # require both tests actually ran and passed.
           out=$(php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK tests/027.phpt tests/188.phpt 2>&1) || true
           echo "$out"
           skipped=$(echo "$out" | sed -n 's/.*Tests skipped *: *\([0-9]\{1,\}\).*/\1/p' | head -1)
@@ -324,12 +325,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Build extension
-        uses: php/php-windows-builder/extension@v1
+        uses: php/php-windows-builder/extension@e03e5d39879adaeb61ed2225f0f4eae7db8c1df8 # v1
         with:
           php-version: ${{ matrix.php-version }}
           arch: ${{ matrix.arch }}
           ts: ${{ matrix.ts }}
           run-tests: 'true'
+          test-runner: scripts/run-tests-guard.php
 
   asan:
     name: PHP ${{ matrix.php }} - ASAN
