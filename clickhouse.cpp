@@ -797,42 +797,34 @@ PHP_METHOD(ClickHouse, __construct)
         if (php_array_get_value(_ht, "ping_before_query", value)) {
             Options = Options.SetPingBeforeQuery(zend_is_true(value));
         }
-        if (php_array_get_value(_ht, "tcp_keepalive_idle", value)) {
-            zend_long n = zval_get_long(value);
+        /* Seconds/count knobs that only accept [0, INT_MAX]. Same null/ref
+         * rules as php_array_get_value (skip missing and null). */
+        auto apply_nonneg_int_max = [&](const char *key, auto apply) -> bool {
+            zval *v = zend_hash_str_find(_ht, (char*)key, strlen(key));
+            if (!v) return true;
+            if (Z_ISREF_P(v)) v = Z_REFVAL_P(v);
+            if (ZVAL_IS_NULL(v)) return true;
+            zend_long n = zval_get_long(v);
             if (n < 0 || n > INT_MAX) {
-                zend_throw_exception(clickhouse_exception_ce,
-                    "tcp_keepalive_idle out of range", 0);
-                return;
+                std::string msg = std::string(key) + " out of range";
+                zend_throw_exception(clickhouse_exception_ce, msg.c_str(), 0);
+                return false;
             }
-            Options = Options.SetTcpKeepAliveIdle(std::chrono::seconds(n));
-        }
-        if (php_array_get_value(_ht, "tcp_keepalive_intvl", value)) {
-            zend_long n = zval_get_long(value);
-            if (n < 0 || n > INT_MAX) {
-                zend_throw_exception(clickhouse_exception_ce,
-                    "tcp_keepalive_intvl out of range", 0);
-                return;
-            }
-            Options = Options.SetTcpKeepAliveInterval(std::chrono::seconds(n));
-        }
-        if (php_array_get_value(_ht, "tcp_keepalive_cnt", value)) {
-            zend_long n = zval_get_long(value);
-            if (n < 0 || n > INT_MAX) {
-                zend_throw_exception(clickhouse_exception_ce,
-                    "tcp_keepalive_cnt out of range", 0);
-                return;
-            }
-            Options = Options.SetTcpKeepAliveCount((unsigned int)n);
-        }
-        if (php_array_get_value(_ht, "max_compression_chunk_size", value)) {
-            zend_long n = zval_get_long(value);
-            if (n < 0 || n > INT_MAX) {
-                zend_throw_exception(clickhouse_exception_ce,
-                    "max_compression_chunk_size out of range", 0);
-                return;
-            }
-            Options = Options.SetMaxCompressionChunkSize((unsigned int)n);
-        }
+            apply(n);
+            return true;
+        };
+        if (!apply_nonneg_int_max("tcp_keepalive_idle", [&](zend_long n) {
+                Options = Options.SetTcpKeepAliveIdle(std::chrono::seconds(n));
+            })) return;
+        if (!apply_nonneg_int_max("tcp_keepalive_intvl", [&](zend_long n) {
+                Options = Options.SetTcpKeepAliveInterval(std::chrono::seconds(n));
+            })) return;
+        if (!apply_nonneg_int_max("tcp_keepalive_cnt", [&](zend_long n) {
+                Options = Options.SetTcpKeepAliveCount((unsigned int)n);
+            })) return;
+        if (!apply_nonneg_int_max("max_compression_chunk_size", [&](zend_long n) {
+                Options = Options.SetMaxCompressionChunkSize((unsigned int)n);
+            })) return;
     #ifdef WITH_OPENSSL
         bool want_ssl = false;
         if (php_array_get_value(_ht, "ssl", value)) {
@@ -2175,6 +2167,118 @@ static void attachTypedParams(Query &q, const std::vector<TypedParam> &params)
     }
 }
 
+/*
+ * Shared prelude for select / execute / stream paths after getClient +
+ * QueryActiveGuard: reset stats, reject mid-insert, apply placeholders,
+ * attach settings/progress/profile/verbose callbacks. sql_s is the SQL
+ * after placeholder rewrite; log_sql tracks the same for error logging.
+ * params_err_msg: if non-null, a non-array params zval throws that text;
+ * if null, non-array params are ignored (optional-arg paths).
+ */
+static std::string prepareQuery(clickhouse_object *obj,
+                                std::string &log_sql,
+                                const std::string &qid,
+                                zval *params,
+                                zval *settings,
+                                Query &query,
+                                const char *params_err_msg)
+{
+    resetStats(obj);
+    obj->stats.last_query_id = qid;
+
+    if (obj->has_insert_block) {
+        throw std::runtime_error("The insert operation is now in progress");
+    }
+
+    std::string sql_s = log_sql;
+    std::vector<TypedParam> typed_params;
+    if (params != NULL && Z_TYPE_P(params) == IS_ARRAY) {
+        applyPlaceholders(sql_s, Z_ARRVAL_P(params), typed_params);
+        log_sql = sql_s;
+    } else if (params != NULL && Z_TYPE_P(params) != IS_ARRAY) {
+        if (params_err_msg) {
+            throw std::runtime_error(params_err_msg);
+        }
+    }
+
+    query = qid.empty() ? Query(sql_s) : Query(sql_s, qid);
+    attachTypedParams(query, typed_params);
+    applyMergedSettings(query, obj, settings);
+    attachProgressAndProfile(query, obj);
+    attachVerbose(query, obj);
+    return sql_s;
+}
+
+/*
+ * DR-005 Select recovery: ServerException leaves the wire clean (no reset);
+ * any other throw mid-stream resets the connection. Optional detach clears
+ * stack-capturing callbacks before rethrow / after success. on_error runs
+ * before rethrow (e.g. free a stream buffer). Sets elapsed_ms in all paths.
+ */
+static void runSelectWithRecovery(Client *client,
+                                  Query &query,
+                                  zval *this_obj,
+                                  clickhouse_object *obj,
+                                  const ExternalTables *external_tables,
+                                  bool detach_callbacks,
+                                  std::function<void()> on_error = nullptr)
+{
+    auto t0 = std::chrono::steady_clock::now();
+    try {
+        if (external_tables && !external_tables->empty()) {
+            client->SelectWithExternalData(query, *external_tables);
+        } else {
+            client->Select(query);
+        }
+    } catch (const ServerException &) {
+        setElapsedSince(obj, t0);
+        if (on_error) {
+            on_error();
+        }
+        if (detach_callbacks) {
+            detachQueryCallbacks(query);
+        }
+        throw;
+    } catch (...) {
+        setElapsedSince(obj, t0);
+        if (on_error) {
+            on_error();
+        }
+        tryResetConnectionReapplyDatabase(this_obj, obj, false);
+        if (detach_callbacks) {
+            detachQueryCallbacks(query);
+        }
+        throw;
+    }
+    if (detach_callbacks) {
+        detachQueryCallbacks(query);
+    }
+    setElapsedSince(obj, t0);
+}
+
+/*
+ * Execute path: same DR-005 split as Select, without detach (Execute has
+ * no OnData stack captures that outlive the call).
+ */
+static void runExecuteWithRecovery(Client *client,
+                                   Query &query,
+                                   zval *this_obj,
+                                   clickhouse_object *obj)
+{
+    auto t0 = std::chrono::steady_clock::now();
+    try {
+        client->Execute(query);
+    } catch (const ServerException &) {
+        setElapsedSince(obj, t0);
+        throw;
+    } catch (...) {
+        setElapsedSince(obj, t0);
+        tryResetConnectionReapplyDatabase(this_obj, obj, false);
+        throw;
+    }
+    setElapsedSince(obj, t0);
+}
+
 /* {{{ proto bool ping()
  */
 PHP_METHOD(ClickHouse, ping)
@@ -2223,30 +2327,10 @@ static void do_select_into(zval *out, zval *this_obj,
         Client *client = getClient(obj);
         QueryActiveGuard guard(obj);
 
-        resetStats(obj);
-        obj->stats.last_query_id = qid;
-
-        if (obj->has_insert_block)
-        {
-            throw std::runtime_error("The insert operation is now in progress");
-        }
-
-        std::string sql_s = log_sql;
-        std::vector<TypedParam> typed_params;
-
-        if (params != NULL && Z_TYPE_P(params) == IS_ARRAY)
-        {
-            applyPlaceholders(sql_s, Z_ARRVAL_P(params), typed_params);
-            log_sql = sql_s;
-        } else if (params != NULL && Z_TYPE_P(params) != IS_ARRAY) {
-            throw std::runtime_error("The second argument to the select function must be an array");
-        }
-
-        Query query = qid.empty() ? Query(sql_s) : Query(sql_s, qid);
-        attachTypedParams(query, typed_params);
-        applyMergedSettings(query, obj, settings);
-        attachProgressAndProfile(query, obj);
-        attachVerbose(query, obj);
+        Query query;
+        std::string sql_s = prepareQuery(
+            obj, log_sql, qid, params, settings, query,
+            "The second argument to the select function must be an array");
 
         if (verbose_active(obj)) {
             zval ctx;
@@ -2411,40 +2495,8 @@ static void do_select_into(zval *out, zval *this_obj,
             }
         });
 
-        auto t0 = std::chrono::steady_clock::now();
-        try {
-            if (external_tables && !external_tables->empty()) {
-                client->SelectWithExternalData(query, *external_tables);
-            } else {
-                client->Select(query);
-            }
-        } catch (const ServerException &) {
-            /* DR-005: a server Exception packet is the terminal packet of the
-             * result stream — clickhouse-cpp drained the wire up to it, so the
-             * socket is at a clean packet boundary. Resetting here would
-             * needlessly drop session state (temporary tables, session-level
-             * SET settings) after an ordinary query error (bad SQL, missing
-             * table). Leave the connection intact and let the error propagate. */
-            setElapsedSince(obj, t0);
-            detachQueryCallbacks(query);
-            throw;
-        } catch (...) {
-            setElapsedSince(obj, t0);
-            /* A client-side OnData lambda throw (KEY_PAIR shape mismatch, etc.)
-             * or a transport fault bubbles out mid-stream and leaves the native
-             * client with unread blocks on the wire. Subsequent queries on the
-             * same handle would then receive the residual data and appear
-             * corrupted. Reset to recover; the original throw still propagates. */
-            tryResetConnectionReapplyDatabase(this_obj, obj, false);
-            /* Clear any callbacks (which captured stack locals from this frame)
-             * before the local Query is destroyed and the stack unwinds. */
-            detachQueryCallbacks(query);
-            throw;
-        }
-        detachQueryCallbacks(query);
-        auto t1 = std::chrono::steady_clock::now();
-        obj->stats.elapsed_ms =
-            std::chrono::duration<double, std::milli>(t1 - t0).count();
+        runSelectWithRecovery(client, query, this_obj, obj, external_tables,
+                              /*detach_callbacks=*/true);
         if (verbose_active(obj)) {
             zval ctx;
             array_init(&ctx);
@@ -2911,27 +2963,10 @@ static zend_long do_select_to_stream(zval *this_obj,
         Client *client = getClient(obj);
         QueryActiveGuard guard(obj);
 
-        resetStats(obj);
-        obj->stats.last_query_id = qid;
-
-        if (obj->has_insert_block) {
-            throw std::runtime_error("The insert operation is now in progress");
-        }
-
-        std::string sql_s = log_sql;
-        std::vector<TypedParam> typed_params;
-        if (params != NULL && Z_TYPE_P(params) == IS_ARRAY) {
-            applyPlaceholders(sql_s, Z_ARRVAL_P(params), typed_params);
-            log_sql = sql_s;
-        } else if (params != NULL && Z_TYPE_P(params) != IS_ARRAY) {
-            throw std::runtime_error("The second argument to selectToStream must be an array");
-        }
-
-        Query query = qid.empty() ? Query(sql_s) : Query(sql_s, qid);
-        attachTypedParams(query, typed_params);
-        applyMergedSettings(query, obj, settings);
-        attachProgressAndProfile(query, obj);
-        attachVerbose(query, obj);
+        Query query;
+        std::string sql_s = prepareQuery(
+            obj, log_sql, qid, params, settings, query,
+            "The second argument to selectToStream must be an array");
 
         bool header_written = false;
         smart_str buf = {0};
@@ -2994,34 +3029,14 @@ static zend_long do_select_to_stream(zval *this_obj,
             flushStreamBuf(&buf, stream_zv);
         });
 
-        auto t0 = std::chrono::steady_clock::now();
-        try {
-            client->Select(query);
-        } catch (const ServerException &) {
-            /* DR-005: a server Exception packet is the terminal packet of the
-             * result stream; clickhouse-cpp drained the wire up to it, so the
-             * socket is clean. Don't reconnect and drop session state (temp
-             * tables, session SET). Discard the buffered output and rethrow. */
-            setElapsedSince(obj, t0);
-            smart_str_free(&buf);
-            throw;
-        } catch (...) {
-            setElapsedSince(obj, t0);
-            /* OnData lambda throws (unsupported column type, short stream
-             * write) or a transport fault bubble out mid-stream and leave
-             * the native client with unread blocks on the wire. Subsequent
-             * queries on the same handle would then receive the residual
-             * data and appear corrupted. Reset to recover; the original
-             * throw still propagates. */
-            smart_str_free(&buf);
-            tryResetConnectionReapplyDatabase(this_obj, obj, false);
-            throw;
-        }
+        /* No detach: OnData is cleared when Query is destroyed. Free the
+         * stream buffer on any Select failure so a partial write is not
+         * leaked before the outer catch rethrows. */
+        runSelectWithRecovery(client, query, this_obj, obj, nullptr,
+                              /*detach_callbacks=*/false,
+                              [&buf]() { smart_str_free(&buf); });
         flushStreamBuf(&buf, stream_zv);
         smart_str_free(&buf);
-        auto t1 = std::chrono::steady_clock::now();
-        obj->stats.elapsed_ms =
-            std::chrono::duration<double, std::milli>(t1 - t0).count();
         recordQuerySuccess(obj, sql_s, qid);
     }
     catch (const std::exception &e)
@@ -4386,30 +4401,10 @@ static void do_execute_into(zval *this_obj,
         Client *client = getClient(obj);
         QueryActiveGuard guard(obj);
 
-        resetStats(obj);
-        obj->stats.last_query_id = qid;
-
-        if (obj->has_insert_block)
-        {
-            throw std::runtime_error("The insert operation is now in progress");
-        }
-
-        string sql_s = log_sql;
-        std::vector<TypedParam> typed_params;
-
-        if (params != NULL && Z_TYPE_P(params) == IS_ARRAY)
-        {
-            applyPlaceholders(sql_s, Z_ARRVAL_P(params), typed_params);
-            log_sql = sql_s;
-        } else if (params != NULL && Z_TYPE_P(params) != IS_ARRAY) {
-            throw std::runtime_error("The second argument to execute must be an array");
-        }
-
-        Query query = qid.empty() ? Query(sql_s) : Query(sql_s, qid);
-        attachTypedParams(query, typed_params);
-        applyMergedSettings(query, obj, settings);
-        attachProgressAndProfile(query, obj);
-        attachVerbose(query, obj);
+        Query query;
+        std::string sql_s = prepareQuery(
+            obj, log_sql, qid, params, settings, query,
+            "The second argument to execute must be an array");
 
         if (verbose_active(obj)) {
             zval ctx;
@@ -4420,23 +4415,7 @@ static void do_execute_into(zval *this_obj,
             emitVerbose(obj, "execute_start", &ctx);
         }
 
-        auto t0 = std::chrono::steady_clock::now();
-        try {
-            client->Execute(query);
-        } catch (const ServerException &) {
-            /* DR-005: clean server error (bad SQL, missing table) leaves the
-             * wire at a clean packet boundary; don't reconnect and drop session
-             * state. Only transport/protocol faults fall through to the reset. */
-            setElapsedSince(obj, t0);
-            throw;
-        } catch (...) {
-            setElapsedSince(obj, t0);
-            tryResetConnectionReapplyDatabase(this_obj, obj, false);
-            throw;
-        }
-        auto t1 = std::chrono::steady_clock::now();
-        obj->stats.elapsed_ms =
-            std::chrono::duration<double, std::milli>(t1 - t0).count();
+        runExecuteWithRecovery(client, query, this_obj, obj);
         if (verbose_active(obj)) {
             zval ctx;
             array_init(&ctx);
@@ -5229,25 +5208,9 @@ PHP_METHOD(ClickHouse, selectStream)
         Client *client = getClient(obj);
         QueryActiveGuard guard(obj);
 
-        resetStats(obj);
-        obj->stats.last_query_id = qid;
-
-        if (obj->has_insert_block) {
-            throw std::runtime_error("The insert operation is now in progress");
-        }
-
-        std::string sql_s = log_sql;
-        std::vector<TypedParam> typed_params;
-        if (params != NULL && Z_TYPE_P(params) == IS_ARRAY) {
-            applyPlaceholders(sql_s, Z_ARRVAL_P(params), typed_params);
-            log_sql = sql_s;
-        }
-
-        Query query = qid.empty() ? Query(sql_s) : Query(sql_s, qid);
-        attachTypedParams(query, typed_params);
-        applyMergedSettings(query, obj, settings);
-        attachProgressAndProfile(query, obj);
-        attachVerbose(query, obj);
+        Query query;
+        std::string sql_s = prepareQuery(obj, log_sql, qid, params, settings, query,
+                                         /*params_err_msg=*/nullptr);
 
         query.OnData([iter](const Block &block) {
             if (block.GetRowCount() == 0 || block.GetColumnCount() == 0) return;
@@ -5266,27 +5229,8 @@ PHP_METHOD(ClickHouse, selectStream)
             iter->blocks.push_back(block);
         });
 
-        auto t0 = std::chrono::steady_clock::now();
-        try {
-            client->Select(query);
-        } catch (const ServerException &) {
-            /* DR-005: clean server error leaves the wire at a clean packet
-             * boundary; don't reconnect and drop session state. Only a
-             * client-side OnData throw or transport fault (below) needs a
-             * reset. */
-            setElapsedSince(obj, t0);
-            detachQueryCallbacks(query);
-            throw;
-        } catch (...) {
-            setElapsedSince(obj, t0);
-            tryResetConnectionReapplyDatabase(getThis(), obj, false);
-            detachQueryCallbacks(query);
-            throw;
-        }
-        detachQueryCallbacks(query);
-        auto t1 = std::chrono::steady_clock::now();
-        obj->stats.elapsed_ms =
-            std::chrono::duration<double, std::milli>(t1 - t0).count();
+        runSelectWithRecovery(client, query, getThis(), obj, nullptr,
+                              /*detach_callbacks=*/true);
         recordQuerySuccess(obj, sql_s, qid);
     }
     catch (const std::exception &e) {
@@ -5338,25 +5282,9 @@ PHP_METHOD(ClickHouse, selectStreamCallback)
         Client *client = getClient(obj);
         QueryActiveGuard guard(obj);
 
-        resetStats(obj);
-        obj->stats.last_query_id = qid;
-
-        if (obj->has_insert_block) {
-            throw std::runtime_error("The insert operation is now in progress");
-        }
-
-        std::string sql_s = log_sql;
-        std::vector<TypedParam> typed_params;
-        if (params != NULL && Z_TYPE_P(params) == IS_ARRAY) {
-            applyPlaceholders(sql_s, Z_ARRVAL_P(params), typed_params);
-            log_sql = sql_s;
-        }
-
-        Query query = qid.empty() ? Query(sql_s) : Query(sql_s, qid);
-        attachTypedParams(query, typed_params);
-        applyMergedSettings(query, obj, settings);
-        attachProgressAndProfile(query, obj);
-        attachVerbose(query, obj);
+        Query query;
+        std::string sql_s = prepareQuery(obj, log_sql, qid, params, settings, query,
+                                         /*params_err_msg=*/nullptr);
 
         if (verbose_active(obj)) {
             zval ctx;
@@ -5420,27 +5348,8 @@ PHP_METHOD(ClickHouse, selectStreamCallback)
             }
         });
 
-        auto t0 = std::chrono::steady_clock::now();
-        try {
-            client->Select(query);
-        } catch (const ServerException &) {
-            /* DR-005: clean server error leaves the wire clean; don't reset
-             * and drop session state. A thrown row callback surfaces as a
-             * std::runtime_error ("row callback aborted query"), not a
-             * ServerException, so a callback abort still resets below. */
-            setElapsedSince(obj, t0);
-            detachQueryCallbacks(query);
-            throw;
-        } catch (...) {
-            setElapsedSince(obj, t0);
-            tryResetConnectionReapplyDatabase(getThis(), obj, false);
-            detachQueryCallbacks(query);
-            throw;
-        }
-        detachQueryCallbacks(query);
-        auto t1 = std::chrono::steady_clock::now();
-        obj->stats.elapsed_ms =
-            std::chrono::duration<double, std::milli>(t1 - t0).count();
+        runSelectWithRecovery(client, query, getThis(), obj, nullptr,
+                              /*detach_callbacks=*/true);
         if (verbose_active(obj)) {
             zval ctx;
             array_init(&ctx);
