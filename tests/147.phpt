@@ -44,6 +44,19 @@ foreach ($c->select("SELECT id, b, ip4, ip6 FROM test.bipn_t ORDER BY id") as $r
         $r["ip6"] === null ? "NULL" : $r["ip6"]);
 }
 
+echo "-- bool strings --\n";
+$c->execute("DROP TABLE IF EXISTS test.bool_s");
+$c->execute("CREATE TABLE test.bool_s (id UInt32, b Bool) ENGINE = Memory");
+$c->insert("test.bool_s", ["id", "b"], [
+    [1, "true"],
+    [2, "false"],
+    [3, "0"],
+    [4, "1"],
+]);
+foreach ($c->select("SELECT id, b FROM test.bool_s ORDER BY id") as $r) {
+    printf("%d b=%s\n", $r["id"], $r["b"] ? "true" : "false");
+}
+
 echo "-- validation --\n";
 function expect_throw(string $label, callable $fn): void {
     try { $fn(); echo $label, ": no throw\n"; }
@@ -52,9 +65,14 @@ function expect_throw(string $label, callable $fn): void {
 expect_throw("ip4 bad string", fn() => $c->insert("test.bip_t", ["id", "ip4"], [[9, "not.an.ip"]]));
 expect_throw("ip4 int out of range", fn() => $c->insert("test.bip_t", ["id", "ip4"], [[9, 4294967296]]));
 expect_throw("ip6 bad string", fn() => $c->insert("test.bip_t", ["id", "ip6"], [[9, "zzz"]]));
+expect_throw("bool string false-word was truthy", fn() =>
+    $c->insert("test.bool_s", ["id", "b"], [[9, "no"]]));
+expect_throw("bool string garbage", fn() =>
+    $c->insert("test.bool_s", ["id", "b"], [[9, "maybe"]]));
 
 $c->execute("DROP TABLE test.bip_t");
 $c->execute("DROP TABLE test.bipn_t");
+$c->execute("DROP TABLE test.bool_s");
 ?>
 --EXPECT--
 -- round-trip --
@@ -66,7 +84,14 @@ ours=1.2.3.4 server=1.2.3.4 match=1
 -- Nullable --
 1 b=1 ip4=9.9.9.9 ip6=::2
 2 b=NULL ip4=NULL ip6=NULL
+-- bool strings --
+1 b=true
+2 b=false
+3 b=false
+4 b=true
 -- validation --
 ip4 bad string: throw
 ip4 int out of range: throw
 ip6 bad string: throw
+bool string false-word was truthy: throw
+bool string garbage: throw

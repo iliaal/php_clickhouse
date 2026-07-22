@@ -217,12 +217,29 @@ struct AllowNullGuard {
  * non-Nullable column. Save-and-restore at each top-level insert
  * entrypoint so a reentrant insert starts from the reject-null default;
  * legitimate same-client nesting is unaffected because the value is
- * restored on scope exit. */
-InsertNullScopeGuard::InsertNullScopeGuard() : saved(g_allow_null_in_strict) {
+ * restored on scope exit.
+ *
+ * convert_depth is isolated the same way: a nested type build that
+ * reenters userland would otherwise leave the TLS depth elevated for a
+ * second client's shallow insert/select and false-trip the 32 limit. */
+static thread_local int convert_depth = 0;
+static const int MAX_CONVERT_DEPTH = 32;
+
+InsertNullScopeGuard::InsertNullScopeGuard()
+    : saved_null(g_allow_null_in_strict), saved_depth(convert_depth) {
     g_allow_null_in_strict = 0;
+    convert_depth = 0;
 }
 InsertNullScopeGuard::~InsertNullScopeGuard() {
-    g_allow_null_in_strict = saved;
+    g_allow_null_in_strict = saved_null;
+    convert_depth = saved_depth;
+}
+
+ConvertDepthScopeGuard::ConvertDepthScopeGuard() : saved_depth(convert_depth) {
+    convert_depth = 0;
+}
+ConvertDepthScopeGuard::~ConvertDepthScopeGuard() {
+    convert_depth = saved_depth;
 }
 static zend_long strict_zval_long(zval *z, const char *type_label)
 {
@@ -661,9 +678,6 @@ static std::pair<std::time_t, int64_t> to_time_t_with_frac(const std::string &st
  * MITM'd server can craft a deeply-nested type just like on the read side.
  *
  * thread_local because clickhouse-cpp may dispatch from worker threads. */
-static thread_local int convert_depth = 0;
-static const int MAX_CONVERT_DEPTH = 32;
-
 struct ConvertDepthGuard {
     ConvertDepthGuard() {
         if (++convert_depth > MAX_CONVERT_DEPTH) {
@@ -1559,6 +1573,9 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     }
     case Type::Code::Bool:
     {
+        /* Strict bools only — do not use zend_is_true (string "false" is true
+         * in PHP). Accept IS_TRUE/IS_FALSE, 0/1 integers, and the string
+         * forms 0/1/true/false (case-insensitive). Reject everything else. */
         auto value = std::make_shared<ColumnBool>();
         ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
@@ -1569,9 +1586,43 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                     throw std::runtime_error("null cannot be assigned to non-Nullable column Bool");
                 }
                 value->Append(false);
-            } else {
-                value->Append((bool)zend_is_true(v));
+                continue;
             }
+            bool bit = false;
+            if (Z_TYPE_P(v) == IS_TRUE) {
+                bit = true;
+            } else if (Z_TYPE_P(v) == IS_FALSE) {
+                bit = false;
+            } else if (Z_TYPE_P(v) == IS_LONG) {
+                if (Z_LVAL_P(v) != 0 && Z_LVAL_P(v) != 1) {
+                    throw std::runtime_error(
+                        "Bool insert requires true/false, 0/1, or \"true\"/\"false\"/\"0\"/\"1\"");
+                }
+                bit = Z_LVAL_P(v) != 0;
+            } else if (Z_TYPE_P(v) == IS_STRING) {
+                const char *s = Z_STRVAL_P(v);
+                size_t n = Z_STRLEN_P(v);
+                auto ieq = [&](const char *lit) {
+                    size_t ln = strlen(lit);
+                    if (n != ln) return false;
+                    for (size_t i = 0; i < n; ++i) {
+                        if (tolower((unsigned char)s[i]) != (unsigned char)lit[i]) {
+                            return false;
+                        }
+                    }
+                    return true;
+                };
+                if (ieq("1") || ieq("true")) bit = true;
+                else if (ieq("0") || ieq("false")) bit = false;
+                else {
+                    throw std::runtime_error(
+                        "Bool insert requires true/false, 0/1, or \"true\"/\"false\"/\"0\"/\"1\"");
+                }
+            } else {
+                throw std::runtime_error(
+                    "Bool insert requires true/false, 0/1, or \"true\"/\"false\"/\"0\"/\"1\"");
+            }
+            value->Append(bit);
         }
         ZEND_HASH_FOREACH_END();
         return value;
@@ -1916,7 +1967,10 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         TypeRef item_type = type_as_or_throw<ArrayType>(type, "Array")->GetItemType();
         if (item_type->GetCode() == Type::Array)
         {
-            throw std::runtime_error("can't support Multidimensional Arrays");
+            throw std::runtime_error(
+                "Multidimensional Arrays are not supported for insert "
+                "(Array(Array(...))); select of nested arrays works. "
+                "Flatten the data or use a single-level Array column.");
         }
 
         auto value = std::make_shared<ColumnArray>(createColumn(item_type));

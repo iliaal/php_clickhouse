@@ -2,8 +2,8 @@
 
 ## Requirements
 
-- PHP 7.1 or later (8.x recommended; debug builds are useful for
-  development: `--enable-debug`)
+- PHP 7.4 or later (8.x recommended; debug builds are useful for
+  development: `--enable-debug`). Matches `composer.json` and the CI matrix.
 - C++17-capable compiler: GCC 8+, Clang 7+
 - `phpize` and `php-config` (from `php-dev` / `php8.x-dev`)
 - GNU Make
@@ -53,9 +53,13 @@ For security issues, do **not** file a public issue. See
   new translation units unless there's a structural reason. The build
   rebuilds everything in one shot anyway and the symbol surface is
   clearer when concentrated.
-- C++ exceptions caught at the PHP boundary should go through
-  `sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, ...)`
-  so users see `ClickHouseException` and not generic `Exception`.
+- C++ exceptions caught at the PHP boundary must go through
+  `throwClickHouseError(e[, query_id])` so users get a
+  `ClickHouseException` with sanitized message and optional
+  `server_code` / `server_name` / `query_id`. Static validation
+  (bad config, empty columns, etc.) may call
+  `zend_throw_exception(clickhouse_exception_ce, ...)` directly.
+  Never throw with a NULL class entry for ClickHouse errors.
 
 ## Vendored library updates
 

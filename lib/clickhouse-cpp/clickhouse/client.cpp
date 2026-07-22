@@ -367,9 +367,29 @@ Client::Impl::Impl(const ClientOptions& opts,
 Client::Impl::~Impl() {
     try {
         if (state_ == State::Inserting) {
+            /* free_obj / request shutdown must not hang forever when the
+             * peer is dead and connection_recv_timeout is 0 (infinite).
+             * Apply a hard teardown deadline before EndInsert so SO_RCVTIMEO
+             * / SO_SNDTIMEO make ProcessPacket return. Keep any positive
+             * configured timeout (it may be tighter or looser than 5s). */
+            constexpr auto kTeardownMs = std::chrono::milliseconds(5000);
+            SocketTimeoutParams tp;
+            tp.connect_timeout = options_.connection_connect_timeout;
+            tp.recv_timeout = options_.connection_recv_timeout.count() > 0
+                ? options_.connection_recv_timeout
+                : kTeardownMs;
+            tp.send_timeout = options_.connection_send_timeout.count() > 0
+                ? options_.connection_send_timeout
+                : kTeardownMs;
+            if (socket_) {
+                if (auto *s = dynamic_cast<Socket*>(socket_.get())) {
+                    s->SetTimeouts(tp);
+                }
+            }
             EndInsert();
         }
     } catch (...) {
+        state_ = State::Idle;
     }
 }
 

@@ -172,8 +172,21 @@ static void clickhouse_free_obj(zend_object *object)
      * written to parts regardless, and the old discard only dropped
      * inserts small enough to still sit in the server's squash buffer —
      * size-dependent and silently partial. Just delete and let the
-     * client wind down. */
+     * client wind down.
+     *
+     * Teardown hang guard: when receive_timeout is 0 (default), ~Impl's
+     * EndInsert can block forever on a dead peer. The vendored ~Impl
+     * applies a hard 5s teardown deadline when the configured recv/send
+     * timeouts are zero (see LOCAL_PATCHES.md). Drop PHP-side insert
+     * flags here; native insert state is owned by ~Client. */
     if (obj->client) {
+        if (obj->has_insert_block) {
+            obj->insert_block = Block();
+            obj->has_insert_block = false;
+            obj->insert_sql.clear();
+            obj->insert_query_id.clear();
+            obj->insert_started_at = std::chrono::steady_clock::time_point();
+        }
         delete obj->client;
         obj->client = nullptr;
     }
@@ -269,6 +282,9 @@ struct clickhouse_iter_object {
     size_t row_idx;
     uint64_t cumulative_row_idx;
     uint64_t total_rows;
+    /* Conservative C++-heap charge for blocks retained by selectStream
+     * (not visible to PHP memory_limit). Used only as a soft tripwire. */
+    size_t buffered_estimate;
     int fetch_mode;
     zend_object std;
 };
@@ -290,6 +306,7 @@ static zend_object *clickhouse_iter_create_object(zend_class_entry *ce)
     iter->row_idx = 0;
     iter->cumulative_row_idx = 0;
     iter->total_rows = 0;
+    iter->buffered_estimate = 0;
     iter->fetch_mode = 0;
     new (&iter->blocks) std::vector<Block>();
     new (&iter->column_names) std::vector<std::string>();
@@ -326,6 +343,10 @@ struct clickhouse_statement_object {
     zval positional_rows;
     zval statistics;
     HashPosition pos;
+#if PHP_VERSION_ID < 80000
+    /* PHP 7.4: get_gc must point *table at storage that outlives the call. */
+    zval gc_buf[3];
+#endif
     zend_object std;
 };
 
@@ -359,6 +380,49 @@ static void clickhouse_statement_free_obj(zend_object *object)
     zval_ptr_dtor(&stmt->statistics);
     zend_object_std_dtor(&stmt->std);
 }
+
+/*
+ * rows / positional_rows / statistics live on the C prefix, not the
+ * property table. JSON_AS_OBJECT (and any object cell) can close a cycle
+ * through userland that the default collector never sees — same shape as
+ * the Client callback get_gc. Expose the three zvals so cycles reclaimed.
+ */
+#if PHP_VERSION_ID >= 80000
+static HashTable *clickhouse_statement_get_gc(zend_object *object, zval **table, int *n)
+{
+    clickhouse_statement_object *stmt = clickhouse_statement_from_obj(object);
+    zend_get_gc_buffer *buf = zend_get_gc_buffer_create();
+    if (Z_TYPE(stmt->rows) != IS_UNDEF) {
+        zend_get_gc_buffer_add_zval(buf, &stmt->rows);
+    }
+    if (Z_TYPE(stmt->positional_rows) != IS_UNDEF) {
+        zend_get_gc_buffer_add_zval(buf, &stmt->positional_rows);
+    }
+    if (Z_TYPE(stmt->statistics) != IS_UNDEF) {
+        zend_get_gc_buffer_add_zval(buf, &stmt->statistics);
+    }
+    zend_get_gc_buffer_use(buf, table, n);
+    return zend_std_get_properties(object);
+}
+#else
+static HashTable *clickhouse_statement_get_gc(zval *object, zval **table, int *n)
+{
+    clickhouse_statement_object *stmt = Z_CLICKHOUSE_STATEMENT_P(object);
+    int i = 0;
+    if (Z_TYPE(stmt->rows) != IS_UNDEF) {
+        ZVAL_COPY_VALUE(&stmt->gc_buf[i++], &stmt->rows);
+    }
+    if (Z_TYPE(stmt->positional_rows) != IS_UNDEF) {
+        ZVAL_COPY_VALUE(&stmt->gc_buf[i++], &stmt->positional_rows);
+    }
+    if (Z_TYPE(stmt->statistics) != IS_UNDEF) {
+        ZVAL_COPY_VALUE(&stmt->gc_buf[i++], &stmt->statistics);
+    }
+    *table = stmt->gc_buf;
+    *n = i;
+    return zend_std_get_properties(object);
+}
+#endif
 
 static std::string sanitizeError(const char *what);
 static void throwClickHouseError(const std::exception &e, const std::string &query_id = std::string());
@@ -562,6 +626,7 @@ PHP_MINIT_FUNCTION(clickhouse)
     memcpy(&clickhouse_statement_object_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
     clickhouse_statement_object_handlers.offset = offsetof(clickhouse_statement_object, std);
     clickhouse_statement_object_handlers.free_obj = clickhouse_statement_free_obj;
+    clickhouse_statement_object_handlers.get_gc = clickhouse_statement_get_gc;
     clickhouse_statement_object_handlers.clone_obj = NULL;
 
     /* Back-compat aliases for the original SeasClick name. Deprecated;
@@ -667,7 +732,11 @@ PHP_METHOD(ClickHouse, __construct)
 
     if (php_array_get_value(_ht, "compression", value))
     {
+        /* 0=none, 1=lz4, 2=zstd. Accept the integer codes, string names, and
+         * bool (true→lz4, false→none). Do not use zend_is_true for non-bool
+         * numbers: that maps 2 to true→1 and silently downgrades zstd. */
         long cv = 0;
+        ZVAL_DEREF(value);
         if (Z_TYPE_P(value) == IS_STRING) {
             const char *s = Z_STRVAL_P(value);
             if (strcasecmp(s, "lz4") == 0)        cv = 1;
@@ -675,11 +744,33 @@ PHP_METHOD(ClickHouse, __construct)
             else if (strcasecmp(s, "none") == 0)  cv = 0;
             else {
                 zend_throw_exception(clickhouse_exception_ce,
-                    "Unknown compression name; expected 'lz4', 'zstd', 'none', true, or false", 0);
+                    "Unknown compression name; expected 'lz4', 'zstd', 'none', 0, 1, 2, true, or false", 0);
                 return;
             }
+        } else if (Z_TYPE_P(value) == IS_TRUE) {
+            cv = 1;
+        } else if (Z_TYPE_P(value) == IS_FALSE) {
+            cv = 0;
+        } else if (Z_TYPE_P(value) == IS_LONG) {
+            zend_long n = Z_LVAL_P(value);
+            if (n < 0 || n > 2) {
+                zend_throw_exception(clickhouse_exception_ce,
+                    "compression out of range; expected 0 (none), 1 (lz4), or 2 (zstd)", 0);
+                return;
+            }
+            cv = (long)n;
+        } else if (Z_TYPE_P(value) == IS_DOUBLE) {
+            double d = Z_DVAL_P(value);
+            if (d != 0.0 && d != 1.0 && d != 2.0) {
+                zend_throw_exception(clickhouse_exception_ce,
+                    "compression out of range; expected 0 (none), 1 (lz4), or 2 (zstd)", 0);
+                return;
+            }
+            cv = (long)d;
         } else {
-            cv = zend_is_true(value) ? 1 : 0;
+            zend_throw_exception(clickhouse_exception_ce,
+                "compression must be 'lz4', 'zstd', 'none', 0, 1, 2, true, or false", 0);
+            return;
         }
         sc_zend_update_property_long(clickhouse_ce, this_obj, "compression", sizeof("compression") - 1, cv);
     }
@@ -1439,11 +1530,19 @@ static std::string formatParamValue(zval *v, const std::string &type,
                 "Array typed parameter nesting depth exceeds limit of 32");
         }
         std::string inner;
-        arrayInnerType(type, inner);
-        bool quote = inner.empty() ? true : typeNeedsQuoting(inner);
-        bool allow_null = inner.empty() ? false : typeAllowsNull(inner);
+        /* Only Array(T) (optionally under LowCardinality/Nullable wrappers)
+         * may be formatted as a ClickHouse array literal. Map/Tuple/etc.
+         * would drop keys via ZEND_HASH_FOREACH_VAL and produce garbage. */
+        if (!arrayInnerType(type, inner)) {
+            throw std::runtime_error(
+                "PHP array value requires an Array(...) typed parameter "
+                "(Map/Tuple/other composites are not supported as bound "
+                "parameters; use a string representation or external data)");
+        }
+        bool quote = typeNeedsQuoting(inner);
+        bool allow_null = typeAllowsNull(inner);
         std::string nested_inner;
-        bool nested_array = !inner.empty() && arrayInnerType(inner, nested_inner);
+        bool nested_array = arrayInnerType(inner, nested_inner);
         std::string out = "[";
         bool first = true;
         DerefZvalHold values_hold(v);
@@ -2194,7 +2293,9 @@ static std::string prepareQuery(clickhouse_object *obj,
     std::vector<TypedParam> typed_params;
     if (params != NULL && Z_TYPE_P(params) == IS_ARRAY) {
         applyPlaceholders(sql_s, Z_ARRVAL_P(params), typed_params);
-        log_sql = sql_s;
+        /* Keep log_sql as the pre-substitution text so query log / verbose
+         * never embed client-side {name} token values (identifiers / numeric
+         * secrets). Typed {name:Type} params already leave SQL untouched. */
     } else if (params != NULL && Z_TYPE_P(params) != IS_ARRAY) {
         if (params_err_msg) {
             throw std::runtime_error(params_err_msg);
@@ -2322,6 +2423,7 @@ static void do_select_into(zval *out, zval *this_obj,
 {
     clickhouse_object *obj = Z_CLICKHOUSE_P(this_obj);
     std::string log_sql(sql, l_sql);
+    ConvertDepthScopeGuard depth_scope;
     try
     {
         Client *client = getClient(obj);
@@ -2958,6 +3060,7 @@ static zend_long do_select_to_stream(zval *this_obj,
     clickhouse_object *obj = Z_CLICKHOUSE_P(this_obj);
     zend_long total_rows = 0;
     std::string log_sql(sql, l_sql);
+    ConvertDepthScopeGuard depth_scope;
     try
     {
         Client *client = getClient(obj);
@@ -4172,27 +4275,35 @@ PHP_METHOD(ClickHouse, writeStart)
          * throw on server-side schema errors after the vendored
          * client has set its inserting_ flag. Reset the connection
          * so the next call on this handle isn't met with "cannot
-         * execute query while inserting". */
+         * execute query while inserting". After a *successful*
+         * BeginInsert, any throw while installing PHP insert state
+         * (Block/string assignment) must also recover — otherwise the
+         * native client stays Inserting while has_insert_block is false. */
         Block blockQuery;
         auto t0 = std::chrono::steady_clock::now();
+        bool insert_opened = false;
         try {
             blockQuery = client->BeginInsert(insertQuery);
+            insert_opened = true;
+            obj->insert_block = blockQuery;
+            obj->has_insert_block = true;
+            obj->insert_sql = sql;
+            obj->insert_query_id = qid;
+            obj->insert_started_at = t0;
         } catch (...) {
             setElapsedSince(obj, t0);
-            tryResetConnectionReapplyDatabase(getThis(), obj, false);
+            if (insert_opened) {
+                clearStreamingInsertState(obj);
+            }
+            tryResetConnectionReapplyDatabase(getThis(), obj, true);
             throw;
         }
-
-        obj->insert_block = blockQuery;
-        obj->has_insert_block = true;
-        obj->insert_sql = sql;
-        obj->insert_query_id = qid;
-        obj->insert_started_at = t0;
     }
     catch (const std::exception& e)
     {
         recordQueryError(obj, sql, qid, e);
         throwClickHouseError(e, qid);
+        return;
     }
     RETURN_TRUE;
 }
@@ -4320,7 +4431,11 @@ PHP_METHOD(ClickHouse, write)
             recordQueryError(obj, sql, qid, e);
         }
         clearStreamingInsertState(obj);
+        /* Conversion failures finalize earlier batches (non-transactional
+         * ClickHouse). Callers that catch and retry must open a new stream
+         * with writeStart(); reusing this stream is impossible. */
         throwClickHouseError(e, qid);
+        return;
     }
     RETURN_TRUE;
 }
@@ -5203,6 +5318,7 @@ PHP_METHOD(ClickHouse, selectStream)
     clickhouse_iter_object *iter = Z_CLICKHOUSE_ITER_P(return_value);
     iter->fetch_mode = fetch_mode;
     std::string log_sql(ZSTR_VAL(sql), ZSTR_LEN(sql));
+    ConvertDepthScopeGuard depth_scope;
 
     try {
         Client *client = getClient(obj);
@@ -5214,7 +5330,6 @@ PHP_METHOD(ClickHouse, selectStream)
 
         query.OnData([iter](const Block &block) {
             if (block.GetRowCount() == 0 || block.GetColumnCount() == 0) return;
-            iter->total_rows += block.GetRowCount();
             /* Cache column names on the first non-empty block. The schema
              * is identical across all blocks in a single result, so we
              * pay one std::string copy per column, once, instead of one
@@ -5226,6 +5341,27 @@ PHP_METHOD(ClickHouse, selectStream)
                     iter->column_names.emplace_back(block.GetColumnName(c));
                 }
             }
+            /* selectStream buffers native blocks on the C++ heap (not under
+             * PHP zval accounting). Charge a conservative per-cell floor and
+             * refuse to grow past memory_limit so large SELECTs fail loudly
+             * instead of OOMing the worker. Prefer selectStreamCallback for
+             * true unbounded streaming. */
+            const size_t kCellFloor = 32;
+            size_t incoming = (size_t)block.GetRowCount()
+                * (size_t)block.GetColumnCount() * kCellFloor;
+            zend_long configured = PG(memory_limit);
+            if (configured > 0) {
+                size_t limit = (size_t)configured;
+                if (iter->buffered_estimate > limit ||
+                    incoming > limit - iter->buffered_estimate) {
+                    throw std::runtime_error(
+                        "selectStream: buffered result exceeds PHP memory_limit; "
+                        "use selectStreamCallback() for unbounded streaming or "
+                        "raise memory_limit");
+                }
+            }
+            iter->buffered_estimate += incoming;
+            iter->total_rows += block.GetRowCount();
             iter->blocks.push_back(block);
         });
 
@@ -5277,6 +5413,7 @@ PHP_METHOD(ClickHouse, selectStreamCallback)
     std::string qid = makeQid(query_id);
     clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
     std::string log_sql(ZSTR_VAL(sql), ZSTR_LEN(sql));
+    ConvertDepthScopeGuard depth_scope;
 
     try {
         Client *client = getClient(obj);

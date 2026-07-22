@@ -120,6 +120,10 @@ public:
     /// @params nodelay whether to enable TCP_NODELAY
     void SetTcpNoDelay(bool nodelay) noexcept;
 
+    /// Re-apply SO_RCVTIMEO / SO_SNDTIMEO on a live socket (e.g. destructor
+    /// teardown when the connection was opened with infinite timeouts).
+    void SetTimeouts(const SocketTimeoutParams& timeout_params) noexcept;
+
     std::unique_ptr<InputStream> makeInputStream() const override;
     std::unique_ptr<OutputStream> makeOutputStream() const override;
 

@@ -23,6 +23,10 @@ $cases = [
     ["'zstd'", "zstd", 2],
     ["true",   true,   1],
     ["false",  false,  0],
+    // Integer codes must not go through zend_is_true (2 would become 1/LZ4).
+    ["0", 0, 0],
+    ["1", 1, 1],
+    ["2", 2, 2],
 ];
 
 foreach ($cases as [$label, $input, $expected]) {
@@ -53,6 +57,9 @@ compression='lz4' expected=1 got=1
 compression='zstd' expected=2 got=2
 compression=true expected=1 got=1
 compression=false expected=0 got=0
+compression=0 expected=0 got=0
+compression=1 expected=1 got=1
+compression=2 expected=2 got=2
 none round-trip: 42
 lz4 round-trip: 42
 zstd round-trip: 42

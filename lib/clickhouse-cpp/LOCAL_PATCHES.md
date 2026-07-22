@@ -171,3 +171,18 @@ The pre-tag gate now mirrors the release Windows matrix (`tests.yml`
 `windows-matrix` builds 8.3/8.4/8.5), so a vs16-only break blocks the
 release instead of surfacing post-tag. Exercised implicitly by every
 packet-loop test (`select`, `insert`, `ping`).
+
+## clickhouse/client.cpp + base/socket: destructor EndInsert hang guard
+
+`Client::Impl::~Impl` calls `EndInsert()` when still `Inserting`. With
+`connection_recv_timeout` of 0 (infinite, the extension default), a dead
+or half-open peer makes `ProcessPacket` block forever — PHP `unset($ch)`
+or request shutdown hangs the worker.
+
+Patch: before destructor `EndInsert`, re-apply socket timeouts with a
+hard 5s floor when the configured recv/send timeout is zero. Healthy
+peers still finalize within the window (test 091). `Socket::SetTimeouts`
+is a best-effort `setsockopt` wrapper that never throws.
+
+Also sets `state_ = Idle` in the destructor catch so a failed EndInsert
+does not leave a half-destroyed client in `Inserting`.

@@ -379,6 +379,14 @@ void Socket::SetTcpNoDelay(bool nodelay) noexcept {
 #endif
 }
 
+void Socket::SetTimeouts(const SocketTimeoutParams& timeout_params) noexcept {
+    try {
+        SetTimeout(handle_, timeout_params);
+    } catch (...) {
+        /* Best-effort: teardown paths must not throw from a destructor. */
+    }
+}
+
 std::unique_ptr<InputStream> Socket::makeInputStream() const {
     return std::make_unique<SocketInput>(handle_);
 }

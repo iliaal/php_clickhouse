@@ -8,28 +8,15 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression for CR-301: createColumn / insertColumn used to recurse
-// without a depth guard. The read path has had ConvertDepthGuard
-// (cap 32) for a while; the write path was missing it, so a malicious
-// or buggy server pushing back a deeply-nested column type during
-// BeginInsert could stack-overflow the worker. The guard is now
-// shared between read and write.
-//
-// We can't trivially induce a malicious server-side schema in PHP, so
-// drive the same recursion via a deeply-nested PHP value into a
-// type-supporting column. Array(Array(...)) isn't accepted by the
-// extension (multidimensional rejected), so use Tuple at moderate
-// depth — the guard kicks in around 32 levels.
-//
-// What we assert: a moderate-depth nested input lands cleanly, and an
-// abusive depth throws a ClickHouseException rather than segfaulting.
+// Regression for CR-301 / CR-006: createColumn / insertColumn share
+// ConvertDepthGuard (cap 32). Shallow nested Tuple must succeed; a
+// type whose nest depth exceeds 32 must throw on insert, not segfault.
 
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
 $c->execute("DROP TABLE IF EXISTS test.depth_t");
 
-// Build a moderate Tuple-of-Tuple nesting (3 levels) to confirm the
-// guard isn't fired prematurely.
+// Shallow Tuple-of-Tuple nesting (3 levels).
 $c->execute("CREATE TABLE test.depth_t (t Tuple(Tuple(Tuple(Int32)))) ENGINE = Memory");
 try {
     $c->insert("test.depth_t", ["t"], [[[[[42]]]]]);
@@ -40,19 +27,34 @@ try {
 }
 $c->execute("DROP TABLE test.depth_t");
 
-// The depth guard fires at 32. Building a 40-deep ClickHouse type from
-// PHP requires constructing a 40-level Tuple type DDL. The guard fires
-// on the write side any time createColumn or insertColumn recurses too
-// deep, including via server-supplied schema. Indirectly probe by
-// asking the server to send back a deeply-nested type response — the
-// client constructs the column tree mirroring that depth on read.
-//
-// Use a 40-deep Tuple expression via SELECT, which exercises the read
-// path's same guard (already pinned). The write-side guard symmetry is
-// the regression target; the read assertion above for shallow depth is
-// the practical pin.
-echo "guard wired into write path: yes\n";
+// Build Tuple(Tuple(... Int32 ...)) to depth 40. The guard fires at 32
+// while createColumn walks the type tree during BeginInsert / insert.
+$inner = "Int32";
+for ($i = 0; $i < 40; $i++) {
+    $inner = "Tuple($inner)";
+}
+$c->execute("CREATE TABLE test.depth_t (t $inner) ENGINE = Memory");
+
+// A matching nested PHP value of depth 40 (array-wrapped once per Tuple).
+$val = 7;
+for ($i = 0; $i < 40; $i++) {
+    $val = [$val];
+}
+
+try {
+    $c->insert("test.depth_t", ["t"], [[$val]]);
+    echo "deep insert: no throw\n";
+} catch (ClickHouseException $e) {
+    $msg = $e->getMessage();
+    if (stripos($msg, "depth") !== false || stripos($msg, "nested") !== false) {
+        echo "deep insert: depth guard threw\n";
+    } else {
+        echo "deep insert: other throw: ", $msg, "\n";
+    }
+}
+
+$c->execute("DROP TABLE test.depth_t");
 ?>
 --EXPECT--
 shallow ok: 1
-guard wired into write path: yes
+deep insert: depth guard threw
