@@ -648,11 +648,10 @@ static std::pair<std::time_t, int64_t> to_time_t_with_frac(const std::string &st
             throw std::runtime_error(
                 "Invalid DateTime64 string (trailing characters after fraction): " + str);
         }
-    } else {
-        frac = 0;
     }
     return {whole, frac};
 }
+
 
 /* Cap recursion through nested column types (Tuple/Array/Map/Nullable/
  * LowCardinality) so a server-supplied schema like Tuple(Tuple(Tuple(...)))
@@ -675,100 +674,69 @@ struct ConvertDepthGuard {
     ~ConvertDepthGuard() { --convert_depth; }
 };
 
+
+/* precision is already bounded to 0..9 by callers; 10^9 fits in int64. */
+static int64_t pow10_i64(size_t precision)
+{
+    int64_t scale = 1;
+    for (size_t i = 0; i < precision; ++i) {
+        scale *= 10;
+    }
+    return scale;
+}
+
 ColumnRef createColumn(TypeRef type)
 {
     ConvertDepthGuard _depth_guard;
     switch (type->GetCode())
     {
     case Type::Code::UInt64:
-    {
         return std::make_shared<ColumnUInt64>();
-    }
     case Type::Code::UInt8:
-    {
         return std::make_shared<ColumnUInt8>();
-    }
     case Type::Code::UInt16:
-    {
         return std::make_shared<ColumnUInt16>();
-    }
     case Type::Code::UInt32:
-    {
         return std::make_shared<ColumnUInt32>();
-    }
 
     case Type::Code::Int8:
-    {
         return std::make_shared<ColumnInt8>();
-    }
     case Type::Code::Int16:
-    {
         return std::make_shared<ColumnInt16>();
-    }
     case Type::Code::Int32:
-    {
         return std::make_shared<ColumnInt32>();
-    }
     case Type::Code::Int64:
-    {
         return std::make_shared<ColumnInt64>();
-    }
 
     case Type::Code::UUID:
-    {
         return std::make_shared<ColumnUUID>();
-    }
 
     case Type::Code::Float32:
-    {
         return std::make_shared<ColumnFloat32>();
-    }
     case Type::Code::Float64:
-    {
         return std::make_shared<ColumnFloat64>();
-    }
 
     case Type::Code::String:
-    {
         return std::make_shared<ColumnString>();
-    }
     case Type::Code::FixedString:
-    {
         return std::make_shared<ColumnFixedString>(parseFixedStringWidth(type));
-    }
 
     case Type::Code::DateTime:
-    {
         return std::make_shared<ColumnDateTime>();
-    }
     case Type::Code::DateTime64:
-    {
         return std::make_shared<ColumnDateTime64>(type_as_or_throw<DateTime64Type>(type, "DateTime64")->GetPrecision());
-    }
     case Type::Code::Date:
-    {
         return std::make_shared<ColumnDate>();
-    }
     case Type::Code::Date32:
-    {
         return std::make_shared<ColumnDate32>();
-    }
     case Type::Code::Time:
-    {
         return std::make_shared<ColumnTime>();
-    }
     case Type::Code::Time64:
-    {
         return std::make_shared<ColumnTime64>(type_as_or_throw<Time64Type>(type, "Time64")->GetPrecision());
-    }
     case Type::Code::Int128:
-    {
         return std::make_shared<ColumnInt128>();
-    }
     case Type::Code::UInt128:
-    {
         return std::make_shared<ColumnUInt128>();
-    }
     case Type::Code::Decimal:
     case Type::Code::Decimal32:
     case Type::Code::Decimal64:
@@ -779,41 +747,25 @@ ColumnRef createColumn(TypeRef type)
     }
 
     case Type::Code::JSON:
-    {
         return std::make_shared<ColumnJSON>();
-    }
 
     case Type::Code::Bool:
-    {
         return std::make_shared<ColumnBool>();
-    }
     case Type::Code::IPv4:
-    {
         return std::make_shared<ColumnIPv4>();
-    }
     case Type::Code::IPv6:
-    {
         return std::make_shared<ColumnIPv6>();
-    }
 
     case Type::Code::Array:
-    {
         return std::make_shared<ColumnArray>(createColumn(type_as_or_throw<ArrayType>(type, "Array")->GetItemType()));
-    }
 
     case Type::Code::Enum8:
-    {
         return std::make_shared<ColumnEnum8>(type);
-    }
     case Type::Code::Enum16:
-    {
         return std::make_shared<ColumnEnum16>(type);
-    }
 
     case Type::Code::Nullable:
-    {
         return std::make_shared<ColumnNullable>(createColumn(type_as_or_throw<NullableType>(type, "Nullable")->GetNestedType()), std::make_shared<ColumnUInt8>());
-    }
 
     case Type::Code::LowCardinality:
     {
@@ -1315,8 +1267,8 @@ static std::tuple<double, double> phpToPoint(zval *zv)
     if (zend_hash_num_elements(ht) != 2) {
         throw std::runtime_error("Point must have exactly 2 elements");
     }
-    zval *x = sc_zend_hash_index_find(ht, 0);
-    zval *y = sc_zend_hash_index_find(ht, 1);
+    zval *x = zend_hash_index_find(ht, 0);
+    zval *y = zend_hash_index_find(ht, 1);
     if (!x || !y) {
         throw std::runtime_error("Point is missing an element");
     }
@@ -1370,10 +1322,10 @@ zval *extractRowCell(zval *row_pz, size_t col_index,
         throw std::runtime_error(
             "The insert function needs to pass in a two-dimensional array");
     }
-    zval *cell = sc_zend_hash_index_find(Z_ARRVAL_P(row_pz), col_index);
+    zval *cell = zend_hash_index_find(Z_ARRVAL_P(row_pz), col_index);
     if (!cell && col_names) {
         zend_string *cn = (*col_names)[col_index];
-        cell = sc_zend_hash_find(Z_ARRVAL_P(row_pz), ZSTR_VAL(cn), ZSTR_LEN(cn));
+        cell = zend_hash_str_find(Z_ARRVAL_P(row_pz), ZSTR_VAL(cn), ZSTR_LEN(cn));
     }
     if (!cell) {
         throw std::runtime_error(
@@ -1727,8 +1679,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
             throw std::runtime_error("DateTime64 precision out of spec range (0..9)");
         }
         auto value = std::make_shared<ColumnDateTime64>(precision);
-        int64_t scale = 1;
-        for (size_t i = 0; i < precision; ++i) scale *= 10;
+        int64_t scale = pow10_i64(precision);
 
         ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
@@ -1824,8 +1775,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
             throw std::runtime_error("Time64 precision out of spec range (0..9)");
         }
         auto value = std::make_shared<ColumnTime64>(precision);
-        int64_t scale = 1;
-        for (size_t i = 0; i < precision; ++i) scale *= 10;
+        int64_t scale = pow10_i64(precision);
         ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
             zval *v = array_value;
@@ -2065,7 +2015,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                         throw std::runtime_error(
                             "Tuple row arity does not match the column type");
                     }
-                    fzval = sc_zend_hash_index_find(Z_ARRVAL_P(pzval), field);
+                    fzval = zend_hash_index_find(Z_ARRVAL_P(pzval), field);
                     if (NULL == fzval)
                     {
                         throw std::runtime_error(
@@ -2075,7 +2025,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                      * stored as its target, not an IS_REFERENCE the recursive
                      * per-field build would have to unwrap. */
                     ZVAL_DEREF(fzval);
-                    sc_zval_add_ref(fzval);
+                    Z_TRY_ADDREF_P(fzval);
                     add_next_index_zval(return_tmp, fzval);
                 }
                 ZEND_HASH_FOREACH_END();
@@ -2355,26 +2305,44 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
 // sign on the way into PHP, instead of getting reinterpreted as huge
 // unsigned values. Unsigned types up to UINT64_MAX preserve their bit
 // pattern either way; PHP integers are signed 64-bit regardless.
-#define SC_SINGLE_LONG()  \
-    if (fetch_mode & SC_FETCH_ONE) { \
-        ZVAL_LONG(arr, (zend_long)col); \
-    } else { \
-        sc_add_assoc_long_ex(arr, column_name.c_str(), column_name.length(), (zend_long)col); \
+//
+// Shared three-way emit dispatch: is_array (nested cell) vs FETCH_ONE
+// (replace arr) vs default assoc key. Used by nearly every scalar read arm.
+static void emitStringCell(zval *arr, const char *s, size_t len,
+                           const string& column_name, int8_t is_array, long fetch_mode)
+{
+    if (is_array) {
+        add_next_index_stringl(arr, s, len);
+    } else if (fetch_mode & SC_FETCH_ONE) {
+        ZVAL_STRINGL(arr, s, len);
+    } else {
+        add_assoc_stringl_ex(arr, column_name.c_str(), column_name.length(), s, len);
     }
+}
 
-#define SC_SINGLE_DOUBLE(val)  \
-    if (fetch_mode & SC_FETCH_ONE) { \
-        ZVAL_DOUBLE(arr, val); \
-    } else { \
-        sc_add_assoc_double_ex(arr, column_name.c_str(), column_name.length(), val); \
+static void emitLongCell(zval *arr, zend_long v,
+                         const string& column_name, int8_t is_array, long fetch_mode)
+{
+    if (is_array) {
+        add_next_index_long(arr, v);
+    } else if (fetch_mode & SC_FETCH_ONE) {
+        ZVAL_LONG(arr, v);
+    } else {
+        add_assoc_long_ex(arr, column_name.c_str(), column_name.length(), v);
     }
+}
 
-#define SC_SINGLE_STRING(val, len)  \
-    if (fetch_mode & SC_FETCH_ONE) { \
-        ZVAL_STRINGL(arr, val, len); \
-    } else { \
-        sc_add_assoc_stringl_ex(arr, column_name.c_str(), column_name.length(), val, len, 1); \
+static void emitDoubleCell(zval *arr, double v,
+                           const string& column_name, int8_t is_array, long fetch_mode)
+{
+    if (is_array) {
+        add_next_index_double(arr, v);
+    } else if (fetch_mode & SC_FETCH_ONE) {
+        ZVAL_DOUBLE(arr, v);
+    } else {
+        add_assoc_double_ex(arr, column_name.c_str(), column_name.length(), v);
     }
+}
 
 /* Portable reentrant UTC gmtime: POSIX gmtime_r vs MSVC gmtime_s, which
  * reverses the argument order and returns an errno_t. Mirrors the write
@@ -2406,21 +2374,12 @@ static void emitEpoch(zval *arr, std::time_t t, const char *fmt,
             throw std::runtime_error("gmtime failed for date/time value");
         }
         size_t l = strftime(buffer, sizeof(buffer), fmt, &tmv);
-        if (is_array) {
-            sc_add_next_index_stringl(arr, buffer, l, 1);
-        } else {
-            SC_SINGLE_STRING(buffer, l);
-        }
+        emitStringCell(arr, buffer, l, column_name, is_array, fetch_mode);
     } else {
-        if (is_array) {
-            add_next_index_long(arr, (zend_long)t);
-        } else if (fetch_mode & SC_FETCH_ONE) {
-            ZVAL_LONG(arr, (zend_long)t);
-        } else {
-            sc_add_assoc_long_ex(arr, column_name.c_str(), column_name.length(), (zend_long)t);
-        }
+        emitLongCell(arr, (zend_long)t, column_name, is_array, fetch_mode);
     }
 }
+
 
 // Read one integer column cell (UInt8..UInt64, Int8..Int64, IPv4) and
 // emit it as a PHP long. The fetch-mode dispatch is identical across
@@ -2431,12 +2390,9 @@ static inline void emitIntColumn(zval *arr, const ColumnRef& columnRef, int row,
 {
     const TCol *col_ptr = fast_scalar_col<TCol>(columnRef);
     auto col = (*col_ptr)[row];
-    if (is_array) {
-        add_next_index_long(arr, (zend_long)col);
-    } else {
-        SC_SINGLE_LONG();
-    }
+    emitLongCell(arr, (zend_long)col, column_name, is_array, fetch_mode);
 }
+
 
 // UInt64 specialization. Values above ZEND_LONG_MAX (2^63-1) lose
 // unsigned semantics when cast to zend_long — they read back as
@@ -2449,27 +2405,14 @@ static inline void emitUInt64Cell(zval *arr, uint64_t v,
                                   const string& column_name, int8_t is_array, long fetch_mode)
 {
     if (v <= (uint64_t)ZEND_LONG_MAX) {
-        if (is_array) {
-            add_next_index_long(arr, (zend_long)v);
-        } else if (fetch_mode & SC_FETCH_ONE) {
-            ZVAL_LONG(arr, (zend_long)v);
-        } else {
-            sc_add_assoc_long_ex(arr, column_name.c_str(), column_name.length(),
-                                 (zend_long)v);
-        }
+        emitLongCell(arr, (zend_long)v, column_name, is_array, fetch_mode);
         return;
     }
     char buf[32];
     int len = snprintf(buf, sizeof(buf), "%" PRIu64, v);
-    if (is_array) {
-        sc_add_next_index_stringl(arr, buf, len, 1);
-    } else if (fetch_mode & SC_FETCH_ONE) {
-        ZVAL_STRINGL(arr, buf, len);
-    } else {
-        sc_add_assoc_stringl_ex(arr, column_name.c_str(), column_name.length(),
-                                buf, len, 1);
-    }
+    emitStringCell(arr, buf, len, column_name, is_array, fetch_mode);
 }
+
 
 template <>
 inline void emitIntColumn<ColumnUInt64>(zval *arr, const ColumnRef& columnRef, int row,
@@ -2523,8 +2466,19 @@ static void emitNestedZval(zval *arr, zval *built, const string& column_name, in
     } else if (fetch_mode & SC_FETCH_ONE) {
         ZVAL_COPY_VALUE(arr, built);
     } else {
-        sc_add_assoc_zval_ex(arr, column_name.c_str(), column_name.length(), built);
+        add_assoc_zval_ex(arr, column_name.c_str(), column_name.length(), built);
     }
+}
+
+
+template <typename TCol>
+static void emitEnumColumn(zval *arr, const ColumnRef& columnRef, int row,
+                           const string& column_name, int8_t is_array, long fetch_mode,
+                           const char *what)
+{
+    auto col = as_or_throw<TCol>(columnRef, what);
+    std::string_view name = col->NameAt(row);
+    emitStringCell(arr, name.data(), name.length(), column_name, is_array, fetch_mode);
 }
 
 void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string& column_name, int8_t is_array, long fetch_mode)
@@ -2550,14 +2504,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
          * v2.6.1; emit as canonical dotted-quad string via AsString(). */
         auto col_ip = as_or_throw<ColumnIPv4>(columnRef, "IPv4 read");
         std::string s = col_ip->AsString(row);
-        if (is_array)
-        {
-            sc_add_next_index_stringl(arr, s.data(), s.size(), 1);
-        }
-        else
-        {
-            SC_SINGLE_STRING(s.data(), s.size());
-        }
+        emitStringCell(arr, s.data(), s.size(), column_name, is_array, fetch_mode);
         break;
     }
     case Type::Code::Int8:
@@ -2574,61 +2521,28 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         break;
     case Type::Code::UUID:
     {
-        auto uuid_col = columnRef->As<ColumnUUID>();
-        if (!uuid_col) {
-            throw std::runtime_error("UUID read: column type mismatch");
-        }
+        auto uuid_col = as_or_throw<ColumnUUID>(columnRef, "UUID read");
         auto col = (*uuid_col)[row];
         char buf[37];
         int blen = format_uuid(col, (fetch_mode & SC_FETCH_UUID_WITH_DASHES) != 0,
                                buf, sizeof(buf));
-        if (is_array)
-        {
-            sc_add_next_index_stringl(arr, buf, blen, 1);
-        }
-        else
-        {
-            SC_SINGLE_STRING(buf, blen);
-        }
+        emitStringCell(arr, buf, blen, column_name, is_array, fetch_mode);
         break;
     }
     case Type::Code::Float32:
-    {
-        const ColumnFloat32 *f32_col = fast_scalar_col<ColumnFloat32>(columnRef);
-        double d = static_cast<double>((*f32_col)[row]);
-        if (is_array)
-        {
-            add_next_index_double(arr, d);
-        }
-        else
-        {
-            SC_SINGLE_DOUBLE(d);
-        }
+        emitDoubleCell(arr, static_cast<double>((*fast_scalar_col<ColumnFloat32>(columnRef))[row]),
+                       column_name, is_array, fetch_mode);
         break;
-    }
     case Type::Code::Float64:
-    {
-        const ColumnFloat64 *f64_col = fast_scalar_col<ColumnFloat64>(columnRef);
-        double col = (double)(*f64_col)[row];
-        if (is_array)
-        {
-            add_next_index_double(arr, col);
-        }
-        else
-        {
-            SC_SINGLE_DOUBLE(col);
-        }
+        emitDoubleCell(arr, (double)(*fast_scalar_col<ColumnFloat64>(columnRef))[row],
+                       column_name, is_array, fetch_mode);
         break;
-    }
     case Type::Code::Decimal:
     case Type::Code::Decimal32:
     case Type::Code::Decimal64:
     case Type::Code::Decimal128:
     {
-        auto col = columnRef->As<ColumnDecimal>();
-        if (!col) {
-            throw std::runtime_error("Decimal read: column downcast failed");
-        }
+        auto col = as_or_throw<ColumnDecimal>(columnRef, "Decimal read");
         // Format with the scale point so a value inserted as "12.34" reads
         // back as "12.34", not the unscaled storage integer 1234. The
         // decimal point and any leading-zero padding are inserted in
@@ -2669,11 +2583,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             buf[dot_pos] = '.';
             ++l;
         }
-        if (is_array) {
-            sc_add_next_index_stringl(arr, buf, l, 1);
-        } else {
-            SC_SINGLE_STRING(buf, l);
-        }
+        emitStringCell(arr, buf, l, column_name, is_array, fetch_mode);
         break;
     }
     case Type::Code::Bool:
@@ -2698,14 +2608,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     {
         const ColumnString *s_col = fast_scalar_col<ColumnString>(columnRef);
         auto col = (*s_col)[row];
-        if (is_array)
-        {
-            sc_add_next_index_stringl(arr, col.data(), col.length(), 1);
-        }
-        else
-        {
-            SC_SINGLE_STRING(col.data(), col.length());
-        }
+        emitStringCell(arr, col.data(), col.length(), column_name, is_array, fetch_mode);
         break;
     }
     case Type::Code::JSON:
@@ -2744,19 +2647,12 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             }
             else
             {
-                sc_add_assoc_zval_ex(arr, column_name.c_str(), column_name.length(), &decoded);
+                add_assoc_zval_ex(arr, column_name.c_str(), column_name.length(), &decoded);
             }
         }
         else
         {
-            if (is_array)
-            {
-                sc_add_next_index_stringl(arr, sv.data(), sv.length(), 1);
-            }
-            else
-            {
-                SC_SINGLE_STRING(sv.data(), sv.length());
-            }
+            emitStringCell(arr, sv.data(), sv.length(), column_name, is_array, fetch_mode);
         }
         break;
     }
@@ -2769,10 +2665,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         // is set, in which case return the full declared width verbatim so
         // binary payloads (IPv6, digests, packed structs) that legitimately end
         // in NUL bytes survive the round-trip.
-        auto fs_col = columnRef->As<ColumnFixedString>();
-        if (!fs_col) {
-            throw std::runtime_error("FixedString read: column type mismatch");
-        }
+        auto fs_col = as_or_throw<ColumnFixedString>(columnRef, "FixedString read");
         auto col = (*fs_col)[row];
         size_t len = col.length();
         if (!(fetch_mode & SC_FETCH_FIXEDSTRING_BINARY)) {
@@ -2780,14 +2673,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
                 --len;
             }
         }
-        if (is_array)
-        {
-            sc_add_next_index_stringl(arr, col.data(), len, 1);
-        }
-        else
-        {
-            SC_SINGLE_STRING(col.data(), len);
-        }
+        emitStringCell(arr, col.data(), len, column_name, is_array, fetch_mode);
         break;
     }
     case Type::Code::IPv6:
@@ -2798,39 +2684,25 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
          * canonical "::1" form. */
         auto col_ip = as_or_throw<ColumnIPv6>(columnRef, "IPv6 read");
         std::string s = col_ip->AsString(row);
-        if (is_array)
-        {
-            sc_add_next_index_stringl(arr, s.data(), s.size(), 1);
-        }
-        else
-        {
-            SC_SINGLE_STRING(s.data(), s.size());
-        }
+        emitStringCell(arr, s.data(), s.size(), column_name, is_array, fetch_mode);
         break;
     }
 
     case Type::Code::DateTime:
     {
-        auto col = columnRef->As<ColumnDateTime>();
-        if (!col) {
-            throw std::runtime_error("DateTime read: column type mismatch");
-        }
+        auto col = as_or_throw<ColumnDateTime>(columnRef, "DateTime read");
         emitEpoch(arr, (std::time_t)col->At(row), "%Y-%m-%d %H:%M:%S",
                   column_name, is_array, fetch_mode);
         break;
     }
     case Type::Code::DateTime64:
     {
-        auto col = columnRef->As<ColumnDateTime64>();
-        if (!col) {
-            throw std::runtime_error("DateTime64 read: column type mismatch");
-        }
+        auto col = as_or_throw<ColumnDateTime64>(columnRef, "DateTime64 read");
         size_t precision = type_as_or_throw<DateTime64Type>(columnRef->Type(), "DateTime64")->GetPrecision();
         if (precision > 9) {
             throw std::runtime_error("DateTime64 precision out of spec range (0..9)");
         }
-        int64_t scale = 1;
-        for (size_t i = 0; i < precision; ++i) scale *= 10;
+        int64_t scale = pow10_i64(precision);
         int64_t raw = col->At(row);
         /* Floor division: C++ integer division truncates toward zero, so a
          * pre-epoch raw like -5 (1969-... .5s) would split to whole=0,frac=5
@@ -2855,82 +2727,61 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
                     l += (size_t)written;
                 }
             }
-            if (is_array) {
-                sc_add_next_index_stringl(arr, buffer, l, 1);
-            } else {
-                SC_SINGLE_STRING(buffer, l);
-            }
+            emitStringCell(arr, buffer, l, column_name, is_array, fetch_mode);
         } else {
             if (is_array) {
                 add_next_index_long(arr, (zend_long)raw);
             } else if (fetch_mode & SC_FETCH_ONE) {
                 ZVAL_LONG(arr, (zend_long)raw);
             } else {
-                sc_add_assoc_long_ex(arr, column_name.c_str(), column_name.length(), (zend_long)raw);
+                add_assoc_long_ex(arr, column_name.c_str(), column_name.length(), (zend_long)raw);
             }
         }
         break;
     }
     case Type::Code::Date:
     {
-        auto col = columnRef->As<ColumnDate>();
-        if (!col) {
-            throw std::runtime_error("Date read: column type mismatch");
-        }
+        auto col = as_or_throw<ColumnDate>(columnRef, "Date read");
         emitEpoch(arr, (std::time_t)col->At(row), "%Y-%m-%d",
                   column_name, is_array, fetch_mode);
         break;
     }
     case Type::Code::Date32:
     {
-        auto col = columnRef->As<ColumnDate32>();
-        if (!col) {
-            throw std::runtime_error("Date32 read: column type mismatch");
-        }
+        auto col = as_or_throw<ColumnDate32>(columnRef, "Date32 read");
         emitEpoch(arr, (std::time_t)col->At(row), "%Y-%m-%d",
                   column_name, is_array, fetch_mode);
         break;
     }
     case Type::Code::Time:
     {
-        auto col = columnRef->As<ColumnTime>();
-        if (!col) {
-            throw std::runtime_error("Time read: column type mismatch");
-        }
+        auto col = as_or_throw<ColumnTime>(columnRef, "Time read");
         int32_t v = col->At(row);
         if (fetch_mode & SC_FETCH_DATE_AS_STRINGS) {
             uint32_t abs_v = v < 0 ? uint32_t(0) - uint32_t(v) : uint32_t(v);
             char buffer[16];
             int l = snprintf(buffer, sizeof(buffer), "%s%02" PRIu32 ":%02" PRIu32 ":%02" PRIu32,
                              v < 0 ? "-" : "", abs_v / 3600, (abs_v / 60) % 60, abs_v % 60);
-            if (is_array) {
-                sc_add_next_index_stringl(arr, buffer, l, 1);
-            } else {
-                SC_SINGLE_STRING(buffer, l);
-            }
+            emitStringCell(arr, buffer, l, column_name, is_array, fetch_mode);
         } else {
             if (is_array) {
                 add_next_index_long(arr, (zend_long)v);
             } else if (fetch_mode & SC_FETCH_ONE) {
                 ZVAL_LONG(arr, (zend_long)v);
             } else {
-                sc_add_assoc_long_ex(arr, column_name.c_str(), column_name.length(), (zend_long)v);
+                add_assoc_long_ex(arr, column_name.c_str(), column_name.length(), (zend_long)v);
             }
         }
         break;
     }
     case Type::Code::Time64:
     {
-        auto col = columnRef->As<ColumnTime64>();
-        if (!col) {
-            throw std::runtime_error("Time64 read: column type mismatch");
-        }
+        auto col = as_or_throw<ColumnTime64>(columnRef, "Time64 read");
         size_t precision = type_as_or_throw<Time64Type>(columnRef->Type(), "Time64")->GetPrecision();
         if (precision > 9) {
             throw std::runtime_error("Time64 precision out of spec range (0..9)");
         }
-        int64_t scale = 1;
-        for (size_t i = 0; i < precision; ++i) scale *= 10;
+        int64_t scale = pow10_i64(precision);
         int64_t raw = col->At(row);
         if (fetch_mode & SC_FETCH_DATE_AS_STRINGS) {
             /* Time64 is a signed sign-magnitude duration. Take the sign from
@@ -2953,58 +2804,37 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
                                  (int)precision, frac);
                 if (w > 0 && (size_t)w < sizeof(buffer) - (size_t)l) l += w;
             }
-            if (is_array) {
-                sc_add_next_index_stringl(arr, buffer, l, 1);
-            } else {
-                SC_SINGLE_STRING(buffer, l);
-            }
+            emitStringCell(arr, buffer, l, column_name, is_array, fetch_mode);
         } else {
             if (is_array) {
                 add_next_index_long(arr, (zend_long)raw);
             } else if (fetch_mode & SC_FETCH_ONE) {
                 ZVAL_LONG(arr, (zend_long)raw);
             } else {
-                sc_add_assoc_long_ex(arr, column_name.c_str(), column_name.length(), (zend_long)raw);
+                add_assoc_long_ex(arr, column_name.c_str(), column_name.length(), (zend_long)raw);
             }
         }
         break;
     }
     case Type::Code::Int128:
     {
-        auto col = columnRef->As<ColumnInt128>();
-        if (!col) {
-            throw std::runtime_error("Int128 read: column type mismatch");
-        }
+        auto col = as_or_throw<ColumnInt128>(columnRef, "Int128 read");
         char buf[41];
         size_t l = format_int128_dec(col->At(row), buf);
-        if (is_array) {
-            sc_add_next_index_stringl(arr, buf, l, 1);
-        } else {
-            SC_SINGLE_STRING(buf, l);
-        }
+        emitStringCell(arr, buf, l, column_name, is_array, fetch_mode);
         break;
     }
     case Type::Code::UInt128:
     {
-        auto col = columnRef->As<ColumnUInt128>();
-        if (!col) {
-            throw std::runtime_error("UInt128 read: column type mismatch");
-        }
+        auto col = as_or_throw<ColumnUInt128>(columnRef, "UInt128 read");
         char buf[40];
         size_t l = format_uint128_dec(col->At(row), buf);
-        if (is_array) {
-            sc_add_next_index_stringl(arr, buf, l, 1);
-        } else {
-            SC_SINGLE_STRING(buf, l);
-        }
+        emitStringCell(arr, buf, l, column_name, is_array, fetch_mode);
         break;
     }
     case Type::Code::Array:
     {
-        auto array = columnRef->As<ColumnArray>();
-        if (!array) {
-            throw std::runtime_error("Array read: column type mismatch");
-        }
+        auto array = as_or_throw<ColumnArray>(columnRef, "Array read");
         auto col = array->GetAsColumn(row);
         /* Forward only the value-shaping flags (DATE_AS_STRINGS,
          * UUID_WITH_DASHES, FIXEDSTRING_BINARY, JSON_AS_*) into nested
@@ -3039,53 +2869,22 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             }
             else
             {
-                sc_add_assoc_zval_ex(arr, column_name.c_str(), column_name.length(), return_tmp);
+                add_assoc_zval_ex(arr, column_name.c_str(), column_name.length(), return_tmp);
             }
         }
         break;
     }
 
     case Type::Code::Enum8:
-    {
-        auto array = columnRef->As<ColumnEnum8>();
-        if (!array) {
-            throw std::runtime_error("Enum8 read: column type mismatch");
-        }
-        std::string_view name = array->NameAt(row);
-        if (is_array)
-        {
-            sc_add_next_index_stringl(arr, name.data(), name.length(), 1);
-        }
-        else
-        {
-            SC_SINGLE_STRING(name.data(), name.length());
-        }
+        emitEnumColumn<ColumnEnum8>(arr, columnRef, row, column_name, is_array, fetch_mode, "Enum8 read");
         break;
-    }
     case Type::Code::Enum16:
-    {
-        auto array = columnRef->As<ColumnEnum16>();
-        if (!array) {
-            throw std::runtime_error("Enum16 read: column type mismatch");
-        }
-        std::string_view name = array->NameAt(row);
-        if (is_array)
-        {
-            sc_add_next_index_stringl(arr, name.data(), name.length(), 1);
-        }
-        else
-        {
-            SC_SINGLE_STRING(name.data(), name.length());
-        }
+        emitEnumColumn<ColumnEnum16>(arr, columnRef, row, column_name, is_array, fetch_mode, "Enum16 read");
         break;
-    }
 
     case Type::Code::Nullable:
     {
-        auto nullable = columnRef->As<ColumnNullable>();
-        if (!nullable) {
-            throw std::runtime_error("Nullable read: column type mismatch");
-        }
+        auto nullable = as_or_throw<ColumnNullable>(columnRef, "Nullable read");
         if (nullable->IsNull(row))
         {
             if (is_array)
@@ -3097,7 +2896,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
                 if (fetch_mode & SC_FETCH_ONE) {
                     ZVAL_NULL(arr);
                 } else {
-                    sc_add_assoc_null_ex(arr, column_name.c_str(), column_name.length());
+                    add_assoc_null_ex(arr, column_name.c_str(), column_name.length());
                 }
             }
         }
@@ -3110,10 +2909,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
 
     case Type::Code::Tuple:
     {
-        auto tuple = columnRef->As<ColumnTuple>();
-        if (!tuple) {
-            throw std::runtime_error("Tuple read: column type mismatch");
-        }
+        auto tuple = as_or_throw<ColumnTuple>(columnRef, "Tuple read");
         long nested_mode = fetch_mode & SC_FETCH_VALUE_FLAGS;
         if (fetch_mode & SC_FETCH_ONE) {
             array_init_size(arr, (uint32_t)tuple->TupleSize());
@@ -3141,7 +2937,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             }
             else
             {
-                sc_add_assoc_zval_ex(arr, column_name.c_str(), column_name.length(), return_tmp);
+                add_assoc_zval_ex(arr, column_name.c_str(), column_name.length(), return_tmp);
             }
         }
         break;
@@ -3174,7 +2970,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             } else if (fetch_mode & SC_FETCH_ONE) {
                 ZVAL_NULL(arr);
             } else {
-                sc_add_assoc_null_ex(arr, column_name.c_str(), column_name.length());
+                add_assoc_null_ex(arr, column_name.c_str(), column_name.length());
             }
             break;
         }
@@ -3192,11 +2988,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             }
             sv = std::string_view(sv.data(), len);
         }
-        if (is_array) {
-            sc_add_next_index_stringl(arr, sv.data(), sv.length(), 1);
-        } else {
-            SC_SINGLE_STRING(sv.data(), sv.length());
-        }
+        emitStringCell(arr, sv.data(), sv.length(), column_name, is_array, fetch_mode);
         break;
     }
 
@@ -3211,10 +3003,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         TypeRef value_type_ref = map_type_ref->GetValueType();
         Type::Code key_code = key_type_ref->GetCode();
         Type::Code value_code = value_type_ref->GetCode();
-        auto map_col = columnRef->As<ColumnMap>();
-        if (!map_col) {
-            throw std::runtime_error("Map read: column type mismatch");
-        }
+        auto map_col = as_or_throw<ColumnMap>(columnRef, "Map read");
         ColumnRef tuple_col = map_col->GetAsColumn(row);
         auto tup = tuple_col->As<ColumnTuple>();
         if (!tup) {
@@ -3376,14 +3165,14 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         auto addStrL = [&](int kkind, const std::string &sb, zend_long lk, double dk,
                            const char *vptr, size_t vlen) {
             if (kkind == 0) {
-                sc_add_assoc_stringl_ex(map_zv, sb.c_str(), sb.length(), vptr, vlen, 1);
+                add_assoc_stringl_ex(map_zv, sb.c_str(), sb.length(), vptr, vlen);
             } else if (kkind == 1) {
                 add_index_stringl(map_zv, lk, vptr, vlen);
             } else {
                 char kbuf[64];
                 int klen = fmtFloatKey(dk, kbuf, sizeof(kbuf));
                 std::string key(kbuf, klen);
-                sc_add_assoc_stringl_ex(map_zv, key.c_str(), key.length(), vptr, vlen, 1);
+                add_assoc_stringl_ex(map_zv, key.c_str(), key.length(), vptr, vlen);
             }
         };
         auto addLong = [&](int kkind, const std::string &sb, zend_long lk, double dk, zend_long lv) {
@@ -3475,7 +3264,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             ZVAL_COPY_VALUE(arr, map_zv);
             ZVAL_UNDEF(map_zv);
         } else {
-            sc_add_assoc_zval_ex(arr, column_name.c_str(), column_name.length(), map_zv);
+            add_assoc_zval_ex(arr, column_name.c_str(), column_name.length(), map_zv);
             ZVAL_UNDEF(map_zv);
         }
         break;

@@ -16,19 +16,7 @@
   +----------------------------------------------------------------------+
 */
 
-#define sc_zend_throw_exception_tsrmls_cc(a, b, c) zend_throw_exception(a, b, c)
-
-#define sc_zend_hash_index_update   zend_hash_index_update
-#define sc_zend_hash_find   zend_hash_str_find
-#define sc_zend_hash_index_find   zend_hash_index_find
 #define SC_MAKE_STD_ZVAL(p)             zval _stack_zval_##p; p = &(_stack_zval_##p)
-#define sc_zval_ptr_dtor(p)  zval_ptr_dtor(*p)
-#define sc_zval_add_ref(p)   Z_TRY_ADDREF_P(p)
-#define sc_add_assoc_long_ex                  add_assoc_long_ex
-#define sc_add_assoc_double_ex                add_assoc_double_ex
-#define sc_add_assoc_zval_ex                  add_assoc_zval_ex
-#define sc_add_assoc_stringl_ex(a, b, c, d, e, f)               add_assoc_stringl_ex(a, b, c, d, e)
-#define sc_add_assoc_null_ex(a, b, c)               add_assoc_null_ex(a, b, c)
 
 /*
  * rv must be a caller-owned zval that outlives the use of the returned
@@ -43,15 +31,6 @@ static inline zval* sc_zend_read_property(zend_class_entry *class_ptr, zval *obj
     return zend_read_property(class_ptr, obj, s, len, silent, rv);
 #else
     return zend_read_property(class_ptr, Z_OBJ_P(obj), s, len, silent, rv);
-#endif
-}
-
-static inline void sc_zend_update_property_string(zend_class_entry *scope, zval *object, const char *name, size_t name_length, const char *value)
-{
-#if PHP_VERSION_ID < 80000
-    zend_update_property_string(scope, object, name, name_length, value);
-#else
-    zend_update_property_string(scope, Z_OBJ_P(object), name, name_length, value);
 #endif
 }
 
@@ -73,25 +52,12 @@ static inline void sc_zend_update_property_stringl(zend_class_entry *scope, zval
 #endif
 }
 
-#define sc_add_next_index_stringl(arr, str, len, dup)    add_next_index_stringl(arr, str, len)
-
-static inline int sc_zend_hash_get_current_data(HashTable *ht, void **v)
-{
-    zval *value = zend_hash_get_current_data(ht);
-    if (value == NULL)
-    {
-        return FAILURE;
-    }
-    *v = (void *) value;
-    return SUCCESS;
-}
-
 /* Deref the found value so callers branching on Z_TYPE_P(v) see the real
  * type rather than IS_REFERENCE (a by-ref config value, e.g.
  * ['compression' => &$x], would otherwise fall through type checks). The
  * conditional-assignment keeps it a single expression usable in `if`. */
 #define php_array_get_value(ht, str, v) \
-    (((v = sc_zend_hash_find(ht, (char *)str, sizeof(str)-1)) != NULL) \
+    (((v = zend_hash_str_find(ht, (char *)str, sizeof(str)-1)) != NULL) \
      && ((v = (Z_ISREF_P(v) ? Z_REFVAL_P(v) : v)), !ZVAL_IS_NULL(v)))
 
 /* FAST_ZPP _OR_NULL convenience macros are PHP 8.0+. Shim for 7.4 with
@@ -99,12 +65,6 @@ static inline int sc_zend_hash_get_current_data(HashTable *ht, void **v)
 #if PHP_VERSION_ID < 80000
 #  ifndef Z_PARAM_STR_OR_NULL
 #    define Z_PARAM_STR_OR_NULL(dest)   Z_PARAM_STR_EX(dest, 1, 0)
-#  endif
-#  ifndef Z_PARAM_ARRAY_OR_NULL
-#    define Z_PARAM_ARRAY_OR_NULL(dest) Z_PARAM_ARRAY_EX(dest, 1, 0)
-#  endif
-#  ifndef Z_PARAM_ZVAL_OR_NULL
-#    define Z_PARAM_ZVAL_OR_NULL(dest)  Z_PARAM_ZVAL_EX(dest, 1, 0)
 #  endif
 #endif
 

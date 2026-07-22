@@ -631,7 +631,7 @@ PHP_METHOD(ClickHouse, __construct)
      * it) used to overwrite host/port/database/user/compression and only then
      * throw, leaving the live object's config mutated but its client stale. */
     if (Z_CLICKHOUSE_P(this_obj)->client) {
-        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+        zend_throw_exception(clickhouse_exception_ce,
             "ClickHouse object is already constructed", 0);
         return;
     }
@@ -658,7 +658,7 @@ PHP_METHOD(ClickHouse, __construct)
     {
         zend_long _p = zval_get_long(value);
         if (_p < 1 || _p > 65535) {
-            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+            zend_throw_exception(clickhouse_exception_ce,
                 "port out of 1..65535 range", 0);
             return;
         }
@@ -674,7 +674,7 @@ PHP_METHOD(ClickHouse, __construct)
             else if (strcasecmp(s, "zstd") == 0)  cv = 2;
             else if (strcasecmp(s, "none") == 0)  cv = 0;
             else {
-                sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                zend_throw_exception(clickhouse_exception_ce,
                     "Unknown compression name; expected 'lz4', 'zstd', 'none', true, or false", 0);
                 return;
             }
@@ -690,14 +690,14 @@ PHP_METHOD(ClickHouse, __construct)
      * SetSendRetries / SetTcpKeepAlive*; reject up front. */
     /* php_array_get_value is a string-literal-only macro (it uses
      * sizeof(str)-1 for the key length) so it can't be passed a const
-     * char* runtime key. The lambda goes through sc_zend_hash_find. */
+     * char* runtime key. The lambda goes through zend_hash_str_find. */
     auto load_bounded_nonneg_long = [&](const char *key, zend_long max, zend_long &out) -> bool {
-        zval *v = sc_zend_hash_find(_ht, (char*)key, strlen(key));
+        zval *v = zend_hash_str_find(_ht, (char*)key, strlen(key));
         if (!v || ZVAL_IS_NULL(v)) return false;
         zend_long n = zval_get_long(v);
         if (n < 0 || n > max) {
             std::string msg = std::string(key) + " out of range";
-            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, msg.c_str(), 0);
+            zend_throw_exception(clickhouse_exception_ce, msg.c_str(), 0);
             return false; // caller checks EG(exception)
         }
         out = n;
@@ -763,7 +763,7 @@ PHP_METHOD(ClickHouse, __construct)
         if (php_array_get_value(_ht, "send_timeout", value)) {
             zend_long n = zval_get_long(value);
             if (n < 0 || n > (zend_long)(UINT_MAX / 1000U)) {
-                sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                zend_throw_exception(clickhouse_exception_ce,
                     "send_timeout out of range", 0);
                 return;
             }
@@ -774,12 +774,12 @@ PHP_METHOD(ClickHouse, __construct)
         auto apply_timeout_ms = [&](const char *key,
                                      zend_long max,
                                      ClientOptions& (ClientOptions::*setter)(const std::chrono::milliseconds&)) -> bool {
-            zval *v = sc_zend_hash_find(_ht, (char*)key, strlen(key));
+            zval *v = zend_hash_str_find(_ht, (char*)key, strlen(key));
             if (!v || ZVAL_IS_NULL(v)) return true;
             zend_long n = zval_get_long(v);
             if (n < 0 || n > max) {
                 std::string msg = std::string(key) + " out of range";
-                sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, msg.c_str(), 0);
+                zend_throw_exception(clickhouse_exception_ce, msg.c_str(), 0);
                 return false;
             }
             Options = (Options.*setter)(std::chrono::milliseconds(n));
@@ -800,7 +800,7 @@ PHP_METHOD(ClickHouse, __construct)
         if (php_array_get_value(_ht, "tcp_keepalive_idle", value)) {
             zend_long n = zval_get_long(value);
             if (n < 0 || n > INT_MAX) {
-                sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                zend_throw_exception(clickhouse_exception_ce,
                     "tcp_keepalive_idle out of range", 0);
                 return;
             }
@@ -809,7 +809,7 @@ PHP_METHOD(ClickHouse, __construct)
         if (php_array_get_value(_ht, "tcp_keepalive_intvl", value)) {
             zend_long n = zval_get_long(value);
             if (n < 0 || n > INT_MAX) {
-                sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                zend_throw_exception(clickhouse_exception_ce,
                     "tcp_keepalive_intvl out of range", 0);
                 return;
             }
@@ -818,7 +818,7 @@ PHP_METHOD(ClickHouse, __construct)
         if (php_array_get_value(_ht, "tcp_keepalive_cnt", value)) {
             zend_long n = zval_get_long(value);
             if (n < 0 || n > INT_MAX) {
-                sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                zend_throw_exception(clickhouse_exception_ce,
                     "tcp_keepalive_cnt out of range", 0);
                 return;
             }
@@ -827,7 +827,7 @@ PHP_METHOD(ClickHouse, __construct)
         if (php_array_get_value(_ht, "max_compression_chunk_size", value)) {
             zend_long n = zval_get_long(value);
             if (n < 0 || n > INT_MAX) {
-                sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                zend_throw_exception(clickhouse_exception_ce,
                     "max_compression_chunk_size out of range", 0);
                 return;
             }
@@ -860,7 +860,7 @@ PHP_METHOD(ClickHouse, __construct)
                     }
                 }
                 if (ver == 0) {
-                    sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                    zend_throw_exception(clickhouse_exception_ce,
                         "ssl_min_protocol_version must be one of tls1.0, tls1.1, tls1.2, tls1.3", 0);
                     return;
                 }
@@ -895,7 +895,7 @@ PHP_METHOD(ClickHouse, __construct)
     #else
         if (php_array_get_value(_ht, "ssl", value)) {
             if (zend_is_true(value)) {
-                sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                zend_throw_exception(clickhouse_exception_ce,
                     "php_clickhouse was built without TLS support. Reconfigure with --enable-clickhouse-openssl",
                     0);
                 return;
@@ -910,7 +910,7 @@ PHP_METHOD(ClickHouse, __construct)
              * ('hosts' => ...) connected to localhost instead of the intended
              * cluster with no diagnostic. Validate strictly to match. */
             if (Z_TYPE_P(value) != IS_ARRAY) {
-                sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                zend_throw_exception(clickhouse_exception_ce,
                     "endpoints must be a list of [host, port] arrays", 0);
                 return;
             }
@@ -920,17 +920,17 @@ PHP_METHOD(ClickHouse, __construct)
             ZEND_HASH_FOREACH_VAL(eps_ht, ep_zv) {
                 ZVAL_DEREF(ep_zv);
                 if (Z_TYPE_P(ep_zv) != IS_ARRAY) {
-                    sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                    zend_throw_exception(clickhouse_exception_ce,
                         "each endpoints entry must be an array with a 'host' key", 0);
                     return;
                 }
                 HashTable *eh = Z_ARRVAL_P(ep_zv);
-                zval *hz = sc_zend_hash_find(eh, (char*)"host", 4);
-                zval *pz = sc_zend_hash_find(eh, (char*)"port", 4);
+                zval *hz = zend_hash_str_find(eh, (char*)"host", 4);
+                zval *pz = zend_hash_str_find(eh, (char*)"port", 4);
                 if (hz) ZVAL_DEREF(hz);
                 if (pz) ZVAL_DEREF(pz);
                 if (!hz || Z_TYPE_P(hz) == IS_NULL) {
-                    sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                    zend_throw_exception(clickhouse_exception_ce,
                         "each endpoints entry requires a non-null 'host'", 0);
                     return;
                 }
@@ -944,7 +944,7 @@ PHP_METHOD(ClickHouse, __construct)
                 if (port_hold.get()) {
                     zend_long p = zval_get_long(port_hold.get());
                     if (p < 1 || p > 65535) {
-                        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                        zend_throw_exception(clickhouse_exception_ce,
                             "Endpoint port out of 1..65535 range", 0);
                         return;
                     }
@@ -953,7 +953,7 @@ PHP_METHOD(ClickHouse, __construct)
                 eps.push_back(std::move(e));
             } ZEND_HASH_FOREACH_END();
             if (eps.empty()) {
-                sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                zend_throw_exception(clickhouse_exception_ce,
                     "endpoints was provided but contained no usable entries", 0);
                 return;
             }
@@ -1247,7 +1247,7 @@ static void validateMetadataFilterName(const std::string &s, const char *what)
 }
 
 /*
- * Central thrower. Replaces every catch-block sc_zend_throw call so the
+ * Central thrower. Replaces every catch-block zend_throw_exception call so the
  * server fields land on the exception in one place. ServerException is
  * the only branch that knows the server's error code and name; every
  * other exception (network, validation, ours) leaves the structured
@@ -2339,7 +2339,7 @@ static void do_select_into(zval *out, zval *this_obj,
                         throw std::runtime_error("Key pair mode requires a scalar key column");
                     }
                     if (Z_TYPE(kp_col1) == IS_LONG) {
-                         sc_zend_hash_index_update(Z_ARRVAL_P(out), Z_LVAL(kp_col1), &kp_col2);
+                         zend_hash_index_update(Z_ARRVAL_P(out), Z_LVAL(kp_col1), &kp_col2);
                     } else {
                         /* zval_get_string is the modern non-mutating
                          * coercion (matches the post-CR-312 fetchKeyPair
@@ -2381,7 +2381,7 @@ static void do_select_into(zval *out, zval *this_obj,
 
                                 zval assoc_cell;
                                 ZVAL_COPY(&assoc_cell, &cell);
-                                sc_add_assoc_zval_ex(&row_tmp,
+                                add_assoc_zval_ex(&row_tmp,
                                     col_names[column].c_str(),
                                     col_names[column].length(),
                                     &assoc_cell);
@@ -2514,6 +2514,9 @@ static void validateRowShapes(HashTable *values_ht, size_t columns_count);
 static void buildSingleColumnZval(HashTable *values_ht, size_t column_index,
                                   const std::vector<zend_string*> *column_names,
                                   zval *out);
+static ColumnRef buildColumnFromRows(HashTable *rows_ht, size_t col_index,
+                                     const std::vector<zend_string*> *col_names,
+                                     TypeRef type);
 
 /*
  * Build a clickhouse-cpp Block from a single external-table entry of the
@@ -2534,9 +2537,9 @@ static Block buildExternalTableBlock(zval *entry, std::string &name_out)
     }
     HashTable *ht = Z_ARRVAL_P(entry);
 
-    zval *name_zv    = sc_zend_hash_find(ht, "name", sizeof("name") - 1);
-    zval *columns_zv = sc_zend_hash_find(ht, "columns", sizeof("columns") - 1);
-    zval *rows_zv    = sc_zend_hash_find(ht, "rows", sizeof("rows") - 1);
+    zval *name_zv    = zend_hash_str_find(ht, "name", sizeof("name") - 1);
+    zval *columns_zv = zend_hash_str_find(ht, "columns", sizeof("columns") - 1);
+    zval *rows_zv    = zend_hash_str_find(ht, "rows", sizeof("rows") - 1);
     if (name_zv)    ZVAL_DEREF(name_zv);
     if (columns_zv) ZVAL_DEREF(columns_zv);
     if (rows_zv)    ZVAL_DEREF(rows_zv);
@@ -2632,24 +2635,8 @@ static Block buildExternalTableBlock(zval *entry, std::string &name_out)
 
     Block block;
     for (size_t c = 0; c < columns_count; ++c) {
-        /* Fused fast path for reentrancy-free numeric columns; same as the
-         * insert() path. */
-        ColumnRef fused = tryBuildScalarColumnFromRows(rows_ht, c, &col_names_zs, col_types[c]);
-        if (fused) {
-            block.AppendColumn(col_names[c], fused);
-            continue;
-        }
-        zval inner;
-        buildSingleColumnZval(rows_ht, c, &col_names_zs, &inner);
-        ColumnRef column;
-        try {
-            column = insertColumn(col_types[c], &inner);
-        } catch (...) {
-            zval_ptr_dtor(&inner);
-            throw;
-        }
-        zval_ptr_dtor(&inner);
-        block.AppendColumn(col_names[c], column);
+        block.AppendColumn(col_names[c],
+            buildColumnFromRows(rows_ht, c, &col_names_zs, col_types[c]));
     }
     return block;
 }
@@ -2693,7 +2680,7 @@ PHP_METHOD(ClickHouse, selectWithExternalData)
     HashTable *externals_ht = Z_ARRVAL_P(externals);
     size_t externals_count = zend_hash_num_elements(externals_ht);
     if (externals_count == 0) {
-        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+        zend_throw_exception(clickhouse_exception_ce,
             "selectWithExternalData requires at least one external table; "
             "use select() when no external data is needed", 0);
         return;
@@ -3086,7 +3073,7 @@ PHP_METHOD(ClickHouse, selectToStream)
     StreamFormat fmt = StreamFormat::TSV;
     if (format_s) {
         if (!parseStreamFormat(ZSTR_VAL(format_s), ZSTR_LEN(format_s), fmt)) {
-            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+            zend_throw_exception(clickhouse_exception_ce,
                 "selectToStream: unknown format; expected TabSeparated, "
                 "TabSeparatedWithNames, CSV, or CSVWithNames", 0);
             return;
@@ -3096,7 +3083,7 @@ PHP_METHOD(ClickHouse, selectToStream)
     php_stream *stream = NULL;
     php_stream_from_zval_no_verify(stream, stream_zv);
     if (!stream) {
-        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+        zend_throw_exception(clickhouse_exception_ce,
             "selectToStream: argument 3 must be an open stream resource", 0);
         return;
     }
@@ -3213,12 +3200,35 @@ static void buildSingleColumnZval(HashTable *values_ht, size_t column_index,
              * row can be reassigned to a non-array mid-iteration), positional
              * lookup with column-name fallback, cell deref. */
             zval *fzval = extractRowCell(pzval, column_index, column_names);
-            sc_zval_add_ref(fzval);
+            Z_TRY_ADDREF_P(fzval);
             add_next_index_zval(out, fzval);
         } ZEND_HASH_FOREACH_END();
     } catch (...) {
         zval_ptr_dtor(out);
         ZVAL_UNDEF(out);
+        throw;
+    }
+}
+
+/* Fused scalar path, else transpose one column and insertColumn. Shared by
+ * insert(), write(), and external-table block build so the three paths cannot
+ * drift. */
+static ColumnRef buildColumnFromRows(HashTable *rows_ht, size_t col_index,
+                                     const std::vector<zend_string*> *col_names,
+                                     TypeRef type)
+{
+    ColumnRef fused = tryBuildScalarColumnFromRows(rows_ht, col_index, col_names, type);
+    if (fused) {
+        return fused;
+    }
+    zval inner;
+    buildSingleColumnZval(rows_ht, col_index, col_names, &inner);
+    try {
+        ColumnRef column = insertColumn(type, &inner);
+        zval_ptr_dtor(&inner);
+        return column;
+    } catch (...) {
+        zval_ptr_dtor(&inner);
         throw;
     }
 }
@@ -3332,23 +3342,10 @@ static void do_insert_into(zval *this_obj, zend_string *table,
              * column-by-column keeps peak intermediate memory at one
              * column. */
             for (size_t index = 0; index < columns_count; ++index) {
-                /* Fused fast path: reentrancy-free numeric columns build
-                 * straight from the row-major input, skipping the transpose. */
-                ColumnRef fused = tryBuildScalarColumnFromRows(
-                    values_ht, index, &column_names, blockQuery[index]->Type());
-                if (fused) {
-                    blockInsert.AppendColumn(blockQuery.GetColumnName(index), fused);
-                    continue;
-                }
-                zval inner;
-                buildSingleColumnZval(values_ht, index, &column_names, &inner);
-                try {
-                    zvalToBlock(blockInsert, blockQuery, index, &inner);
-                } catch (...) {
-                    zval_ptr_dtor(&inner);
-                    throw;
-                }
-                zval_ptr_dtor(&inner);
+                blockInsert.AppendColumn(
+                    blockQuery.GetColumnName(index),
+                    buildColumnFromRows(values_ht, index, &column_names,
+                                        blockQuery[index]->Type()));
             }
 
             /* Mark the wire dirty before SendInsertBlock so a throw
@@ -3866,7 +3863,7 @@ PHP_METHOD(ClickHouse, insertFromStream)
     StreamFormat fmt = StreamFormat::TSV;
     if (format_s) {
         if (!parseStreamFormat(ZSTR_VAL(format_s), ZSTR_LEN(format_s), fmt)) {
-            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+            zend_throw_exception(clickhouse_exception_ce,
                 "insertFromStream: unknown format; expected TabSeparated, "
                 "TabSeparatedWithNames, CSV, or CSVWithNames", 0);
             return;
@@ -3874,7 +3871,7 @@ PHP_METHOD(ClickHouse, insertFromStream)
     }
 
     if (batch_rows < 1) {
-        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+        zend_throw_exception(clickhouse_exception_ce,
             "insertFromStream: batch_rows must be >= 1", 0);
         return;
     }
@@ -3885,7 +3882,7 @@ PHP_METHOD(ClickHouse, insertFromStream)
      * the limit is far above any batching sweet spot (10k-100k). */
     const zend_long MAX_BATCH_ROWS = 10000000; /* 10M rows */
     if (batch_rows > MAX_BATCH_ROWS) {
-        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+        zend_throw_exception(clickhouse_exception_ce,
             "insertFromStream: batch_rows exceeds the maximum of 10000000 "
             "(a larger value would buffer the whole stream in memory, "
             "defeating batching)", 0);
@@ -3895,7 +3892,7 @@ PHP_METHOD(ClickHouse, insertFromStream)
     php_stream *stream = NULL;
     php_stream_from_zval_no_verify(stream, stream_zv);
     if (!stream) {
-        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+        zend_throw_exception(clickhouse_exception_ce,
             "insertFromStream: argument 3 must be an open stream resource", 0);
         return;
     }
@@ -3903,7 +3900,7 @@ PHP_METHOD(ClickHouse, insertFromStream)
     HashTable *columns_ht = Z_ARRVAL_P(columns);
     size_t columns_count = zend_hash_num_elements(columns_ht);
     if (columns_count == 0) {
-        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+        zend_throw_exception(clickhouse_exception_ce,
             "insertFromStream: columns list cannot be empty", 0);
         return;
     }
@@ -4242,23 +4239,11 @@ PHP_METHOD(ClickHouse, write)
 
         Block blockInsert;
         for (size_t index = 0; index < columns_count; ++index) {
-            /* Fused fast path for reentrancy-free numeric columns (positional
-             * only here; streaming write() has no column-name fallback). */
-            ColumnRef fused = tryBuildScalarColumnFromRows(
-                values_ht, index, NULL, blockQuery[index]->Type());
-            if (fused) {
-                blockInsert.AppendColumn(blockQuery.GetColumnName(index), fused);
-                continue;
-            }
-            zval inner;
-            buildSingleColumnZval(values_ht, index, NULL, &inner);
-            try {
-                zvalToBlock(blockInsert, blockQuery, index, &inner);
-            } catch (...) {
-                zval_ptr_dtor(&inner);
-                throw;
-            }
-            zval_ptr_dtor(&inner);
+            /* Positional only: streaming write() has no column-name fallback. */
+            blockInsert.AppendColumn(
+                blockQuery.GetColumnName(index),
+                buildColumnFromRows(values_ht, index, NULL,
+                                    blockQuery[index]->Type()));
         }
 
         /* Mark the wire dirty immediately before SendInsertBlock. If the
@@ -4517,12 +4502,12 @@ PHP_METHOD(ClickHouse, setSettings)
         ZEND_HASH_FOREACH_KEY_VAL(ht, nk, zk, vz) {
             (void)nk;
             if (!zk) {
-                sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                zend_throw_exception(clickhouse_exception_ce,
                     "setting keys must be strings", 0);
                 return;
             }
             if (ZSTR_LEN(zk) == 0) {
-                sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+                zend_throw_exception(clickhouse_exception_ce,
                     "setting key must not be empty", 0);
                 return;
             }
@@ -4551,7 +4536,7 @@ PHP_METHOD(ClickHouse, setSetting)
         Z_PARAM_ZVAL(value)
     ZEND_PARSE_PARAMETERS_END();
     if (ZSTR_LEN(key) == 0) {
-        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+        zend_throw_exception(clickhouse_exception_ce,
             "setting key must not be empty", 0);
         return;
     }
@@ -4639,7 +4624,7 @@ static bool setCallbackField(zval *target, zval *cb, const char *err_name)
     bool clear_only = Z_TYPE_P(cb) == IS_NULL;
     if (!clear_only && !zend_is_callable(cb, 0, NULL)) {
         std::string msg = std::string(err_name) + " expects a callable or null";
-        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce, msg.c_str(), 0);
+        zend_throw_exception(clickhouse_exception_ce, msg.c_str(), 0);
         return false;
     }
     if (Z_TYPE(*target) != IS_UNDEF) {
@@ -4714,7 +4699,7 @@ PHP_METHOD(ClickHouse, setVerbose)
     } else if (zend_is_callable(sink, 0, NULL)) {
         new_callback = true;
     } else {
-        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+        zend_throw_exception(clickhouse_exception_ce,
             "setVerbose expects bool, null, or callable", 0);
         return;
     }
@@ -5340,7 +5325,7 @@ PHP_METHOD(ClickHouse, selectStreamCallback)
     ZEND_PARSE_PARAMETERS_END();
 
     if (!zend_is_callable(cb, 0, NULL)) {
-        sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+        zend_throw_exception(clickhouse_exception_ce,
             "Argument 2 passed to selectStreamCallback must be callable", 0);
         return;
     }
@@ -5739,24 +5724,14 @@ PHP_METHOD(ClickHouse, dropPartition)
     for (size_t i = 0; i < ZSTR_LEN(part); ++i) {
         unsigned char c = (unsigned char)ZSTR_VAL(part)[i];
         if (c < 0x20) {
-            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+            zend_throw_exception(clickhouse_exception_ce,
                 "dropPartition: partition value contains a control character", 0);
             return;
         }
     }
-    /* ClickHouse accepts both SQL-standard '' and C-style \' as escapes inside
-     * single-quoted literals; backslash must be escaped too or '\'' would be
-     * parsed as an escaped quote followed by a closing quote. */
-    std::string escaped;
-    escaped.reserve(ZSTR_LEN(part) + 8);
-    for (size_t i = 0; i < ZSTR_LEN(part); ++i) {
-        char c = ZSTR_VAL(part)[i];
-        if (c == '\'')      escaped += "\\'";
-        else if (c == '\\') escaped += "\\\\";
-        else                escaped += c;
-    }
+    std::string part_str(ZSTR_VAL(part), ZSTR_LEN(part));
     std::string sql = "ALTER TABLE " + std::string(ZSTR_VAL(table), ZSTR_LEN(table)) +
-        " DROP PARTITION '" + escaped + "'";
+        " DROP PARTITION " + sqlStringLiteral(part_str);
     RETURN_BOOL(runHelperExec(getThis(), sql));
 }
 /* }}} */
@@ -5830,7 +5805,7 @@ PHP_METHOD(ClickHouseException, getQueryId)
  */
 PHP_METHOD(ClickHouseStatement, __construct)
 {
-    sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+    zend_throw_exception(clickhouse_exception_ce,
         "ClickHouseStatement is constructed by ClickHouse::selectStatement(); the constructor is private",
         0);
     return;
@@ -5951,13 +5926,13 @@ PHP_METHOD(ClickHouseStatement, offsetGet)
 
 PHP_METHOD(ClickHouseStatement, offsetSet)
 {
-    sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+    zend_throw_exception(clickhouse_exception_ce,
         "ClickHouseStatement is read-only; offsetSet is not supported", 0);
 }
 
 PHP_METHOD(ClickHouseStatement, offsetUnset)
 {
-    sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+    zend_throw_exception(clickhouse_exception_ce,
         "ClickHouseStatement is read-only; offsetUnset is not supported", 0);
 }
 
@@ -6053,7 +6028,7 @@ PHP_METHOD(ClickHouseStatement, fetchKeyPair)
     zval *row;
     ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(source_rows), row) {
         if (Z_TYPE_P(row) != IS_ARRAY || zend_hash_num_elements(Z_ARRVAL_P(row)) < 2) {
-            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+            zend_throw_exception(clickhouse_exception_ce,
                 "fetchKeyPair requires each row to have at least 2 columns", 0);
             zend_array_destroy(Z_ARR_P(return_value));
             ZVAL_UNDEF(return_value);
@@ -6071,7 +6046,7 @@ PHP_METHOD(ClickHouseStatement, fetchKeyPair)
              * literal string "Array" with an E_WARNING, collapsing every
              * row onto one key. Reject instead, matching the <2-columns
              * contract below. */
-            sc_zend_throw_exception_tsrmls_cc(clickhouse_exception_ce,
+            zend_throw_exception(clickhouse_exception_ce,
                 "fetchKeyPair requires a scalar key column", 0);
             zend_array_destroy(Z_ARR_P(return_value));
             ZVAL_UNDEF(return_value);

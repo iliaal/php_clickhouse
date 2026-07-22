@@ -28,14 +28,6 @@ extern zend_module_entry clickhouse_module_entry;
 
 #define PHP_CLICKHOUSE_VERSION "0.10.0"
 
-#ifdef PHP_WIN32
-#	define PHP_CLICKHOUSE_API __declspec(dllexport)
-#elif defined(__GNUC__) && __GNUC__ >= 4
-#	define PHP_CLICKHOUSE_API __attribute__ ((visibility("default")))
-#else
-#	define PHP_CLICKHOUSE_API
-#endif
-
 #define SC_FETCH_ONE 1
 #define SC_FETCH_KEY_PAIR 2
 #define SC_FETCH_DATE_AS_STRINGS 4
@@ -50,14 +42,16 @@ extern zend_module_entry clickhouse_module_entry;
  * the whole result. The row-iterator and per-row callback always build an
  * assoc row, so only the value-shaping subset is meaningful there; passing a
  * shape flag to the per-cell convertToZval would corrupt the row (e.g.
- * FETCH_ONE makes it emit a scalar). */
+ * FETCH_ONE makes it emit a scalar).
+ *
+ * Values must stay in lockstep with ClickHouse::* class constants in
+ * clickhouse.stub.php (public names differ for some flags). */
 #define SC_FETCH_VALUE_FLAGS (SC_FETCH_DATE_AS_STRINGS | SC_FETCH_JSON_AS_ARRAY | SC_FETCH_JSON_AS_OBJECT | SC_FETCH_UUID_WITH_DASHES | SC_FETCH_FIXEDSTRING_BINARY)
 
 #define CLICKHOUSE_RES_NAME "ClickHouse"
-#define CLICKHOUSE_EXCEPTION_NAME "ClickHouseException"
 
-/* Back-compat aliases for the original SeasClick name. Kept for the 0.5.x
- * release cycle and removed in the next major. */
+/* Back-compat aliases for the original SeasClick class names. Still
+ * registered as class aliases until a major version removes them. */
 #define CLICKHOUSE_RES_NAME_LEGACY "SeasClick"
 #define CLICKHOUSE_EXCEPTION_NAME_LEGACY "SeasClickException"
 
