@@ -27,14 +27,24 @@ on:
         required: false
         default: ''
 
+permissions: {}
+
+concurrency:
+  group: release-windows-${{ github.event.release.tag_name || inputs.release_tag || github.ref }}
+  cancel-in-progress: false
+
 jobs:
   matrix:
     name: Resolve Windows release matrix
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
       - id: matrix
         uses: php/php-windows-builder/extension-matrix@e03e5d39879adaeb61ed2225f0f4eae7db8c1df8 # v1
         with:
@@ -44,14 +54,17 @@ jobs:
     name: Build ${{ matrix.php-version }} ${{ matrix.ts }} ${{ matrix.arch }}
     needs: matrix
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.matrix.outputs.matrix) }}
     steps:
       # release -> the tag; dispatch-with-tag -> that tag; blank -> triggering branch.
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           ref: ${{ github.event.release.tag_name || inputs.release_tag }}
+          persist-credentials: false
       - uses: php/php-windows-builder/extension@e03e5d39879adaeb61ed2225f0f4eae7db8c1df8 # v1
         with:
           php-version: ${{ matrix.php-version }}
@@ -64,6 +77,8 @@ jobs:
     name: Upload binaries to the release
     runs-on: ubuntu-latest
     needs: build
+    permissions:
+      contents: write # Uploads built archives to the selected release.
     # Upload only for a real release or a dispatch that names a tag; a blank
     # dispatch is build-only (the build job above still ran all lanes).
     if: github.event_name == 'release' || inputs.release_tag != ''

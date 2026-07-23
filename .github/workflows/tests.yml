@@ -6,13 +6,22 @@ on:
   pull_request:
     branches: [master]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   validate:
     name: Validate composer.json
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: shivammathur/setup-php@v2
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # master
         with:
           php-version: '8.4'
           tools: composer
@@ -24,8 +33,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: validate
     steps:
-      - uses: actions/checkout@v6
-      - uses: shivammathur/setup-php@v2
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # master
         with:
           php-version: '8.4'
           tools: phpize, php-config
@@ -48,7 +59,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       clickhouse:
-        image: clickhouse/clickhouse-server:latest
+        image: clickhouse/clickhouse-server@sha256:d7556a3841027651307b5aa08d72b5c467d0241d3db5b67d9e158ef3975626f5
         ports:
           - 9000:9000
           - 8123:8123
@@ -68,10 +79,12 @@ jobs:
         php: ['7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5']
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: Setup PHP
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # master
         with:
           php-version: ${{ matrix.php }}
           tools: phpize, php-config
@@ -170,7 +183,7 @@ jobs:
             -e CLICKHOUSE_USER=test -e CLICKHOUSE_PASSWORD=test \
             -v "$RUNNER_TEMP/ch-certs":/etc/clickhouse-server/certs:ro \
             -v "$PWD/tests/tls/tls.xml":/etc/clickhouse-server/config.d/tls.xml:ro \
-            clickhouse/clickhouse-server:latest
+            clickhouse/clickhouse-server@sha256:d7556a3841027651307b5aa08d72b5c467d0241d3db5b67d9e158ef3975626f5
 
           # Rebuild the extension with TLS support while the server boots.
           make clean
@@ -216,7 +229,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       clickhouse:
-        image: clickhouse/clickhouse-server:latest
+        image: clickhouse/clickhouse-server@sha256:d7556a3841027651307b5aa08d72b5c467d0241d3db5b67d9e158ef3975626f5
         ports:
           - 9000:9000
           - 8123:8123
@@ -236,18 +249,22 @@ jobs:
         php: ['7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5']
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: Install build deps
         run: sudo apt-get update -qq && sudo apt-get install -y re2c bison autoconf libssl-dev
 
       - name: Build PHP from source with --enable-zts
+        env:
+          PHP_VERSION: ${{ matrix.php }}
         run: |
-          git clone --depth=1 --branch=PHP-${{ matrix.php }} https://github.com/php/php-src.git /tmp/php-src
+          git clone --depth=1 --branch="PHP-${PHP_VERSION}" https://github.com/php/php-src.git /tmp/php-src
           cd /tmp/php-src
           ./buildconf --force
           php_extra=()
-          if [ "${{ matrix.php }}" = "7.4" ]; then
+          if [ "$PHP_VERSION" = "7.4" ]; then
             zts_flag=--enable-maintainer-zts
             php_extra+=(--enable-json)
           else
@@ -303,9 +320,11 @@ jobs:
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
       - id: matrix
-        uses: php/php-windows-builder/extension-matrix@v1
+        uses: php/php-windows-builder/extension-matrix@e03e5d39879adaeb61ed2225f0f4eae7db8c1df8 # 1.8.1
         with:
           # Mirror the release-windows.yml matrix so the pre-tag gate builds
           # every toolset we ship. PHP 8.3 pins the VS2019 (vs16) toolset;
@@ -323,7 +342,9 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.windows-matrix.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
       - name: Build extension
         uses: php/php-windows-builder/extension@e03e5d39879adaeb61ed2225f0f4eae7db8c1df8 # v1
         with:
@@ -338,7 +359,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       clickhouse:
-        image: clickhouse/clickhouse-server:latest
+        image: clickhouse/clickhouse-server@sha256:d7556a3841027651307b5aa08d72b5c467d0241d3db5b67d9e158ef3975626f5
         ports:
           - 9000:9000
           - 8123:8123
@@ -366,11 +387,14 @@ jobs:
       # exitcode=139: keep ASan abort on the conventional SIGSEGV exit code so
       #   run-tests.php classifies failures as crashes, not silent skips.
       ASAN_OPTIONS: exitcode=139:detect_odr_violation=0:detect_leaks=0
+      PHP_VERSION: ${{ matrix.php }}
       UBSAN_OPTIONS: print_stacktrace=1
       USE_ZEND_ALLOC: 0
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: Install dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y llvm clang re2c bison autoconf libssl-dev
@@ -383,7 +407,7 @@ jobs:
         env:
           LD_LIBRARY_PATH: ${{ steps.clang_rt.outputs.dir }}
         run: |
-          git clone --depth=1 --branch=PHP-${{ matrix.php }} https://github.com/php/php-src.git /tmp/php-src
+          git clone --depth=1 --branch="PHP-${PHP_VERSION}" https://github.com/php/php-src.git /tmp/php-src
           cd /tmp/php-src
           ./buildconf --force
           # -shared-libasan: link ASan as a shared library so the dynamic
