@@ -59,7 +59,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       clickhouse:
-        image: clickhouse/clickhouse-server@sha256:d7556a3841027651307b5aa08d72b5c467d0241d3db5b67d9e158ef3975626f5
+        image: clickhouse/clickhouse-server@sha256:fdc22372465a336fa47e9deab61fad8277b9e2f2473234a1294b33b53f01d377
         ports:
           - 9000:9000
           - 8123:8123
@@ -183,7 +183,7 @@ jobs:
             -e CLICKHOUSE_USER=test -e CLICKHOUSE_PASSWORD=test \
             -v "$RUNNER_TEMP/ch-certs":/etc/clickhouse-server/certs:ro \
             -v "$PWD/tests/tls/tls.xml":/etc/clickhouse-server/config.d/tls.xml:ro \
-            clickhouse/clickhouse-server@sha256:d7556a3841027651307b5aa08d72b5c467d0241d3db5b67d9e158ef3975626f5
+            clickhouse/clickhouse-server@sha256:fdc22372465a336fa47e9deab61fad8277b9e2f2473234a1294b33b53f01d377
 
           # Rebuild the extension with TLS support while the server boots.
           make clean
@@ -229,7 +229,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       clickhouse:
-        image: clickhouse/clickhouse-server@sha256:d7556a3841027651307b5aa08d72b5c467d0241d3db5b67d9e158ef3975626f5
+        image: clickhouse/clickhouse-server@sha256:fdc22372465a336fa47e9deab61fad8277b9e2f2473234a1294b33b53f01d377
         ports:
           - 9000:9000
           - 8123:8123
@@ -359,7 +359,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       clickhouse:
-        image: clickhouse/clickhouse-server@sha256:d7556a3841027651307b5aa08d72b5c467d0241d3db5b67d9e158ef3975626f5
+        image: clickhouse/clickhouse-server@sha256:fdc22372465a336fa47e9deab61fad8277b9e2f2473234a1294b33b53f01d377
         ports:
           - 9000:9000
           - 8123:8123
