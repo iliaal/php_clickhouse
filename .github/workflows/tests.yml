@@ -201,8 +201,10 @@ jobs:
           export TEST_PHP_EXECUTABLE=$(which php)
           # run-tests.php exits non-zero on failures, zero on all-pass /
           # all-skip. Let its exit code drive the step.
+          # -j1: the phpts share ClickHouse tables, and run-tests.php from
+          # PHP 8.6 on runs in parallel unless told otherwise.
           set -o pipefail
-          php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK,SKIP tests/ \
+          php run-tests.php -j1 --show-diff -g FAIL,BORK,LEAK,XLEAK,SKIP tests/ \
             | tee "$RUNNER_TEMP/phpt.out"
           scripts/assert-phpt-summary.sh "$RUNNER_TEMP/phpt.out" \
             tests/027.phpt tests/064.phpt tests/070.phpt tests/188.phpt \
@@ -272,7 +274,7 @@ jobs:
           # run-tests.php exits 0 on all-skip, so a skipped 027 (no TLS server /
           # no TLS build) would pass this step silently. Capture the summary and
           # require all four tests actually ran and passed.
-          out=$(php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK \
+          out=$(php run-tests.php -j1 --show-diff -g FAIL,BORK,LEAK,XLEAK \
             tests/027.phpt \
             tests/188.phpt \
             tests/207_reentrant_ssl_ca_files.phpt \
@@ -384,7 +386,7 @@ jobs:
           cp modules/clickhouse.so "$EXT_DIR/"
           export TEST_PHP_EXECUTABLE=/tmp/php-zts/bin/php
           set -o pipefail
-          /tmp/php-zts/bin/php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK,SKIP tests/ \
+          /tmp/php-zts/bin/php run-tests.php -j1 --show-diff -g FAIL,BORK,LEAK,XLEAK,SKIP tests/ \
             | tee "$RUNNER_TEMP/phpt-zts.out"
           scripts/assert-phpt-summary.sh "$RUNNER_TEMP/phpt-zts.out" \
             tests/027.phpt tests/064.phpt tests/070.phpt tests/188.phpt \
@@ -568,7 +570,7 @@ jobs:
           cp modules/clickhouse.so "$EXT_DIR/"
           export TEST_PHP_EXECUTABLE=/tmp/php-asan/bin/php
           set -o pipefail
-          /tmp/php-asan/bin/php run-tests.php --show-diff --asan -g FAIL,BORK,LEAK,XLEAK,SKIP tests/ \
+          /tmp/php-asan/bin/php run-tests.php -j1 --show-diff --asan -g FAIL,BORK,LEAK,XLEAK,SKIP tests/ \
             | tee "$RUNNER_TEMP/phpt-asan.out"
           scripts/assert-phpt-summary.sh "$RUNNER_TEMP/phpt-asan.out" \
             tests/027.phpt tests/064.phpt tests/070.phpt tests/188.phpt \
