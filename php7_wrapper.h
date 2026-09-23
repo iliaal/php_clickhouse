@@ -49,7 +49,7 @@ static inline void sc_zend_update_property_stringl(zend_class_entry *scope, zval
 /* Referenced config values must expose their underlying type to callers. */
 #define php_array_get_value(ht, str, v) \
     (((v = zend_hash_str_find(ht, (char *)str, sizeof(str)-1)) != NULL) \
-     && ((v = (Z_ISREF_P(v) ? Z_REFVAL_P(v) : v)), !ZVAL_IS_NULL(v)))
+     && ((v = (Z_ISREF_P(v) ? Z_REFVAL_P(v) : v)), !Z_ISNULL_P(v)))
 
 /* FAST_ZPP _OR_NULL convenience macros are PHP 8.0+. Shim for 7.4 with
  * the older Z_PARAM_*_EX(dest, check_null, separate) form. */

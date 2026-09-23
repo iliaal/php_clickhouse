@@ -828,7 +828,7 @@ PHP_METHOD(ClickHouse, __construct)
     };
     auto load_bounded_nonneg_long = [&](const char *key, zend_long max, zend_long &out) -> bool {
         zval *v = zend_hash_str_find(_ht, (char*)key, strlen(key));
-        if (!v || ZVAL_IS_NULL(v)) return false;
+        if (!v || Z_ISNULL_P(v)) return false;
         zend_long n = zval_get_long(v);
         if (n < 0 || n > max) {
             std::string msg = std::string(key) + " out of range";
@@ -904,7 +904,7 @@ PHP_METHOD(ClickHouse, __construct)
                                      int64_t max,
                                      ClientOptions& (ClientOptions::*setter)(const std::chrono::milliseconds&)) -> bool {
             zval *v = zend_hash_str_find(_ht, (char*)key, strlen(key));
-            if (!v || ZVAL_IS_NULL(v)) return true;
+            if (!v || Z_ISNULL_P(v)) return true;
             auto fail = [&]() -> bool {
                 std::string msg = std::string(key) + " out of range";
                 zend_throw_exception(clickhouse_exception_ce, msg.c_str(), 0);
@@ -952,7 +952,7 @@ PHP_METHOD(ClickHouse, __construct)
             zval *v = zend_hash_str_find(_ht, (char*)key, strlen(key));
             if (!v) return true;
             if (Z_ISREF_P(v)) v = Z_REFVAL_P(v);
-            if (ZVAL_IS_NULL(v)) return true;
+            if (Z_ISNULL_P(v)) return true;
             zend_long n = zval_get_long(v);
             if (n < 0 || n > INT_MAX) {
                 std::string msg = std::string(key) + " out of range";
@@ -1097,7 +1097,7 @@ PHP_METHOD(ClickHouse, __construct)
             if (!sk || ZSTR_LEN(sk) < 4 || memcmp(ZSTR_VAL(sk), "ssl_", 4) != 0) continue;
             zval *v = sv;
             if (Z_ISREF_P(v)) v = Z_REFVAL_P(v);
-            if (ZVAL_IS_NULL(v)) continue;
+            if (Z_ISNULL_P(v)) continue;
             bool is_bool_key = false;
             for (const char *k : bool_ssl_keys) {
                 if (ZSTR_LEN(sk) == strlen(k) && memcmp(ZSTR_VAL(sk), k, ZSTR_LEN(sk)) == 0) {
