@@ -69,7 +69,7 @@ jobs:
           php -n -d extension="$so" -r 'exit(extension_loaded("clickhouse") && class_exists("ClickHouse") ? 0 : 1);'
 
   linux:
-    name: PHP ${{ matrix.php }} - Linux
+    name: PHP ${{ matrix.php }} - Linux${{ matrix.label }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: validate
@@ -93,13 +93,49 @@ jobs:
       fail-fast: false
       matrix:
         php: ['7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5']
+        # setup-php's '8.6' tracks php-src master, not the PHP-8.6 branch, so
+        # the 8.6 cell builds a release-mode PHP from the branch instead.
+        include:
+          - php: '8.6'
+            label: ' (PHP-8.6 branch)'
+            php-src: true
 
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
 
+      - name: Build PHP from source (release mode)
+        if: matrix.php-src
+        env:
+          PHP_VERSION: ${{ matrix.php }}
+        run: |
+          # Pinned php-src commit on the PHP-8.6 branch. Update procedure: run
+          # `git ls-remote https://github.com/php/php-src.git PHP-8.6` and
+          # refresh the SHA below.
+          case "$PHP_VERSION" in
+            8.6) PHP_SRC_SHA=5467b514f00aa9a4646bd82168d85b884f99214c ;;
+            *) echo "::error::no pinned php-src SHA for PHP $PHP_VERSION"; exit 1 ;;
+          esac
+          sudo apt-get update -qq && sudo apt-get install -y re2c bison autoconf
+          rm -rf /tmp/php-src
+          git init -q /tmp/php-src
+          git -C /tmp/php-src remote add origin https://github.com/php/php-src.git
+          git -C /tmp/php-src fetch --depth=1 origin "$PHP_SRC_SHA"
+          git -C /tmp/php-src checkout "$PHP_SRC_SHA"
+          cd /tmp/php-src
+          ./buildconf --force
+          ./configure \
+            --disable-all \
+            --enable-cli \
+            --prefix=/tmp/php-rel
+          make -j$(nproc)
+          make install
+          mkdir -p "$(/tmp/php-rel/bin/php -r 'echo ini_get("extension_dir");')"
+          echo /tmp/php-rel/bin >> "$GITHUB_PATH"
+
       - name: Setup PHP
+        if: ${{ !matrix.php-src }}
         uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # master
         with:
           php-version: ${{ matrix.php }}
@@ -277,7 +313,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php: ['7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5']
+        php: ['7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5', '8.6']
 
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -302,6 +338,7 @@ jobs:
             8.3) PHP_SRC_SHA=7f3d3de1a280f3fb573bd7976185ea94d11be606 ;;
             8.4) PHP_SRC_SHA=13f5c4bda271d896c6ea4d1b1d2e7dfa046c9694 ;;
             8.5) PHP_SRC_SHA=dab13a022a54f8bc03302f93ccb6484907ec1245 ;;
+            8.6) PHP_SRC_SHA=5467b514f00aa9a4646bd82168d85b884f99214c ;;
             *) echo "::error::no pinned php-src SHA for PHP $PHP_VERSION"; exit 1 ;;
           esac
           rm -rf /tmp/php-src
