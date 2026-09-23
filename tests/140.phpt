@@ -6,8 +6,8 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 clickhouse_skip_if_no_server();
-/* The phantom endpoint the bug injects uses the "host" property default
- * (127.0.0.1) plus the top-level port. The repro can only connect through
+/* A phantom endpoint would use the "host" property default (127.0.0.1)
+ * plus the top-level port. The repro can only connect through
  * it when the real server is reachable on loopback. */
 $h = getenv("CLICKHOUSE_HOST") ?: "clickhouse";
 if (!in_array($h, ["127.0.0.1", "localhost"], true)) {

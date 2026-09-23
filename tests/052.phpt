@@ -40,10 +40,9 @@ $c->insert("test.maps_matrix",
          [-32768 => -1, 32767 => 1]],
     ]);
 
-// Round-trip — except for LowCardinality keys: vendor read path doesn't
-// decode them (clickhouse-cpp v2.6.1 issue, see vendor wiki). Verify the
-// LC writes landed via server-side aggregation instead, and round-trip
-// the rest.
+// The vendored read path doesn't decode LowCardinality keys (clickhouse-cpp
+// v2.6.1), so verify the LC writes via server-side aggregation and
+// round-trip the rest.
 $lc_check = $c->select("SELECT
     sum(mapContains(lc_str, 'env'))         AS env_present,
     sum(lc_u32['hits'])                     AS hits_sum

@@ -184,7 +184,7 @@ foreach ($ch-&gt;select("SELECT id, ts, tag FROM events ORDER BY id",
 <p>The extension maps ClickHouse column types to PHP values on both the write path (<code>insert()</code>, <code>insertAssoc()</code>, <code>write()</code>) and the read path (<code>select()</code> and the streaming readers). The matrix below is the authoritative per-type reference.</p>
 
 <h3 id="type-matrix">Read / write matrix <a class="anchor" href="#type-matrix">#</a></h3>
-<p>Each row gives what <code>insert()</code> accepts for a column of that type, what <code>select()</code> hands back, whether <code>Nullable(T)</code> is supported, and the behavior worth knowing. Unless noted, a <code>null</code> into a non-<code>Nullable</code> column is rejected, and a value of the wrong shape throws rather than silently coercing to <code>0</code>.</p>
+<p>Each row gives what <code>insert()</code> accepts for a column of that type, what <code>select()</code> hands back, whether <code>Nullable(T)</code> is supported, and any caveats. Unless noted, a <code>null</code> into a non-<code>Nullable</code> column is rejected, and a value of the wrong shape throws rather than silently coercing to <code>0</code>.</p>
 <table class="matrix">
 <thead><tr><th>ClickHouse type</th><th>Write accepts</th><th>Read returns</th><th>Nullable</th><th>Notes</th></tr></thead>
 <tbody>
@@ -229,11 +229,11 @@ foreach ($ch-&gt;select("SELECT id, ts, tag FROM events ORDER BY id",
 </div>
 
 <h4 id="coercion">Write-side coercion <a class="anchor" href="#coercion">#</a></h4>
-<p>Numeric columns (the integer, float, and decimal families) accept an int, an integral float, or a numeric string, and reject anything that doesn't fully parse as a number. The string-shaped columns are the exceptions worth memorizing:</p>
+<p>Numeric columns (the integer, float, and decimal families) accept an int, an integral float, or a numeric string, and reject anything that doesn't fully parse as a number. The string-shaped columns are the exceptions:</p>
 <ul>
 <li><code>Date</code>, <code>DateTime</code>, <code>IPv4</code>, <code>IPv6</code> treat a PHP string as a <em>textual</em> representation (a <code>Y-m-d</code> date, a dotted-quad/colon address), not a numeric form. To pass the integer form, pass an actual int.</li>
 <li><code>Time</code> and <code>Time64</code> accept <strong>numeric seconds only</strong>; a <code>"HH:MM:SS"</code> string is rejected on write.</li>
-<li><code>DateTime64</code> / <code>Time64</code> at precision ≥ 7 (sub-microsecond) reject float input, since a float can't represent nanosecond-since-epoch values exactly. Pass an integer — interpreted as <strong>whole seconds</strong> and scaled to the column's precision on write (not raw ticks) — or a formatted string instead. (Reads return raw ticks by default; see the coercion table above for the write-seconds / read-ticks asymmetry.)</li>
+<li><code>DateTime64</code> / <code>Time64</code> at precision ≥ 7 (sub-microsecond) reject float input, since a float can't represent nanosecond-since-epoch values exactly. Pass an integer or a formatted string instead. An integer is read as <strong>whole seconds</strong> and scaled to the column's precision on write, not as raw ticks. (Reads return raw ticks by default; see the coercion table above for the write-seconds / read-ticks asymmetry.)</li>
 </ul>
 <p>Nested-type recursion (arrays, tuples, maps) is capped at depth 32.</p>
 
@@ -494,7 +494,7 @@ $n = $ch-&gt;selectToStream(
 fclose($f);
 echo "$n rows written\n";</code></pre>
 <div class="note warn">
-<p><strong>Composite and geo columns are rejected:</strong> <code>Array</code>, <code>Tuple</code>, <code>Map</code>, <code>Point</code>, <code>Ring</code>, <code>Polygon</code>, and <code>MultiPolygon</code> can't be unambiguously serialized to a flat text format, so <code>selectToStream()</code> throws naming the offending type. Use <code>select()</code> for those. (Nullable and LowCardinality wrappers around a streamable scalar are fine.) <code>FixedString</code> cells are emitted with trailing NUL padding trimmed — <code>FIXEDSTRING_BINARY</code> is not settable on this path, so binary payloads that legitimately end in NUL bytes should be round-tripped through <code>select()</code> / <code>selectStream()</code> with that flag instead.</p>
+<p><strong>Composite and geo columns are rejected:</strong> <code>Array</code>, <code>Tuple</code>, <code>Map</code>, <code>Point</code>, <code>Ring</code>, <code>Polygon</code>, and <code>MultiPolygon</code> can't be unambiguously serialized to a flat text format, so <code>selectToStream()</code> throws naming the offending type. Use <code>select()</code> for those. (Nullable and LowCardinality wrappers around a streamable scalar are fine.) <code>FixedString</code> cells are emitted with trailing NUL padding trimmed. <code>FIXEDSTRING_BINARY</code> is not settable on this path, so round-trip binary payloads that end in NUL bytes through <code>select()</code> / <code>selectStream()</code> with that flag instead.</p>
 </div>
 
 <h3>Writing: <code>insertFromStream()</code></h3>
@@ -523,7 +523,7 @@ echo "$n rows inserted\n";</code></pre>
   </ul>
 </li>
 <li><code>{name:Type}</code> is a server-side typed parameter. The SQL text is passed through unchanged; the value is bound via <code>Query::SetParam</code> and the server quotes and parses it according to <code>Type</code>. Pass PHP arrays for <code>Array(T)</code> types; <code>null</code> becomes a server <code>NULL</code>.</li>
-<li><strong>Reserved syntax:</strong> both placeholder forms are matched anywhere in the SQL text, including inside string literals and comments. Avoid writing text shaped like <code>{identifier}</code> or <code>{identifier:Type}</code> inside a literal when a params key of the same name exists — it will be treated as a placeholder.</li>
+<li><strong>Reserved syntax:</strong> both placeholder forms are matched anywhere in the SQL text, including inside string literals and comments. Avoid writing text shaped like <code>{identifier}</code> or <code>{identifier:Type}</code> inside a literal when a params key of the same name exists; it will be treated as a placeholder.</li>
 </ul>
 <pre><code>// Single-identifier substitution.
 $ch-&gt;select("SELECT * FROM {tbl}", ["tbl" =&gt; "users"]);

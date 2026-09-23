@@ -8,12 +8,9 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression for CR-504: parse_uint128_dec accepts up to 2^128-1; the
-// Int128 insert path then static_cast<Int128>(uint128) which silently
-// wraps magnitudes in (2^127, 2^128-1] to negative. The reciprocal
-// UInt128 path is correct because uint128 is its native range. Bound
-// the magnitude per-sign before the cast; INT128_MIN gets a special
-// case because -INT128_MIN is undefined behavior.
+// Int128 string inserts must reject magnitudes in (2^127, 2^128-1]
+// instead of wrapping them negative through the uint128 parser, and
+// INT128_MIN must be accepted without signed-negation UB.
 
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");

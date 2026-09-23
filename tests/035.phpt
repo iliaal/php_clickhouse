@@ -9,7 +9,7 @@ clickhouse
 require __DIR__ . "/_clickhouse.inc";
 $c = new ClickHouse(clickhouse_test_config());
 
-// Global setting: limit to 1ms — any non-trivial query trips it.
+// Global setting: limit to 1ms, which any non-trivial query trips.
 $c->setSettings(["max_execution_time" => "0.001"]);
 
 try {

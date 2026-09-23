@@ -454,7 +454,7 @@ static size_t retainedColumnPayloadBytes(const ColumnRef &column)
         case Type::Time:
         case Type::Time64:
         case Type::Bool:
-        /* Nullable(Nothing) — a bare NULL literal or a NULL-padded UNION arm.
+        /* Nullable(Nothing): a bare NULL literal or a NULL-padded UNION arm.
          * Carries no payload, and ColumnNothing::SaveBody throws, so it must
          * never reach the Save() fallback. */
         case Type::Void:
@@ -740,10 +740,8 @@ PHP_METHOD(ClickHouse, __construct)
     zval *this_obj;
     this_obj = getThis();
 
-    /* Reject a re-run on an already-constructed object up front, before any
-     * property is written. An explicit second __construct() call (PHP allows
-     * it) used to overwrite host/port/database/user/compression and only then
-     * throw, leaving the live object's config mutated but its client stale. */
+    /* PHP allows an explicit second __construct() call. Reject it before any
+     * property is written, or the config changes while the client stays stale. */
     if (Z_CLICKHOUSE_P(this_obj)->client) {
         zend_throw_exception(clickhouse_exception_ce,
             "ClickHouse object is already constructed", 0);
@@ -754,10 +752,9 @@ PHP_METHOD(ClickHouse, __construct)
     if (php_array_get_value(_ht, "host", value))
     {
         host_configured = true;
-        /* DR-C1: ZStrGuard converts a throwing __toString() on the host value
-         * into a C++ throw. This runs before the main try block below, so an
-         * uncaught throw here would escape the Zend dispatcher and abort the
-         * process (SIGABRT). Catch it and re-surface as a PHP exception. */
+        /* ZStrGuard turns a throwing __toString() into a C++ throw. This runs
+         * before the main try block, so an uncaught throw would escape the Zend
+         * dispatcher and abort the process. */
         try {
             ZStrGuard sg(value);
             sc_zend_update_property_stringl(clickhouse_ce, this_obj, "host", sizeof("host") - 1,
@@ -1086,10 +1083,9 @@ PHP_METHOD(ClickHouse, __construct)
                 return;
             }
         }
-        /* Any ssl_* material needs a TLS-enabled build. Explicit falsy
-         * booleans (ssl_skip_verify=false) are harmless no-ops and stay
-         * allowed; any other present value — and any unknown ssl_*
-         * key — is rejected instead of silently ignored. */
+        /* Any ssl_* material needs a TLS-enabled build. Explicit false
+         * booleans (ssl_skip_verify=false) are no-ops and stay allowed; any
+         * other value or unknown ssl_* key is rejected. */
         {
         static const char *bool_ssl_keys[] = {"ssl_skip_verify", "ssl_use_default_ca"};
         std::string offending;
@@ -1324,12 +1320,11 @@ static void clearStreamingInsertState(clickhouse_object *obj)
 static void resetConnectionReapplyDatabase(zval *this_obj, clickhouse_object *obj,
                                            bool clear_insert_state)
 {
-    /* Mirror upstream patch 0007: neutralize the PHP-side streaming state
-     * BEFORE attempting the reconnect. If ResetConnection() throws (server
-     * at max_connections, ephemeral-port exhaustion, DNS blip — cases
-     * where the original dirty socket may still be healthy), a still-set
-     * has_insert_block would make the next teardown send the terminating
-     * empty block down the dirty wire and commit a partial insert. */
+    /* Mirrors upstream patch 0007: clear PHP streaming state before the
+     * reconnect. If ResetConnection() throws (max_connections, port
+     * exhaustion, DNS failure), a still-set has_insert_block would make
+     * teardown send the terminating empty block down the dirty wire and
+     * commit a partial insert. */
     if (clear_insert_state && obj->has_insert_block) {
         clearStreamingInsertState(obj);
     }
@@ -1349,10 +1344,9 @@ static void resetConnectionReapplyDatabase(zval *this_obj, clickhouse_object *ob
 }
 
 /* Best-effort reset: a failed ResetConnection() or USE-reapply is recorded
- * in the query log instead of being swallowed silently. Returns true when
- * the connection is usable again; callers clear PHP streaming state only
- * on true (an unrecovered wire must not be hidden behind cleared flags).
- * Success behavior is identical to the old void swallow. */
+ * in the query log. Returns true when the connection is usable again;
+ * callers clear PHP streaming state only on true so an unrecovered wire
+ * is not hidden behind cleared flags. */
 static bool tryResetConnectionReapplyDatabase(zval *this_obj, clickhouse_object *obj,
                                               bool clear_insert_state)
 {
@@ -1877,46 +1871,21 @@ static std::string getInsertSql(std::string_view table_name, const zval *columns
 /*
  * Substitute placeholders in `sql` with values from `params_ht`.
  *
- * Two syntaxes are supported and routed differently:
+ *   {name}        client-side identifier substitution. A scalar must be
+ *                 one token: an identifier (`[A-Za-z_][A-Za-z0-9_]*`,
+ *                 optionally db-qualified by one dot) or a numeric
+ *                 literal. Whitespace, commas, and other punctuation are
+ *                 rejected so `{tbl}` = "a, b" cannot turn `FROM {tbl}`
+ *                 into a cross join. An array joins validated tokens
+ *                 with ", " for column lists.
  *
- *   {name}        client-side identifier substitution. Two value
- *                 shapes:
+ *   {name:Type}   server-side parameter. The SQL text is left untouched;
+ *                 the value goes into `out_params` for Query::SetParam,
+ *                 and nullopt means server-side NULL. PHP arrays format
+ *                 as ClickHouse array literals.
  *
- *                   - Scalar (string / int / float / bool): the value
- *                     coerces to one token, validated as either a
- *                     single identifier (`[A-Za-z_][A-Za-z0-9_]*`,
- *                     optionally db-qualified by exactly one dot) or
- *                     a numeric literal (optional sign, digits,
- *                     optional fractional part, optional exponent).
- *                     Whitespace, commas, and any other punctuation
- *                     are rejected — the prior whitelist allowed
- *                     comma-lists, which let `{tbl}` with value
- *                     "a, b" turn `FROM {tbl}` into a cross join.
- *
- *                   - Array: each element is validated as a single
- *                     scalar token by the same rule, then the
- *                     elements are joined with ", " for the SQL
- *                     replacement. Use this for legitimate column
- *                     lists; an element with internal whitespace or
- *                     commas is still rejected.
- *
- *                 Used for table and column names. Callers that need
- *                 expression fragments should pre-validate upstream.
- *
- *   {name:Type}   server-side parameter (ClickHouse native). The SQL
- *                 text is left untouched (the server parses {name:Type}
- *                 itself); the value is collected into `out_params` so
- *                 the caller can pass it to Query::SetParam. The wire
- *                 layer single-quotes and the server parses according
- *                 to Type. PHP arrays format as ClickHouse array
- *                 literals so Array(T) parses cleanly.
- *
- * If a parameter is provided that doesn't appear in the SQL (in either
- * form), the call throws. Multiple occurrences of the same `{name}`
- * placeholder are all replaced.
- *
- * `out_params` collects (name, optional<value>) pairs. nullopt is
- * routed to Query::SetParam as the server-side NULL sentinel.
+ * A parameter that appears in neither form throws. Every occurrence of
+ * a `{name}` placeholder is replaced.
  */
 struct TypedParam {
     std::string name;
@@ -2132,7 +2101,7 @@ static void prepareQuery(clickhouse_object *obj,
 }
 
 /*
- * DR-005 Select recovery: ServerException leaves the wire clean (no reset);
+ * Select recovery: ServerException leaves the wire clean (no reset);
  * any other throw mid-stream resets the connection. Optional detach clears
  * stack-capturing callbacks before rethrow / after success. on_error runs
  * before rethrow (e.g. free a stream buffer). Sets elapsed_ms in all paths.
@@ -2179,7 +2148,7 @@ static void runSelectWithRecovery(Client *client,
 }
 
 /*
- * Execute path: same DR-005 split as Select, without detach (Execute has
+ * Execute path: same recovery split as Select, without detach (Execute has
  * no OnData stack captures that outlive the call).
  */
 static void runExecuteWithRecovery(Client *client,
@@ -2566,10 +2535,9 @@ static Block buildExternalTableBlock(zval *entry, std::string &name_out)
 /* {{{ proto mixed selectWithExternalData(string sql, array externals, array params, int mode, string query_id, array settings)
  *
  * SELECT with one or more named in-memory tables sent alongside the
- * query (ClickHouse "external data" feature). Use this to keep the SQL
- * body small when filtering by a big list — e.g.
- * `SELECT id, name FROM users WHERE id IN ext_ids` with `ext_ids`
- * supplied as 50k rows in memory.
+ * query (ClickHouse "external data"). Keeps the SQL small when filtering
+ * by a big list, e.g. `SELECT id, name FROM users WHERE id IN ext_ids`
+ * with `ext_ids` supplied as 50k rows.
  *
  * Each entry of `externals`:
  *   ['name'    => 'ext_ids',
@@ -2577,8 +2545,8 @@ static Block buildExternalTableBlock(zval *entry, std::string &name_out)
  *    'rows'    => [[1], [2], ...]]
  *
  * Multiple externals per call supported; names must appear literally
- * in the query body. Empty `externals` is rejected — call select()
- * directly when no external data is needed.
+ * in the query body. Empty `externals` is rejected; use select()
+ * when no external data is needed.
  */
 PHP_METHOD(ClickHouse, selectWithExternalData)
 {
@@ -3011,25 +2979,21 @@ static zend_long do_select_to_stream(zval *this_obj,
  *
  * Run a SELECT and write rows directly to a PHP stream resource in
  * TSV / CSV format (with optional column-name header). Returns the
- * number of rows written. Skips per-row PHP array assembly entirely —
- * cells are formatted from native column data and flushed block by
- * block to the stream. Use for large exports where selectStream() +
- * userland fwrite() is too slow.
+ * number of rows written. Cells are formatted from native column data
+ * and flushed block by block, with no per-row PHP arrays.
  *
  * Supported formats: TabSeparated (alias TSV), TabSeparatedWithNames
  * (alias TSVWithNames), CSV, CSVWithNames. Other values are rejected.
  *
  * Dates always emit as YYYY-MM-DD / YYYY-MM-DD HH:MM:SS[.fff] strings;
  * Decimal / Int128 / UInt128 as decimal strings. Array / Tuple / Map /
- * geometry columns are rejected — text formats can't unambiguously
- * serialize them. Nullable and LowCardinality wrappers around supported
- * scalars are fine.
+ * geometry columns are rejected because text formats can't serialize
+ * them unambiguously. Nullable and LowCardinality wrappers around
+ * supported scalars are fine.
  *
- * FixedString cells are emitted with trailing NUL padding trimmed (the
- * same default as regular reads); ClickHouse::FIXEDSTRING_BINARY is not
- * currently settable on this path, so binary payloads that legitimately
- * end in NUL bytes lose the pad on export. Round-trip such data through
- * select()/selectStream() with FIXEDSTRING_BINARY instead.
+ * FixedString cells have trailing NUL padding trimmed, as in regular
+ * reads. FIXEDSTRING_BINARY is not settable here, so binary payloads
+ * ending in NUL lose the pad on export.
  */
 PHP_METHOD(ClickHouse, selectToStream)
 {
@@ -3356,13 +3320,10 @@ static void enforceStreamCellMemoryLimit(size_t native_capacity,
     }
 }
 
-/* Push the just-parsed cell into the current row. TSV uses the
- * parser's cell_is_null flag (set when `\N` is decoded at cell start),
- * so `\\N` — which decodes to the literal byte sequence `\N` — round-
- * trips as the two-character IS_STRING value, not NULL. CSV has no
- * escape protocol, so a literal unquoted `\N` cell is the only way to
- * write NULL by our convention; we keep the bytes-based fallback for
- * that path. The cell buffer is cleared on return. */
+/* Push the just-parsed cell into the current row and clear the buffer.
+ * TSV uses cell_is_null (set when `\N` starts a cell), so `\\N` stays
+ * the two-character string. CSV has no escapes, so an unquoted literal
+ * `\N` cell is matched by bytes. */
 static void pushCell(std::string &cell_buf, bool cell_is_quoted,
                      bool cell_is_null, StreamFormat fmt,
                      std::vector<zval> &row_cells)
@@ -3669,10 +3630,9 @@ struct InsertStreamParser {
  * is rejected unless the target column is Nullable. Empty CSV cells
  * become empty strings, not NULL.
  *
- * Type coercion is delegated to the existing insertColumn() path; all
- * cells arrive there as IS_STRING (PHP coerces numeric strings to int
- * and float for the appropriate column types). `Time` columns reject
- * string input — TSV / CSV imports are not supported for Time today.
+ * Cells reach insertColumn() as IS_STRING and get the same coercion as
+ * insert(). `Time` columns reject string input, so TSV / CSV imports
+ * into Time columns are unsupported.
  *
  * Returns the total number of rows inserted.
  */
@@ -3987,7 +3947,7 @@ PHP_METHOD(ClickHouse, writeStart)
 }
 /* }}} */
 
-/* {{{ proto array insert(string table, array columns, array values)
+/* {{{ proto bool write(array values)
  */
 PHP_METHOD(ClickHouse, write)
 {
@@ -4088,7 +4048,7 @@ PHP_METHOD(ClickHouse, write)
 }
 /* }}} */
 
-/* {{{ proto array insert(string table, array columns, array values)
+/* {{{ proto bool writeEnd()
  */
 PHP_METHOD(ClickHouse, writeEnd)
 {
@@ -4634,16 +4594,9 @@ PHP_METHOD(ClickHouse, insertAssoc)
 
 /* {{{ proto ClickHouseRowIterator selectStream(string sql, array params, string query_id, array settings)
  *
- * Run a SELECT and return a ClickHouseRowIterator over the rows
- * without materializing the full result as a single PHP array. The
- * implementation buffers all blocks before returning (so the network
- * round-trip is finished by the time the iterator is handed back),
- * then walks them lazily during iteration. Use this when the row
- * shape is fine but the row count is large enough that a full PHP
- * array would balloon zval overhead.
- *
- * For true unbounded streaming where rows must be consumed as they
- * arrive, use selectStreamCallback() instead.
+ * Run a SELECT and return a ClickHouseRowIterator. All native blocks
+ * are buffered before returning; rows become PHP arrays lazily during
+ * iteration. For unbounded streaming, use selectStreamCallback().
  */
 PHP_METHOD(ClickHouse, selectStream)
 {
@@ -4916,8 +4869,8 @@ PHP_METHOD(ClickHouseRowIterator, current)
         RETURN_NULL();
     }
     array_init(return_value);
-    /* convertToZval throws on unsupported / malformed server-side types.
-     * The Zend dispatcher is C; let the exception cross it would be UB. */
+    /* convertToZval throws on unsupported or malformed server-side types;
+     * letting the exception cross the C Zend dispatcher is UB. */
     static const std::string empty_name;
     try {
         const size_t col_count = block.GetColumnCount();

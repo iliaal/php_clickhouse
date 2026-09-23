@@ -9,10 +9,9 @@ clickhouse
 require __DIR__ . "/_clickhouse.inc";
 
 // Array(Int*/UInt*/Float*/Decimal*/Bool) typed params splice elements into
-// the SQL array literal unquoted. A PHP string element used to be spliced
-// raw, so ["1,2,3"] became three values (arity corruption) and punctuation
-// could inject into the literal. String elements must now be single numeric
-// literals; ints/floats and clean numeric strings still work.
+// the SQL array literal unquoted, so a string element must be one numeric
+// literal: ["1,2,3"] would otherwise become three values, and punctuation
+// could inject into the literal. Ints, floats, and clean numeric strings work.
 
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
@@ -22,7 +21,7 @@ $c->insert("test.dr010", ['x'], [[1], [2], [3]]);
 
 $q = "SELECT count() c FROM test.dr010 WHERE x IN {ids:Array(Int32)}";
 
-// comma-in-string: arity corruption -> now rejected
+// comma-in-string: arity corruption -> rejected
 try { $c->select($q, ["ids" => ["1,2,3"]]); echo "comma string: NO THROW\n"; }
 catch (ClickHouseException $e) { echo "comma string: REJECTED\n"; }
 

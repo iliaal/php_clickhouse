@@ -11,13 +11,11 @@ Native PHP extension for [ClickHouse](https://clickhouse.com/), built on the off
 
 ## 📖 Documentation
 
-**Full usage guide, data-type read/write reference, and configuration: [iliaal.github.io/php_clickhouse](https://iliaal.github.io/php_clickhouse/)**
-
-The docs site covers every supported type (what `insert()` accepts and what `select()` returns), `fetch_mode` flags, CSV/TSV streaming, placeholders, settings, observability, and the complete method list. This README is the quick start.
+The full guide lives at [iliaal.github.io/php_clickhouse](https://iliaal.github.io/php_clickhouse/). It covers every supported type (what `insert()` accepts and what `select()` returns), `fetch_mode` flags, CSV/TSV streaming, placeholders, settings, observability, and the complete method list. This README is the quick start.
 
 ## Why this fork?
 
-[SeasX/SeasClick](https://github.com/SeasX/SeasClick) was the canonical native PHP ClickHouse extension and stopped accepting PRs in 2020. Several follow-up PRs there have been pending for years. This fork:
+[SeasX/SeasClick](https://github.com/SeasX/SeasClick) was the standard native PHP ClickHouse extension until it stopped accepting PRs in 2020; several PRs there have been pending for years. This fork:
 
 - Renames the extension to `php_clickhouse` (module `clickhouse`, classes `ClickHouse` / `ClickHouseException`)
 - Upgrades the vendored client from artpaul-fork v1.x to the official ClickHouse/clickhouse-cpp v2.6.2
@@ -61,7 +59,7 @@ Add `extension=clickhouse.so` to your `php.ini`. The build needs a C++17-capable
 
 | Platform | Status | Notes |
 |----------|--------|-------|
-| Linux NTS | first-class | PHP 7.4 through 8.5, CI matrix |
+| Linux NTS | primary | PHP 7.4 through 8.5, CI matrix |
 | Linux ZTS | supported | PHP 7.4 through 8.5, full CI matrix; PIE source builds |
 | Windows (NTS, TS) | supported | PHP 8.3 through 8.5, x86 / x64 release matrix with offline load tests; pre-built `.dll` assets |
 | macOS arm64 NTS | build-verified | PHP 8.4 and 8.5 release lane; pre-built binaries, no ClickHouse runtime test |
@@ -70,7 +68,7 @@ Per-Client state lives on the `zend_object` itself (custom `create_object` / `fr
 
 ### Test server
 
-For development and integration tests, the simplest path is the official ClickHouse server image:
+For development and integration tests, run the official ClickHouse server image:
 
 ```sh
 docker run -d --name clickhouse-test \
@@ -112,8 +110,6 @@ foreach ($ch->select("SELECT id, ts, tag FROM events ORDER BY id",
 }
 ```
 
-Configuration keys, the full method list, per-type read/write rules, placeholders, settings, streaming, and observability all live in the **[documentation site](https://iliaal.github.io/php_clickhouse/)**.
-
 ## 🧭 API surface
 
 | Area | Methods |
@@ -136,7 +132,7 @@ Configuration keys, the full method list, per-type read/write rules, placeholder
 | `FIXEDSTRING_BINARY` | 128 | full N-byte `FixedString`, trailing NULs kept |
 | `MAP_AS_PAIRS` | 256 | `Map` as ordered `[key, value]` pairs |
 
-Shape flags (`FETCH_ONE` / `FETCH_KEY_PAIR` / `FETCH_COLUMN`) are ignored on `selectStatement` / `selectStream` / `selectStreamCallback`; only value flags apply there. Full signatures, per-type rules, and streaming formats live in the [documentation site](https://iliaal.github.io/php_clickhouse/).
+Shape flags (`FETCH_ONE` / `FETCH_KEY_PAIR` / `FETCH_COLUMN`) are ignored on `selectStatement` / `selectStream` / `selectStreamCallback`; only value flags apply there. See the [documentation site](https://iliaal.github.io/php_clickhouse/) for full signatures and streaming formats.
 
 The `passwd` key also accepts the `password` alias. Returning `false` from a `selectStreamCallback()` callback stops the stream cleanly.
 
@@ -174,7 +170,7 @@ Companion native PHP extensions:
 
 ## 📚 Read more
 
-Full background, fork rationale, and benchmark methodology in the launch post: [php_clickhouse: A Native ClickHouse Client for PHP, Picking Up Where SeasClick Left Off](https://ilia.ws/blog/php-clickhouse-a-native-clickhouse-client-for-php-picking-up-where-seasclick-left-off).
+The launch post covers the fork rationale and benchmark methodology: [php_clickhouse: A Native ClickHouse Client for PHP, Picking Up Where SeasClick Left Off](https://ilia.ws/blog/php-clickhouse-a-native-clickhouse-client-for-php-picking-up-where-seasclick-left-off).
 
 ## License
 

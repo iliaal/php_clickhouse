@@ -27,8 +27,8 @@ try {
 fclose($fp);
 $ch->execute("DROP TABLE test.sfs131a");
 
-/* ClickHouse TabSeparated escapes an apostrophe as \' on output. The
- * reader must fold it back to ' (the backslash was being kept). */
+/* ClickHouse TabSeparated escapes an apostrophe as \' on output; the
+ * reader must fold it back to '. */
 $ch->execute("DROP TABLE IF EXISTS test.sfs131b");
 $ch->execute("CREATE TABLE test.sfs131b (s String) ENGINE=Memory");
 $fp = fopen("php://temp", "r+");

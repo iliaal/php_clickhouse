@@ -1,6 +1,6 @@
 # TODO
 
-Post-0.8.0 work. Gap analysis against [smi2/phpClickHouse](https://github.com/smi2/phpClickHouse), the canonical pure-PHP HTTP client. Items here are functional gaps (real missing capability) or porting friction for users coming from smi2.
+Gap analysis against [smi2/phpClickHouse](https://github.com/smi2/phpClickHouse), the most-used pure-PHP HTTP client. Items are either missing capability or porting friction for users coming from smi2.
 
 HTTP-only features (sessions, curl options, file-based `WHERE IN`/write-to-file, HTTP auth methods, `X-ClickHouse-Summary` header) are excluded since they have no native-binary analogue.
 
@@ -17,28 +17,13 @@ Scope: vendor blocker. Two paths:
 
 Once decoded, surface via `getTotals()` / `getExtremes()` methods on `ClickHouse`.
 
-### Protocol-level verbose tracing (landed in 0.8.0)
-
-`setVerbose(bool|callable $sink): static`. `true` writes JSON lines to STDERR; `false` disables; a callable is invoked with `($event, $context)` per event. Events emitted at lifecycle points (`select_start`, `data_block`, `select_finish`, `execute_start`, `execute_finish`) plus `server_exception` from the protocol's exception packet path. Existing progress/profile callbacks are unaffected.
-
-True byte-level wire tracing (raw packet hex dumps) was not implemented. The event-level surface above is what the native protocol's hookable callbacks expose, and matches the operational debugging value of smi2's HTTP request/response logging without the dependency on the underlying transport.
-
-## Cosmetic / porting friction (smi2 -> php_clickhouse)
-
-Landed in 0.8.0:
-- `setSettings()` returns `$this` (was `bool`).
-- `setSetting(string $key, mixed $value): static` for chainable single-key writes.
-- `setDatabase(string $database): static` rebuilds the client with the new default database so reconnects preserve it.
-- `ClickHouseException::getServerCode()` / `getServerName()` / `getQueryId()` getter aliases.
-- `selectStatement(): ClickHouseStatement` opt-in result wrapper. New `ClickHouseStatement` class implements Iterator, Countable, ArrayAccess, JsonSerializable plus `fetchOne` / `fetchKeyPair` / `fetchColumn` / `toArray` / `statistics`. `select()` is unchanged.
-
-Remaining items are lower-leverage and stay deferred.
+## Deferred porting friction (smi2 -> php_clickhouse)
 
 ### Full chainable settings builder (deferred)
 
 smi2: `$client->settings()->max_execution_time(30)->max_memory_usage(...)`. We have `setSetting($key, $value)` for chainable single-key writes and `setSettings($array)` for bulk replacement, both returning `$this`. The remaining gap is the magic-method-per-key API.
 
-A full `ClickHouseSettings` builder class with one method per setting key is mostly cosmetic; the existing API already chains. ClickHouse has 200+ settings, half unstable, so generating one method per key would couple us to vendor-side churn for marginal benefit. Defer unless users specifically ask for it.
+A full `ClickHouseSettings` builder class with one method per setting key is mostly cosmetic; the existing API already chains. ClickHouse has 200+ settings, half of them unstable, so one method per key would tie us to upstream churn. Defer unless users ask for it.
 
 ### Bindings / placeholder syntax compatibility (deferred)
 
@@ -56,4 +41,4 @@ The native-protocol typed form is strictly better. Adding `:param` as a third al
 - Sub-millisecond timeout precision.
 - TCP socket knobs (`tcp_nodelay`, full `tcp_keepalive_*`).
 - True native decoding of `Map`, `LowCardinality`, `Tuple` (HTTP returns strings or JSON).
-- Custom `zend_object` model: ZTS first-class, no module-global state, `free_obj` reaps on bailout.
+- Custom `zend_object` model: ZTS-safe, no module-global state, `free_obj` reaps on bailout.

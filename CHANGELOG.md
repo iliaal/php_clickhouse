@@ -37,7 +37,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Map` reads reject key/value count mismatch in both directions.
 - Hot-path speedups measured on 200k-row probes: inserts with temporal/string/IP columns about 19% faster, IPv4 selects about 12% faster, numeric `selectToStream` 5-10% faster.
 
-
 ### Fixed
 
 - Inserting an invalid raw JSON string into a `JSON` column no longer runs a destructor over uninitialized stack memory on PHP below 8.3; it throws cleanly on every supported PHP version.
@@ -136,10 +135,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
-- Result decoding downcast each scalar column's concrete type once per cell through `dynamic_pointer_cast` (an atomic refcount round-trip plus an RTTI walk); a callgrind of an `Int64` read attributed ~18% of decode instructions to that alone. The integer, float, and `String` read paths now use a direct static cast, safe because their `Type::Code` identifies the concrete `ColumnVector<T>` / `ColumnString` class one-to-one. The version-fragile types (`IPv4` / `IPv6` / `FixedString`, geo, `Enum`, nested) keep the checked cast that guards against cross-version reclassification. Wide integer `SELECT`s decode ~25% faster; mixed wide rows ~20%, `String` ~12%.
-- `selectStatement()` no longer builds a second, position-keyed copy of every row when all column names are distinct; the associative rows already preserve column order and the `fetchOne` / `fetchKeyPair` / `fetchColumn` methods fall back to them. Roughly halves decode time for wide statement results. The positional copy is still built when duplicate column names (`SELECT number, number`) require it.
+- Integer, float, and `String` result decoding uses a static cast instead of a per-cell `dynamic_pointer_cast`, which callgrind put at ~18% of `Int64` decode instructions. Wide integer `SELECT`s decode ~25% faster, mixed wide rows ~20%, `String` ~12%. Version-fragile types (`IPv4` / `IPv6` / `FixedString`, geo, `Enum`, nested) keep the checked cast.
+- `selectStatement()` skips the second, position-keyed copy of every row when all column names are distinct, roughly halving decode time for wide results. Duplicate column names (`SELECT number, number`) still get the positional copy.
 - Result rows and nested `Array` / `Tuple` / `Map` / `Point` values are pre-sized with `array_init_size`, avoiding hash-table rehashing while decoding wide rows and large nested values.
-- Numeric insert columns (every `Int` / `UInt` width and `Float32` / `Float64`) build straight from the row-major input, skipping the per-column transpose into a temporary PHP array that the previous path built, walked a second time, and then destroyed. Their strict coercers never re-enter user code, so the live rows can be read directly with no snapshot; `String`, `UUID`, `Decimal`, date-from-string, `Enum`, and composite columns keep the transpose path (their coercion can invoke `__toString`). Insert throughput improves roughly 30–44% for numeric-heavy rows and ~10% for mixed rows, across `insert()`, `insertAssoc()`, external tables, and streaming `write()`.
+- Numeric insert columns (every `Int` / `UInt` width and `Float32` / `Float64`) build straight from the row-major input without a temporary per-column PHP array. Insert throughput improves roughly 30–44% for numeric-heavy rows and ~10% for mixed rows across `insert()`, `insertAssoc()`, external tables, and streaming `write()`. `String`, `UUID`, `Decimal`, date-from-string, `Enum`, and composite columns keep the transpose path because their coercion can call `__toString`.
 
 ### Fixed
 
@@ -208,7 +207,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Vendored `clickhouse-cpp` bumped from v2.6.1 to v2.6.2.
-- The `memcpy(NULL, 0)` UBSan guard in `ColumnString::AppendUnsafe` (empty `string_view`) is no longer carried as a local patch — it is now present upstream.
+- The `memcpy(NULL, 0)` UBSan guard in `ColumnString::AppendUnsafe` (empty `string_view`) is no longer carried as a local patch; it is now upstream.
 - The remaining five local patches were re-applied (one required adaptation for the `inserting_` → `state_` refactor). See `lib/clickhouse-cpp/LOCAL_PATCHES.md` for the current list and notes on which changes are good candidates to propose upstream.
 
 ### Fixed
@@ -325,14 +324,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TabSeparated`, `TabSeparatedWithNames`, `CSV`, or `CSVWithNames`
   format. Returns rows written. Cells are formatted block-by-block in
   C++ from native column data and flushed without per-row PHP array
-  assembly or userland callback overhead, so large exports run
-  meaningfully faster than `selectStream` + manual `fwrite`. Dates
+  assembly or userland callbacks, so large exports run faster than
+  `selectStream` + manual `fwrite`. Dates
   always emit as ISO strings; Decimal / Int128 / UInt128 as decimal
   strings; NULL renders as `\N` in TSV and as an empty cell in CSV.
   Nullable and LowCardinality wrappers around supported scalars are
-  fine; Array, Tuple, Map, and geometry columns are rejected with a
-  `ClickHouseException` — text formats can't unambiguously represent
-  them. Mid-stream errors `ResetConnection()` the handle to keep it
+  fine; Array, Tuple, Map, and geometry columns throw
+  `ClickHouseException` because text formats can't represent them
+  unambiguously. Mid-stream errors `ResetConnection()` the handle to keep it
   usable, mirroring the existing recovery in `insert()` / `writeStart()`.
 - 5 new PHPTs (098–102) cover TSV happy path with escape characters,
   CSV RFC-4180 quoting (embedded `"`, `,`, `\n`, `\r`), `WithNames`
@@ -358,51 +357,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Parser strictness for `insertFromStream` is RFC 4180-strict in CSV
-  (any byte other than `,` / CR / LF / `""`-escape after a closing
-  quote throws; a quoted-empty cell at EOF without a trailing newline
-  still flushes the row) and ClickHouse-TSV-strict (`\N` is the
-  whole-cell NULL marker — trailing bytes after it throw, `\\N`
-  decodes to the literal two-character string and not NULL). NULL
-  into a non-Nullable target column is rejected up front against the
-  server schema (Nullable / LowCardinality(Nullable(...)) accepted,
-  everything else throws with the column name). Empty external-table
-  rows in `selectWithExternalData` are rejected with a clear message
-  (the native protocol uses an empty block as the end-of-stream
-  marker, so the clickhouse-cpp client silently skips zero-row named
-  blocks and the server then sees no such table). Stream read errors
-  do not commit partial data — `php_stream_read` returning `n < 0`,
-  or `n == 0` while `!php_stream_eof()`, throws and routes through
-  the existing `ResetConnection()` recovery so any rows enqueued
-  before the failure discard before commit. TSV escapes split across
-  a `php_stream_read` chunk boundary (a `\` at byte 65 535) now
-  decode correctly via a `pending_backslash` parser-state field
-  (same mechanism `prev_was_cr` uses for CRLF straddling a chunk).
-- Internal: parser containers (`cell_buf`, `row_cells`) pre-sized at
-  setup so the first row pays the same allocation cost as subsequent
-  rows; `appendCellForStream` skips the `zend_string` round-trip
-  when the cell is already `IS_STRING` (String / FixedString / Date*
-  / DateTime* / Decimal* / Int128 / UInt128 / UUID / IPv4 / IPv6 —
-  produced as strings by `convertToZval` under
-  `SC_FETCH_DATE_AS_STRINGS`). `StreamOutFormat` and
-  `InsertStreamFormat` collapsed into one `StreamFormat` enum with a
-  single parse helper, removing the synchronization hazard between
-  the input and output sides of the format alias table.
+- `insertFromStream` CSV parsing is RFC 4180-strict: any byte other
+  than `,` / CR / LF / `""` after a closing quote throws. A
+  quoted-empty cell at EOF without a trailing newline still flushes
+  the row.
+- `insertFromStream` TSV parsing follows ClickHouse: `\N` is a
+  whole-cell NULL marker, trailing bytes after it throw, and `\\N`
+  decodes to the literal two-character string.
+- `insertFromStream` rejects NULL for a non-Nullable target column up
+  front, naming the column. Nullable and
+  `LowCardinality(Nullable(...))` columns accept it.
+- `selectWithExternalData` rejects an external table with no rows.
+  The native protocol treats an empty block as end-of-stream, so the
+  server would otherwise report the table as missing.
+- `insertFromStream` stream read errors throw and reset the
+  connection, so rows enqueued before the failure are discarded
+  instead of committed.
+- TSV escapes split across a `php_stream_read` chunk boundary (a `\`
+  at byte 65 535) now decode correctly.
+- Internal: parser buffers are pre-sized, string cells skip a
+  redundant `zend_string` copy in `appendCellForStream`, and
+  `StreamOutFormat` / `InsertStreamFormat` merged into one
+  `StreamFormat` enum with a single parse helper.
 
 ## [0.8.1] - 2026-05-01
 
-Hardening release covering nine rounds of reviewer-driven fixes
-across the insert, write, and type-conversion surfaces. Streaming
-and direct insert paths now recover the native client across every
-server-side rejection point (BeginInsert, SendInsertBlock,
-EndInsert) so a thrown insert no longer wedges the handle with
-"cannot execute query while inserting". Type conversion gained
-strict full-consumption parsers for the Map, narrow-int, UInt64,
-Int128/UInt128, and date/time surfaces; placeholders, hex literals,
-enums, and Nullable inserts validate up front instead of silently
-coercing. Insert and write batch transposition no longer
-materializes a full PHP column-major matrix — peak intermediate PHP
-memory drops from N_rows × N_cols to one column at a time.
+Hardening release for inserts, streaming writes, and type conversion.
+A server-side rejection at any insert stage (BeginInsert,
+SendInsertBlock, EndInsert) now recovers the native client, so a
+thrown insert no longer wedges the handle with "cannot execute query
+while inserting". Map, narrow-int, UInt64, Int128/UInt128, and
+date/time inputs use strict full-consumption parsers; placeholders,
+hex literals, enums, and Nullable inserts validate up front instead
+of silently coercing. Insert and write batches no longer build a
+full column-major PHP matrix, so peak intermediate PHP memory drops
+from N_rows × N_cols to one column at a time.
 
 ### Added
 
@@ -497,7 +486,7 @@ Architecture refactor that moves per-Client state from file-scope
 ZTS support (no more global state to thread-isolate), plugs a
 pre-existing leak on bailout (`free_obj` fires; the old userspace-only
 `__destruct` did not), and fixes a refcount bug on the progress
-callback. ZTS Linux builds are now first-class; a Windows
+callback. ZTS Linux builds are now fully supported; a Windows
 `config.w32` ships and is exercised in CI as a build-only smoke
 test. Adds streaming via `ClickHouseRowIterator` plus a true
 per-row callback path, four new Client knobs / introspection
@@ -597,7 +586,7 @@ and geo-type round-trips, and `query_id` echo through
 
 ### Security & Hardening
 
-- Multi-round security and correctness sweep across the input boundary,
+- Security and correctness fixes across the input boundary,
   Map / Int128 / hex parsers, recursion paths, and locale-sensitive
   serialization. Wrong-type input now surfaces as `TypeError` instead
   of corrupting memory; adversarial server schemas can no longer
@@ -878,7 +867,7 @@ locally and queued for upstream.
 This release renames the extension from `SeasClick` to `php_clickhouse`,
 upgrades the vendored client library to ClickHouse/clickhouse-cpp v2.6.1,
 and adds significant new functionality. The original SeasClick project
-(SeasX/SeasClick on GitHub) appears unmaintained — its last accepted
+(SeasX/SeasClick on GitHub) appears unmaintained; its last accepted
 external PR is from 2020. php_clickhouse is a soft fork that goes its
 own way.
 
@@ -892,8 +881,8 @@ own way.
   - `Time` and `Time64(N)` (requires ClickHouse 25.x or later on the
     server)
   - `DateTime64(N[, timezone])`
-  - `Int128`, `UInt128`, `Decimal128(P, S)` — round-trip as decimal
-    strings since PHP integers are 64-bit
+  - `Int128`, `UInt128`, `Decimal128(P, S)`, which round-trip as
+    decimal strings since PHP integers are 64-bit
   - `LowCardinality(String)` and `LowCardinality(FixedString(N))`
   - `Map(K, V)` for `(String, String)`, `(String, Int64)`,
     `(String, UInt64)`, `(String, Float64)`, and `(Int64, String)`
@@ -905,7 +894,7 @@ own way.
     `tcp_keepalive_intvl`, `tcp_keepalive_cnt`
   - `send_timeout` (companion to `receive_timeout` and
     `connect_timeout`)
-  - `endpoints` — list of `[{host, port}, ...]` for round-robin
+  - `endpoints`: list of `[{host, port}, ...]` for round-robin
     failover. The lib walks the list in order on connect failure.
   - `max_compression_chunk_size`
 - `query_id` accepted as a final optional argument on `select()`,

@@ -3000,10 +3000,9 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
 
     case Type::Code::LowCardinality:
     {
-        // Drop through ColumnLowCardinality::GetItem so the same code
-        // path covers LC(String), LC(FixedString), LC(Nullable(String)),
-        // and LC(Nullable(FixedString)) -- a NULL entry returns an
-        // ItemView with type Void regardless of the nested column.
+        // ColumnLowCardinality::GetItem covers LC(String), LC(FixedString),
+        // LC(Nullable(String)), and LC(Nullable(FixedString)). A NULL entry
+        // returns an ItemView with type Void regardless of the nested column.
         auto lc = columnRef->As<ColumnLowCardinality>();
         if (!lc) {
             throw std::runtime_error("LowCardinality column downcast failed");

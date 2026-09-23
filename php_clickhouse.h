@@ -38,15 +38,14 @@ extern zend_module_entry clickhouse_module_entry;
 #define SC_FETCH_FIXEDSTRING_BINARY 128
 #define SC_FETCH_MAP_AS_PAIRS 256
 
-/* Per-cell value-shaping flags (how a single cell is rendered), as opposed
- * to the result-shape flags (FETCH_ONE / KEY_PAIR / COLUMN) that restructure
- * the whole result. The row-iterator and per-row callback always build an
- * assoc row, so only the value-shaping subset is meaningful there; passing a
- * shape flag to the per-cell convertToZval would corrupt the row (e.g.
- * FETCH_ONE makes it emit a scalar).
+/* Value-shaping flags change how one cell renders; result-shape flags
+ * (FETCH_ONE / KEY_PAIR / COLUMN) restructure the whole result. Row
+ * iterators and per-row callbacks always build assoc rows, so they pass
+ * only this subset to convertToZval; a shape flag would corrupt the row
+ * (FETCH_ONE emits a scalar).
  *
- * Values must stay in lockstep with ClickHouse::* class constants in
- * clickhouse.stub.php (public names differ for some flags). */
+ * Values must match the ClickHouse::* constants in clickhouse.stub.php
+ * (public names differ for some flags). */
 #define SC_FETCH_VALUE_FLAGS (SC_FETCH_DATE_AS_STRINGS | SC_FETCH_JSON_AS_ARRAY | SC_FETCH_JSON_AS_OBJECT | SC_FETCH_UUID_WITH_DASHES | SC_FETCH_FIXEDSTRING_BINARY | SC_FETCH_MAP_AS_PAIRS)
 
 #define CLICKHOUSE_RES_NAME "ClickHouse"

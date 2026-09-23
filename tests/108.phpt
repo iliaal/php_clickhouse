@@ -53,7 +53,7 @@ $n = $c->insertFromStream("test.null_strict", ["id", "s", "note"], $mem);
 fclose($mem);
 echo "row-term-after-N rows: $n\n";
 
-// 5. `\N` followed by tab is fine — column order swapped so the NULL
+// 5. `\N` followed by tab is fine; column order swapped so the NULL
 //    targets the Nullable `note` column instead of the non-Nullable `s`.
 $mem = fopen("php://memory", "w+b");
 fwrite($mem, "3\t\\N\tok\n");
@@ -72,7 +72,7 @@ echo "double-backslash-N rows: $n\n";
 $r = $c->select("SELECT s, length(s) AS l FROM test.null_strict WHERE id=4")[0];
 echo "row 4 s={$r['s']} len={$r['l']}\n";
 
-// 7. CSV `\N` followed by non-comma is permissive — becomes a string.
+// 7. CSV `\N` followed by non-comma is permissive and becomes a string.
 //    Documented behavior; CSV has no escape protocol.
 $mem = fopen("php://memory", "w+b");
 fwrite($mem, "5,\\Nx,note\r\n");

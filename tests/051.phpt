@@ -128,10 +128,9 @@ foreach ($property_types as $p => $expected) {
 }
 echo "bad_property_types=", count($bad_property_types) ? implode(",", $bad_property_types) : "none", "\n";
 
-/* Constructor on a port that no one is listening on, with a tight
- * timeout, must throw ClickHouseException -- proves the C++ -> PHP
- * exception boundary works on this build/OS. Uses port 1 (reserved,
- * always rejected) and a 50ms connect timeout. */
+/* Connecting to port 1 (reserved, always refused) with a 50ms timeout
+ * must throw ClickHouseException, proving the C++ -> PHP exception
+ * boundary works on this build/OS. */
 try {
     new ClickHouse([
         "host" => "127.0.0.1",

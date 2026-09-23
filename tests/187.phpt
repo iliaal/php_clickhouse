@@ -41,7 +41,7 @@ $rendered = $c->select(
 );
 
 $expected = array(
-    /* INT64_MIN — negating it as a signed value is undefined behaviour. */
+    /* INT64_MIN: negating it as a signed value is undefined behaviour. */
     "-9223372036854775808" => "-2562047788015215:30:08",
     /* Server-clamped to the Time64 minimum, in whole seconds. */
     "-3599999"             => "-999:59:59",

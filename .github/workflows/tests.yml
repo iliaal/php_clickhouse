@@ -133,11 +133,10 @@ jobs:
           CLICKHOUSE_HOST: 127.0.0.1
           CLICKHOUSE_PORT: 9000
         run: |
-          # _clickhouse.inc SKIPIFs the whole suite when the native port is
-          # unreachable, and run-tests.php exits 0 on an all-skip run -- so a
-          # dead server would turn into a falsely-green lane. Fail fast if the
-          # native protocol port is not accepting connections. (Auth failures
-          # surface as test FAILs, not skips, so the port check is sufficient.)
+          # _clickhouse.inc skips the whole suite when the native port is
+          # unreachable, and run-tests.php exits 0 on an all-skip run, so a
+          # dead server would give a false green. Fail fast if the port is
+          # closed. Auth failures surface as FAILs, so the port check suffices.
           for i in $(seq 1 30); do
             if php -r 'exit(@fsockopen(getenv("CLICKHOUSE_HOST"), (int)getenv("CLICKHOUSE_PORT"), $e, $s, 2) ? 0 : 1);'; then
               echo "ClickHouse reachable on ${CLICKHOUSE_HOST}:${CLICKHOUSE_PORT}"; exit 0
@@ -199,11 +198,10 @@ jobs:
             -subj "/CN=wrong-ca"
           chmod 644 "$RUNNER_TEMP/ch-certs/wrong.key" "$RUNNER_TEMP/ch-certs/wrong.crt"
 
-          # The services: clickhouse container is plaintext-only, and GitHub
-          # service containers start before any step runs -- they can't mount a
-          # cert generated here. Run the TLS server manually instead. Native TLS
-          # on 9440; plaintext HTTP exposed on host 8124 (container 8123) purely
-          # as a version-agnostic readiness probe.
+          # The services: clickhouse container is plaintext-only, and service
+          # containers start before any step runs, so they can't mount a cert
+          # generated here. Run the TLS server manually: native TLS on 9440,
+          # plaintext HTTP on host 8124 (container 8123) as a readiness probe.
           docker run -d --name clickhouse-tls \
             --ulimit nofile=262144:262144 \
             -p 9440:9440 -p 8124:8123 \
@@ -381,11 +379,9 @@ jobs:
         uses: php/php-windows-builder/extension-matrix@e03e5d39879adaeb61ed2225f0f4eae7db8c1df8 # 1.8.1
         with:
           # Mirror the release-windows.yml matrix so the pre-tag gate builds
-          # every toolset we ship. PHP 8.3 pins the VS2019 (vs16) toolset;
-          # 8.4/8.5 use VS2022 (vs17). A clickhouse-cpp 2.6.2 construct that
-          # compiled only under vs17 shipped a Windows-binary-less 0.8.6
-          # because this gate built 8.4 alone -- keep all three so vs16
-          # breakage blocks the release instead of surfacing post-tag.
+          # every toolset we ship: PHP 8.3 uses VS2019 (vs16), 8.4/8.5 use
+          # VS2022 (vs17). Building only 8.4 let a vs17-only construct ship
+          # 0.8.6 without Windows binaries.
           php-version-list: '8.3, 8.4, 8.5'
 
   windows:
@@ -508,9 +504,9 @@ jobs:
           # set so the runtime ABI lines up. Disable `function` (PHP's own
           # build does) and `vptr` (the vptr check needs
           # __ubsan_vptr_type_cache, which the dlopen'd extension can't
-          # resolve against the host PHP's runtime). Also disable
-          # The vendored LZ4 NULL+0 expression is patched locally, so keep
-          # pointer-overflow enabled for both extension and vendor sources.
+          # resolve against the host PHP's runtime). The vendored LZ4 NULL+0
+          # expression is patched locally, so pointer-overflow stays enabled
+          # for both extension and vendor sources.
           CC=clang CXX=clang++ \
           CFLAGS="-fsanitize=address,undefined -fno-sanitize=function,vptr -shared-libasan -DZEND_TRACK_ARENA_ALLOC" \
           CXXFLAGS="-fsanitize=address,undefined -fno-sanitize=function,vptr -shared-libasan -DZEND_TRACK_ARENA_ALLOC" \

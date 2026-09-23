@@ -26,7 +26,7 @@ unset($c2);
 $cnt = $c->select("SELECT count() FROM test.destruct_finalize", [], ClickHouse::FETCH_ONE);
 echo "after dirty unset: $cnt\n";
 
-// Clean session: writeStart but never wrote — destructor closes the empty
+// Clean session: writeStart but never wrote; destructor closes the empty
 // insert without throwing or wedging the server. No rows added.
 $c3 = new ClickHouse($cfg);
 $c3->writeStart("test.destruct_finalize", ["id"]);

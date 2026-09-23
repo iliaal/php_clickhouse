@@ -11,7 +11,7 @@ require __DIR__ . "/_clickhouse.inc";
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
 
-// Array(Nullable(String)) read path -- the inner null mask must round-trip.
+// Array(Nullable(String)) read path: the inner null mask must round-trip.
 $rows = $c->select("SELECT [1, NULL, 3, NULL] AS arr_n");
 echo "arr_n=", json_encode($rows[0]["arr_n"]), "\n";
 
@@ -19,7 +19,7 @@ echo "arr_n=", json_encode($rows[0]["arr_n"]), "\n";
 $rows = $c->select("SELECT [(1, 'a'), (2, 'b')] AS arr_t");
 echo "arr_t=", json_encode($rows[0]["arr_t"]), "\n";
 
-// Array(Array(...)) -- two-dim, server-built.
+// Array(Array(...)): two-dim, server-built.
 $rows = $c->select("SELECT [[1, 2], [3], []] AS arr_a");
 echo "arr_a=", json_encode($rows[0]["arr_a"]), "\n";
 

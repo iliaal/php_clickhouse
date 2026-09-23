@@ -32,7 +32,7 @@ probe("bad-format", fn() =>
 
 // `@`-suppress: PHP 7.4 emits an E_WARNING before php_stream_from_zval_no_verify
 // returns NULL on a non-resource argument; PHP 8.x is silent. The throw is
-// identical on both — only the pre-throw warning text differs.
+// identical on both; only the pre-throw warning text differs.
 probe("not-a-stream", fn() =>
     @$c->selectToStream("SELECT id FROM test.stream_bad", [], "not a stream"));
 

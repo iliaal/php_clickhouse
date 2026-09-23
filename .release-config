@@ -32,8 +32,6 @@ extra_build_variants:
 linux_prebuilt: true
 
 # .github/workflows/release-windows.yml ships 12 DLL zips (8.3/8.4/8.5 x
-# nts/ts x x64/x86, covering the vs16 and vs17 toolsets). The flag was absent
-# through 0.11.0, which understated the release's asset surface in the
-# /release-ext summary; the release itself resolves the create-vs-upload
-# pattern from the workflow trigger, not from this flag.
+# nts/ts x x64/x86, covering the vs16 and vs17 toolsets). The release resolves
+# create-vs-upload from the workflow trigger, not from this flag.
 windows_ci: true
