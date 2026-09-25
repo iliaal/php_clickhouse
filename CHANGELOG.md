@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Reject malformed server packets before callbacks, rotate endpoints within
+  bounded retries, and validate UInt64/IPv4 and associative map-key inputs.
+
 ## [0.12.1] - 2026-09-04
 
 ### Fixed
