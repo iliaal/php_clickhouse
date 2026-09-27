@@ -80,6 +80,10 @@ if (strpos($mode, "packet:") === 0) {
         fwrite(STDERR, "handshake failed\n");
         exit(2);
     }
+    if (readClientCode($peer) !== 1) {
+        fwrite(STDERR, "query not received\n");
+        exit(2);
+    }
     if ($packet === "initial") {
         fwrite($peer, $overlong);
         usleep(200000);
@@ -107,6 +111,13 @@ if (strpos($mode, "packet:") === 0) {
         fwrite($peer, $data . "\x03\x01");
     } else {
         exit(4);
+    }
+    stream_socket_shutdown($peer, STREAM_SHUT_WR);
+    stream_set_blocking($peer, true);
+    stream_set_timeout($peer, 1);
+    while (!feof($peer)) {
+        $chunk = fread($peer, 8192);
+        if ($chunk === false || $chunk === "") break;
     }
     fclose($peer);
     fclose($server);
@@ -236,6 +247,7 @@ foreach (["initial", "progress", "profile", "log", "columns", "events", "excepti
         echo "$packet=", $expectedProtocolError ? "rejected" : "wrong", "\n";
     }
     if ($packet === "exception") echo "exception-server-events=$serverExceptionEvents\n";
+    unset($client);
     fclose($pipes[1]);
     $stderr = stream_get_contents($pipes[2]);
     fclose($pipes[2]);
