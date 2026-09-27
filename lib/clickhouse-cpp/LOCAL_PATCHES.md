@@ -254,3 +254,17 @@ Patch: `0013-Cap-teardown-timeouts-at-5s.patch`. Applies
 `min(configured, 5s)` to the teardown recv/send timeouts (plus an
 `<algorithm>` include for `std::min`). The floor still covers the
 infinite case; a positive-but-huge timeout no longer hangs teardown.
+
+## clickhouse/client.cpp: malformed packets and unbounded ping retries
+
+`ReceivePacket()` mapped failed varints, metadata, and auxiliary packet reads to
+`std::monostate`, which callers treated as a clean end-of-stream. This could
+silently return partial query results. `ReceiveException()` also published and
+threw partially decoded server exceptions, and automatic ping recovery could
+loop forever on a peer that completed handshakes but never returned Pong.
+
+Patch: `0014-Bound-protocol-decoding-and-ping-retries.patch`. Packet decode
+failures now throw `ProtocolError`; exception callbacks and throws are gated on
+complete decoding, including handshake exceptions; and `RetryGuard()` honors
+`send_retries` with an immediate failure at zero retries. Exercised by
+`tests/217_packet_decode_and_ping_retry.phpt`.

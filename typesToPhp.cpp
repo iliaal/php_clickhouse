@@ -225,6 +225,43 @@ static int64_t strict_zval_i64(zval *z, const char *type_label)
     }
 }
 
+static uint64_t strict_u64_string(const char *s, size_t slen,
+                                 const char *type_label)
+{
+    if (slen == 0) {
+        throw std::runtime_error(
+            std::string("empty string cannot be assigned to ") + type_label);
+    }
+    int base = 10;
+    const char *p = s;
+    size_t plen = slen;
+    if (slen >= 3 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        base = 16;
+        p = s + 2;
+        plen = slen - 2;
+    }
+    auto invalid = [&]() {
+        throw std::runtime_error(
+            std::string("invalid integer string for ") + type_label);
+    };
+    if (plen == 0) invalid();
+    for (size_t i = 0; i < plen; ++i) {
+        const unsigned char c = static_cast<unsigned char>(p[i]);
+        const bool decimal_digit = c >= '0' && c <= '9';
+        const bool hex_digit = decimal_digit ||
+            (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+        if (!(base == 10 ? decimal_digit : hex_digit)) invalid();
+    }
+    char *endp = NULL;
+    errno = 0;
+    unsigned long long v = strtoull(p, &endp, base);
+    if (errno == ERANGE || endp == p ||
+        (size_t)(endp - p) != plen) {
+        invalid();
+    }
+    return (uint64_t)v;
+}
+
 /* UInt64 values above INT64_MAX arrive as decimal strings; use unsigned parsing. */
 static uint64_t strict_zval_u64(zval *z, const char *type_label)
 {
@@ -263,35 +300,8 @@ static uint64_t strict_zval_u64(zval *z, const char *type_label)
             }
             return (uint64_t)d;
         }
-        case IS_STRING: {
-            const char *s = Z_STRVAL_P(z);
-            size_t slen = Z_STRLEN_P(z);
-            if (slen == 0) {
-                throw std::runtime_error(
-                    std::string("empty string cannot be assigned to ") + type_label);
-            }
-            int base = 10;
-            const char *p = s;
-            size_t plen = slen;
-            if (slen >= 3 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
-                base = 16;
-                p = s + 2;
-                plen = slen - 2;
-            }
-            if (*p == '-' || *p == '+') {
-                throw std::runtime_error(
-                    std::string("invalid integer string for ") + type_label);
-            }
-            char *endp = NULL;
-            errno = 0;
-            unsigned long long v = strtoull(p, &endp, base);
-            if (errno == ERANGE || endp == p ||
-                (size_t)(endp - p) != plen) {
-                throw std::runtime_error(
-                    std::string("invalid integer string for ") + type_label);
-            }
-            return (uint64_t)v;
-        }
+        case IS_STRING:
+            return strict_u64_string(Z_STRVAL_P(z), Z_STRLEN_P(z), type_label);
         default:
             throw std::runtime_error(
                 std::string("array / object / resource cannot be assigned to integer column ") + type_label);
@@ -1666,7 +1676,7 @@ static ColumnRef insertGeoIpColumn(Type::Code code, HashTable *values_ht)
             } else if (Z_TYPE_P(v) == IS_LONG || Z_TYPE_P(v) == IS_DOUBLE) {
                 /* Match toIPv4(N): 16909060 -> 1.2.3.4. The native uint32 Append
                  * has different byte-order handling, so use the validated text path. */
-                zend_long n;
+                uint32_t u;
                 if (Z_TYPE_P(v) == IS_DOUBLE) {
                     double d = Z_DVAL_P(v), intpart;
                     if (std::isnan(d) || std::isinf(d) || std::modf(d, &intpart) != 0.0) {
@@ -1675,14 +1685,14 @@ static ColumnRef insertGeoIpColumn(Type::Code code, HashTable *values_ht)
                     if (d < 0.0 || d > (double)UINT32_MAX) {
                         throw std::runtime_error("IPv4 integer out of range (0 .. 4294967295)");
                     }
-                    n = (zend_long)d;
+                    u = (uint32_t)d;
                 } else {
-                    n = Z_LVAL_P(v);
+                    zend_long n = Z_LVAL_P(v);
+                    if (n < 0 || (uint64_t)n > UINT32_MAX) {
+                        throw std::runtime_error("IPv4 integer out of range (0 .. 4294967295)");
+                    }
+                    u = (uint32_t)n;
                 }
-                if (n < 0 || (uint64_t)n > UINT32_MAX) {
-                    throw std::runtime_error("IPv4 integer out of range (0 .. 4294967295)");
-                }
-                uint32_t u = (uint32_t)n;
                 char ipbuf[16];
                 snprintf(ipbuf, sizeof(ipbuf), "%u.%u.%u.%u",
                          (unsigned)((u >> 24) & 0xFF), (unsigned)((u >> 16) & 0xFF),
@@ -1803,16 +1813,7 @@ static ColumnRef insertMapColumn(TypeRef type, HashTable *values_ht)
                 }
                 return (uint64_t)signed_key;
             }
-            const char *s = ZSTR_VAL(zk);
-            char *endp = NULL;
-            errno = 0;
-            unsigned long long v = strtoull(s, &endp, 10);
-            if (errno == ERANGE || endp == s || (size_t)(endp - s) != ZSTR_LEN(zk)) {
-                throw std::runtime_error(
-                    std::string("Map unsigned key is not a valid number: ") +
-                    std::string(s, ZSTR_LEN(zk)));
-            }
-            return (uint64_t)v;
+            return strict_u64_string(ZSTR_VAL(zk), ZSTR_LEN(zk), "Map UInt64 key");
         };
         auto f64Key = [](zend_string *zk, zend_ulong nk) -> double {
             if (!zk) return (double)(zend_long)nk;
