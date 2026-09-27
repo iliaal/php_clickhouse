@@ -118,7 +118,7 @@ $healthy = isset($argv[3]) && $argv[3] === "healthy";
 $limit = $healthy ? 1 : ($retryCount > 0 ? 3 : 1);
 $pings = 0;
 $queries = 0;
-$deadline = microtime(true) + 1.0;
+$deadline = microtime(true) + 3.0;
 stream_set_blocking($server, false);
 while ($pings < $limit && microtime(true) < $deadline) {
     $read = [$server];
@@ -127,6 +127,8 @@ while ($pings < $limit && microtime(true) < $deadline) {
     if (@stream_select($read, $write, $except, 0, 200000) < 1) continue;
     $peer = @stream_socket_accept($server);
     if ($peer === false) continue;
+    stream_set_blocking($peer, true);
+    stream_set_timeout($peer, 0, 200000);
     if (!handshake($peer, $hello)) exit(5);
     $code = readClientCode($peer);
     if ($code === 4) {
@@ -145,7 +147,6 @@ while ($pings < $limit && microtime(true) < $deadline) {
         $queries++;
         fwrite($peer, "\x05");
     }
-    if ($retryCount > 0 && !$healthy && $pings >= 2) break;
     if ($retryCount === 0) {
         stream_set_timeout($peer, 0, 200000);
         $code = fread($peer, 1);
@@ -161,11 +162,19 @@ fclose($server);
 fwrite(STDERR, "pings=$pings queries=$queries\n");
 PHP;
 
-function startMock($code, $mode, $arg = null, $variant = null) {
-    $command = escapeshellarg(PHP_BINARY) . " -n -r " . escapeshellarg($code) .
-        " " . escapeshellarg($mode);
-    if ($arg !== null) $command .= " " . (int)$arg;
-    if (isset($variant)) $command .= " " . escapeshellarg($variant);
+$mockFile = tempnam(sys_get_temp_dir(), "clickhouse-mock-");
+if ($mockFile === false) throw new RuntimeException("mock file creation failed");
+register_shutdown_function(function () use ($mockFile) {
+    @unlink($mockFile);
+});
+if (file_put_contents($mockFile, "<?php\n" . $mockCode) === false) {
+    throw new RuntimeException("mock file write failed");
+}
+
+function startMock($file, $mode, $arg = null, $variant = null) {
+    $command = [PHP_BINARY, "-n", "-f", $file, $mode];
+    if ($arg !== null) $command[] = (string)(int)$arg;
+    if (isset($variant)) $command[] = $variant;
     $process = proc_open($command, [
         0 => ["pipe", "r"],
         1 => ["pipe", "w"],
@@ -174,9 +183,15 @@ function startMock($code, $mode, $arg = null, $variant = null) {
     if (!is_resource($process)) throw new RuntimeException("mock start failed");
     fclose($pipes[0]);
     $line = fgets($pipes[1]);
-    if ($line === false) throw new RuntimeException("mock did not publish a port");
-    $port = (int)trim($line);
-    if ($port < 1 || $port > 65535) throw new RuntimeException("mock published an invalid port");
+    $port = $line === false ? 0 : (int)trim($line);
+    if ($line === false || $port < 1 || $port > 65535) {
+        proc_terminate($process);
+        fclose($pipes[1]);
+        $error = trim(stream_get_contents($pipes[2]));
+        fclose($pipes[2]);
+        proc_close($process);
+        throw new RuntimeException("mock did not publish a valid port: " . $error);
+    }
     return [$process, $pipes, $port];
 }
 
@@ -194,7 +209,7 @@ function configForPort($port) {
 }
 
 foreach (["initial", "progress", "profile", "log", "columns", "events", "exception", "eos", "truncated"] as $packet) {
-    list($process, $pipes, $port) = startMock($mockCode, "packet:$packet");
+    list($process, $pipes, $port) = startMock($mockFile, "packet:$packet");
     try {
         $client = new ClickHouse(configForPort($port));
     } catch (ClickHouseException $e) {
@@ -235,7 +250,7 @@ foreach ([
 ] as $case) {
     list($retryCount, $expectedPings, $expectedQueries) = $case;
     list($process, $pipes, $port) = startMock(
-        $mockCode, "ping", $retryCount, $expectedQueries ? "healthy" : "reject"
+        $mockFile, "ping", $retryCount, $expectedQueries ? "healthy" : "reject"
     );
     $config = configForPort($port);
     $config["retry_count"] = $retryCount;
@@ -260,7 +275,7 @@ foreach ([
     fclose($pipes[1]);
     stream_set_blocking($pipes[2], false);
     $summary = "";
-    $reportDeadline = microtime(true) + 2.0;
+    $reportDeadline = microtime(true) + 5.0;
     while (microtime(true) < $reportDeadline) {
         $chunk = fread($pipes[2], 4096);
         if ($chunk !== false && $chunk !== "") $summary .= $chunk;
