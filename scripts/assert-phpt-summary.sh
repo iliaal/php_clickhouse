@@ -21,7 +21,7 @@ main() {
 		return 1
 	fi
 
-	local passed="" skipped="" failed="" warned="" line
+	local passed="" skipped="" failed="" warned="" borked=0 leaked=0 line
 	local -a observed=()
 	while IFS= read -r line; do
 		if [[ -z "${passed}" && "${line}" =~ Tests[[:space:]]+passed[[:space:]]*:[[:space:]]*([0-9]+) ]]; then
@@ -35,6 +35,13 @@ main() {
 		fi
 		if [[ -z "${warned}" && "${line}" =~ Tests[[:space:]]+warned[[:space:]]*:[[:space:]]*([0-9]+) ]]; then
 			warned=${BASH_REMATCH[1]}
+		fi
+		# BORKED is omitted for clean runs; LEAKED only appears with a leak checker.
+		if [[ "${line}" =~ Tests[[:space:]]+borked[[:space:]]*:[[:space:]]*([0-9]+) ]]; then
+			borked=${BASH_REMATCH[1]}
+		fi
+		if [[ "${line}" =~ Tests[[:space:]]+leaked[[:space:]]*:[[:space:]]*([0-9]+) ]]; then
+			leaked=${BASH_REMATCH[1]}
 		fi
 		if [[ "${line}" =~ SKIP.*\[(tests/[^]]+\.phpt)\] ]]; then
 			observed+=("${BASH_REMATCH[1]}")
@@ -58,6 +65,14 @@ main() {
 	fi
 	if ((warned != 0)); then
 		printf 'PHPT run reported %d warned test(s) (a retry-pass counts here)\n' "${warned}" >&2
+		return 1
+	fi
+	if ((borked != 0)); then
+		printf 'PHPT run reported %d borked test(s)\n' "${borked}" >&2
+		return 1
+	fi
+	if ((leaked != 0)); then
+		printf 'PHPT run reported %d leaked test(s)\n' "${leaked}" >&2
 		return 1
 	fi
 	if ((passed == 0)); then
