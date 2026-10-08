@@ -55,7 +55,9 @@ extern "C" {
 #include <deque>
 #include <limits>
 #include <optional>
+#include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 
 using namespace clickhouse;
 using namespace std;
@@ -2267,9 +2269,14 @@ void do_select_into(zval *out, zval *this_obj,
 
             if (positional_out && !pos_decided) {
                 pos_decided = true;
-                for (size_t a = 0; a < col_count && !pos_active; ++a) {
-                    for (size_t b = a + 1; b < col_count; ++b) {
-                        if (col_names[a] == col_names[b]) { pos_active = true; break; }
+                /* Avoid a quadratic scan for wide results. The names stay
+                 * alive and unchanged until this non-owning set is destroyed. */
+                std::unordered_set<std::string_view> seen_names;
+                seen_names.reserve(col_count);
+                for (const auto &name : col_names) {
+                    if (!seen_names.emplace(name).second) {
+                        pos_active = true;
+                        break;
                     }
                 }
                 if (pos_active) {
