@@ -33,6 +33,8 @@ extern "C" {
 #include "lib/clickhouse-cpp/clickhouse/exceptions.h"
 #include "clickhouse_internal.h"
 
+#include <algorithm>
+
 using namespace clickhouse;
 using namespace std;
 
@@ -55,16 +57,17 @@ std::string queryLogString(const std::string &value)
 
 /* Honor doubled quotes and backslash escapes; redact unterminated literals
  * through end of input. Used for logs and traces, never wire SQL. */
-std::string redactSqlLiterals(const std::string &sql)
+static std::string redactSqlLiteralsBounded(const std::string &sql, size_t max_bytes)
 {
     std::string out;
-    out.reserve(sql.size());
-    for (size_t i = 0; i < sql.size();) {
+    out.reserve(std::min(sql.size(), max_bytes));
+    for (size_t i = 0; i < sql.size() && out.size() < max_bytes;) {
         if (sql[i] != '\'') {
             out.push_back(sql[i++]);
             continue;
         }
-        out.append("'?'");
+        out.append("'?'", std::min(size_t(3), max_bytes - out.size()));
+        if (out.size() == max_bytes) break;
         ++i;
         while (i < sql.size()) {
             if (sql[i] == '\\' && i + 1 < sql.size()) {
@@ -85,6 +88,11 @@ std::string redactSqlLiterals(const std::string &sql)
     return out;
 }
 
+std::string redactSqlLiterals(const std::string &sql)
+{
+    return redactSqlLiteralsBounded(sql, std::string::npos);
+}
+
 void appendQueryLogCapped(clickhouse_object *obj, QueryLog &&ql)
 {
     if (obj->query_log.size() >= CLICKHOUSE_QUERY_LOG_MAX) {
@@ -97,7 +105,11 @@ QueryLog buildQueryLog(const clickhouse_object *obj,
                        const std::string &sql, const std::string &qid)
 {
     QueryLog ql;
-    ql.sql = queryLogString(redactSqlLiterals(sql));
+    /* One byte beyond the cap distinguishes an exact fit from truncation.
+     * Do not allocate or scan an unbounded redacted suffix just to discard it.
+     * The unrestricted helper remains available for verbose callbacks. */
+    ql.sql = queryLogString(redactSqlLiteralsBounded(
+        sql, CLICKHOUSE_QUERY_LOG_STRING_MAX_BYTES + 1));
     ql.query_id = queryLogString(qid);
     ql.elapsed_ms = obj->stats.elapsed_ms;
     ql.rows_read = obj->stats.rows_read;
