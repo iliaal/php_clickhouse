@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- `selectStream()` and `selectStreamCallback()` rows are pre-sized with
+  `array_init_size`, matching `select()` and avoiding hash-table rehashing
+  on wide results.
+
 ### Fixed
 
 - Reject malformed server packets before callbacks, rotate endpoints within

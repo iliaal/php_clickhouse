@@ -4790,7 +4790,7 @@ PHP_METHOD(ClickHouse, selectStreamCallback)
             }
             for (size_t row = 0; row < block.GetRowCount(); ++row) {
                 zval row_zv;
-                array_init(&row_zv);
+                array_init_size(&row_zv, (uint32_t)col_count);
                 try {
                     for (size_t col = 0; col < col_count; ++col) {
                         convertToZval(&row_zv, block[col], row, col_names[col], 0,
@@ -4875,12 +4875,12 @@ PHP_METHOD(ClickHouseRowIterator, current)
     if (iter->row_idx >= block.GetRowCount()) {
         RETURN_NULL();
     }
-    array_init(return_value);
+    const size_t col_count = block.GetColumnCount();
+    array_init_size(return_value, (uint32_t)col_count);
     /* convertToZval throws on unsupported or malformed server-side types;
      * letting the exception cross the C Zend dispatcher is UB. */
     static const std::string empty_name;
     try {
-        const size_t col_count = block.GetColumnCount();
         for (size_t col = 0; col < col_count; ++col) {
             const std::string &name = (col < iter->column_names.size())
                 ? iter->column_names[col]
