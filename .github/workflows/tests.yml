@@ -161,7 +161,9 @@ jobs:
       # Every hand-edit under lib/clickhouse-cpp must have a patch file and a
       # LOCAL_PATCHES.md entry, or the next library bump drops it silently.
       - name: Vendored patch-set integrity
-        run: ./scripts/check-vendored-patches.sh
+        run: |
+          ./scripts/test-vendored-patches.sh
+          ./scripts/check-vendored-patches.sh
 
       - name: Build extension (no TLS)
         run: |
