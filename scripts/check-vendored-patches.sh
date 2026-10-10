@@ -50,7 +50,9 @@ for rel in "${tracked[@]}"; do
     cp "$root/$rel" "$dest"
 done
 
-for p in $(printf '%s\n' "${patches[@]}" | sort -r); do
+# Reverse the sorted array without splitting paths at whitespace.
+for ((i = ${#patches[@]} - 1; i >= 0; --i)); do
+    p="${patches[i]}"
     if ! (cd "$work" && patch -p1 -R -f -s --no-backup-if-mismatch < "$p") >/dev/null 2>&1; then
         fail "$(basename "$p") does not reverse-apply against lib/clickhouse-cpp — the patch file and the tree have drifted"
     fi
