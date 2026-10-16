@@ -83,6 +83,12 @@ When bumping it:
 
 ## Releases
 
-Maintainers run `/release` (see `.claude/commands/release.md` for the
-playbook). The summary: bump version in `php_clickhouse.h`,
-date-stamp the top section of `CHANGELOG.md`, tag, push.
+Maintainers use `/release-ext` with the repository's
+[`.release-config`](.release-config). The command's playbook lives in the
+maintainer's `~/.claude/commands/release-ext.md`; it is not included in this
+repository.
+
+The [Linux/macOS](.github/workflows/release-linux.yml) and
+[Windows](.github/workflows/release-windows.yml) binary workflows run when
+a GitHub Release is published. See those workflow files for their build
+matrices and manual validation options.
