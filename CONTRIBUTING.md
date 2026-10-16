@@ -35,14 +35,44 @@ For security issues, do **not** file a public issue. See
 
 1. Fork and clone the repo
 2. Create a topic branch off `master`
-3. Build clean (`./configure --enable-clickhouse && make`) and run
-   the test suite. Tests need a reachable ClickHouse server; the
-   README has a one-liner Docker recipe.
+3. Follow the [source build instructions](README.md#-install), then
+   [run the tests](#running-tests).
 4. Add `.phpt` coverage for any new behavior. Tests skip cleanly if
    no server is reachable, so adding new ones doesn't punish people
    without a local CH.
 5. Open a PR. Include the rationale, the test you added, and any
    benchmark deltas if your change is in a hot path.
+
+## Running tests
+
+After building and installing the extension using the
+[README instructions](README.md#-install), start its
+[local test server](README.md#test-server). Use a dedicated test server:
+[the tests create and drop tables in the `test` database](tests/002.phpt).
+The [CI test setup](.github/workflows/tests.yml) installs `clickhouse.so`
+into PHP's `extension_dir` so the PHPT `--EXTENSIONS--` directive can find it.
+
+Run this from the repository root with the README's Docker credentials:
+
+```sh
+export CLICKHOUSE_HOST=127.0.0.1
+export CLICKHOUSE_PORT=9000
+export CLICKHOUSE_USER=test
+export CLICKHOUSE_PASSWD=test
+export TEST_PHP_EXECUTABLE="$(command -v php)"
+export NO_INTERACTION=1
+php run-tests.php -j1 --show-diff -g FAIL,BORK,LEAK,XLEAK,SKIP tests/
+```
+
+These settings and runner options match the [Linux CI test step](.github/workflows/tests.yml).
+The [test helper](tests/_clickhouse.inc) defaults to host `clickhouse`, not
+`127.0.0.1`, and reads `CLICKHOUSE_PASSWD` (the Docker image uses
+`CLICKHOUSE_PASSWORD`). Keep `-j1`: tests share tables, and the PHP 8.6
+runner otherwise defaults to parallel execution, as noted in the CI step.
+Review skipped tests as well as failures. The helper skips server-dependent
+tests when the server is unreachable; CI uses a separate
+[summary guard](scripts/assert-phpt-summary.sh) to reject an all-skip run
+and unexpected skips.
 
 ## Code style
 
