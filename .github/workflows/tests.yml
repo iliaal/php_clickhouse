@@ -33,6 +33,8 @@ jobs:
           coverage: none
       - name: Test PHP PHPT summary guard
         run: php scripts/test-phpt-summary.php
+      - name: Test benchmark cleanup
+        run: php scripts/test-benchmark-cleanup.php
       - run: composer validate --strict
       - name: Verify generated arginfo
         run: |

@@ -86,14 +86,12 @@ foreach ($testDataSet as $scenarioIndex => $scenario) {
             /* Exclude incomplete work from timing comparisons. */
             $seen = $clients[$name]['count']();
             if ($seen !== $expected) {
-                fprintf(
-                    STDERR,
-                    "%s inserted %d warm-up rows but reads back %d\n",
+                throw new RuntimeException(sprintf(
+                    "%s inserted %d warm-up rows but reads back %d",
                     $name,
                     $expected,
                     $seen
-                );
-                exit(1);
+                ));
             }
         }
 
