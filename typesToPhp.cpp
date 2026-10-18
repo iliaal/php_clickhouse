@@ -2276,6 +2276,11 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 ZStrGuard sg(v);
                 std::string dv(sg.val(), sg.len());
                 validateDecimalText(dv, dec_precision, dec_scale, "Decimal");
+                /* The native parser applies the scale only to text containing a
+                 * '.', so "7" would otherwise store 7 raw units (0.07 at scale 2). */
+                if (dv.find('.') == std::string::npos) {
+                    dv.push_back('.');
+                }
                 value->Append(dv);
             }
         }
