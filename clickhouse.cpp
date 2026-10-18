@@ -2698,6 +2698,8 @@ static Block buildExternalTableBlock(zval *entry, std::string &name_out)
             validateIdentifier(ZSTR_VAL(k), ZSTR_LEN(k),
                                "external column name", /*allow_dot=*/false);
             std::string type_name(Z_STRVAL_P(type_zv), Z_STRLEN_P(type_zv));
+            validateCallerTypeName(type_name, "external table '" + name_out +
+                "' column '" + std::string(ZSTR_VAL(k), ZSTR_LEN(k)) + "'");
             ColumnRef templ = CreateColumnByType(type_name);
             if (!templ) {
                 throw std::runtime_error("external table '" + name_out +
@@ -4624,7 +4626,10 @@ PHP_METHOD(ClickHouse, getServerInfo)
         add_assoc_stringl(return_value, "display_name", (char*)si.display_name.c_str(), si.display_name.size());
         add_assoc_long(return_value, "version_major", (zend_long)si.version_major);
         add_assoc_long(return_value, "version_minor", (zend_long)si.version_minor);
-        add_assoc_long(return_value, "version_patch", (zend_long)si.version_patch);
+        /* Servers below revision 54401 send no patch number and the library
+         * leaves the field uninitialized. */
+        add_assoc_long(return_value, "version_patch",
+                       si.revision >= 54401 ? (zend_long)si.version_patch : 0);
         add_assoc_long(return_value, "revision", (zend_long)si.revision);
         add_assoc_stringl(return_value, "timezone", (char*)si.timezone.c_str(), si.timezone.size());
     } catch (const std::exception& e) {

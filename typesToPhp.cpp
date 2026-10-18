@@ -173,6 +173,78 @@ ConvertDepthScopeGuard::ConvertDepthScopeGuard() : saved_depth(convert_depth) {
 ConvertDepthScopeGuard::~ConvertDepthScopeGuard() {
     convert_depth = saved_depth;
 }
+
+/* The library type factory recurses once per parenthesis level. A
+ * parameterized leaf such as LowCardinality(Nullable(FixedString(N))) adds at
+ * most two levels beyond MAX_CONVERT_DEPTH, so twice that limit admits every
+ * convertible type and stays far below ClickHouse's max_parser_depth (1000).
+ * The length cap is four times ClickHouse's default max_query_size. */
+static const size_t MAX_CALLER_TYPE_DEPTH = 2 * MAX_CONVERT_DEPTH;
+static const size_t MAX_CALLER_TYPE_LENGTH = 1024u * 1024u;
+
+void validateCallerTypeName(const std::string &type_name, const std::string &context)
+{
+    if (type_name.size() > MAX_CALLER_TYPE_LENGTH) {
+        throw std::runtime_error(
+            context + " type name exceeds " + std::to_string(MAX_CALLER_TYPE_LENGTH) + " bytes");
+    }
+    /* Quote handling mirrors clickhouse::TypeParser::NextToken so parentheses
+     * inside enum labels and quoted identifiers are not counted. */
+    const char *cur = type_name.data();
+    const char *end = cur + type_name.size();
+    size_t depth = 0;
+    while (cur < end) {
+        const char c = *cur;
+        if (c == '(') {
+            if (++depth > MAX_CALLER_TYPE_DEPTH) {
+                throw std::runtime_error(
+                    context + " type name nesting exceeds " +
+                    std::to_string(MAX_CALLER_TYPE_DEPTH) + " levels");
+            }
+            ++cur;
+        } else if (c == ')') {
+            if (depth > 0) {
+                --depth;
+            }
+            ++cur;
+        } else if (c == '\'') {
+            /* The library never matches a closing quote in the final byte;
+             * an unmatched quote swallows the rest of the input. */
+            const char *q = cur + 1;
+            while (q < end - 1 && *q != '\'') {
+                ++q;
+            }
+            if (q >= end - 1) {
+                return;
+            }
+            cur = q + 1;
+        } else if (c == '"' || c == '`') {
+            const char *q = cur + 1;
+            bool closed = false;
+            while (q < end) {
+                if (*q == '\\' && q + 1 < end && q[1] == c) {
+                    q += 2;
+                } else if (*q == c) {
+                    if (q + 1 < end && q[1] == c) {
+                        q += 2;
+                    } else {
+                        closed = true;
+                        break;
+                    }
+                } else {
+                    ++q;
+                }
+            }
+            if (!closed) {
+                return;
+            }
+            cur = q + 1;
+        } else {
+            ++cur;
+        }
+    }
+}
+
 static int64_t strict_zval_i64(zval *z, const char *type_label)
 {
     ZVAL_DEREF(z);
@@ -381,6 +453,16 @@ static std::string strict_zval_string(zval *z, const char *type_label)
     }
     ZStrGuard sg(z);  // throws if a __toString() left EG(exception) pending
     return std::string(sg.val(), sg.len());
+}
+
+/* inet_pton() stops at the first NUL, which would silently drop the tail. */
+static std::string ipTextWithoutNul(std::string s, const char *type_label)
+{
+    if (memchr(s.data(), '\0', s.size()) != nullptr) {
+        throw std::runtime_error(
+            std::string("Invalid ") + type_label + " value: embedded NUL byte");
+    }
+    return s;
 }
 
 /* Return bytes written, excluding NUL; dashed and dashless forms encode identical bytes. */
@@ -1585,8 +1667,9 @@ ColumnRef tryBuildScalarColumnFromRows(HashTable *rows_ht, size_t col_index,
     }
 }
 
-/* ColumnDecimal::Append does not enforce precision/scale; validate plain
- * decimals here and leave unusual forms to the native parser. */
+/* ColumnDecimal::Append does not enforce precision/scale and silently drops
+ * characters past the scale, so every value must pass the full grammar here.
+ * A leading '+' passes and is still rejected by the native parser. */
 static void validateDecimalText(const std::string &s, size_t precision,
                                 size_t scale, const char *label)
 {
@@ -1602,7 +1685,10 @@ static void validateDecimalText(const std::string &s, size_t precision,
         while (i < n && s[i] >= '0' && s[i] <= '9') ++i;
         frac_digits = i - f0;
     }
-    if (i != n || (int_digits == 0 && frac_digits == 0)) return;
+    if (i != n || (int_digits == 0 && frac_digits == 0)) {
+        throw std::runtime_error(
+            std::string(label) + " value is not a valid decimal number");
+    }
 
     size_t sig_int = int_digits;
     for (size_t k = int_start; k < int_start + int_digits && s[k] == '0'; ++k) {
@@ -1754,7 +1840,7 @@ static ColumnRef insertGeoIpColumn(Type::Code code, HashTable *values_ht)
                          (unsigned)((u >> 8) & 0xFF),  (unsigned)(u & 0xFF));
                 value->Append(std::string(ipbuf));
             } else {
-                value->Append(strict_zval_string(v, "IPv4"));
+                value->Append(ipTextWithoutNul(strict_zval_string(v, "IPv4"), "IPv4"));
             }
         }
         ZEND_HASH_FOREACH_END();
@@ -1772,7 +1858,7 @@ static ColumnRef insertGeoIpColumn(Type::Code code, HashTable *values_ht)
             } else {
                 /* Append(string_view) calls inet_pton on .data(); a view of
                  * a std::string is NUL-terminated, a bare view need not be. */
-                std::string s = strict_zval_string(v, "IPv6");
+                std::string s = ipTextWithoutNul(strict_zval_string(v, "IPv6"), "IPv6");
                 value->Append(std::string_view(s));
             }
         }
@@ -2238,10 +2324,18 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 Z_TYPE_P(v) == IS_RESOURCE) {
                 throw std::runtime_error(
                     "Decimal insert requires a scalar value (string, int, or float)");
+            } else if (Z_TYPE_P(v) == IS_FALSE) {
+                /* false stringifies to "", which the native parser read as zero. */
+                value->Append(std::string("0"));
             } else {
                 ZStrGuard sg(v);
                 std::string dv(sg.val(), sg.len());
                 validateDecimalText(dv, dec_precision, dec_scale, "Decimal");
+                /* The native parser applies the scale only to text containing a
+                 * '.', so "7" would otherwise store 7 raw units (0.07 at scale 2). */
+                if (dv.find('.') == std::string::npos) {
+                    dv.push_back('.');
+                }
                 value->Append(dv);
             }
         }
@@ -2493,12 +2587,17 @@ static void emitDoubleCell(zval *arr, double v,
  * civil-date arithmetic, paired with days_from_civil in to_time_t. */
 static inline int64_t floor_div_86400(int64_t epoch, int64_t &secs_of_day)
 {
-    int64_t days = epoch >= 0 ? epoch / 86400 : -((-epoch + 86399) / 86400);
-    secs_of_day = epoch - days * 86400;
+    /* Negating or re-multiplying would overflow at INT64_MIN. */
+    int64_t days = epoch / 86400;
+    secs_of_day = epoch % 86400;
+    if (secs_of_day < 0) {
+        secs_of_day += 86400;
+        --days;
+    }
     return days;
 }
 
-static inline void civil_from_days(int64_t z, int &y, unsigned &m, unsigned &d)
+static inline void civil_from_days(int64_t z, int64_t &y, unsigned &m, unsigned &d)
 {
     z += 719468;
     int64_t era = (z >= 0 ? z : z - 146096) / 146097;
@@ -2509,24 +2608,30 @@ static inline void civil_from_days(int64_t z, int &y, unsigned &m, unsigned &d)
     unsigned mp = (5 * doy + 2) / 153;
     d = doy - (153 * mp + 2) / 5 + 1;
     m = mp < 10 ? mp + 3 : mp - 9;
-    y = (int)(y_ + (m <= 2 ? 1 : 0));
+    y = y_ + (m <= 2 ? 1 : 0);
 }
 
 static inline size_t format_epoch_utc(int64_t epoch, char *buf, size_t bufsz, bool with_time)
 {
     int64_t secs_of_day = 0;
     int64_t days = floor_div_86400(epoch, secs_of_day);
-    int y = 0;
+    int64_t y = 0;
     unsigned m = 0, d = 0;
     civil_from_days(days, y, m, d);
+    int l;
     if (!with_time) {
-        return (size_t)snprintf(buf, bufsz, "%04d-%02u-%02u", y, m, d);
+        l = snprintf(buf, bufsz, "%04" PRId64 "-%02u-%02u", y, m, d);
+    } else {
+        unsigned hh = (unsigned)(secs_of_day / 3600);
+        unsigned mm = (unsigned)((secs_of_day / 60) % 60);
+        unsigned ss = (unsigned)(secs_of_day % 60);
+        l = snprintf(buf, bufsz, "%04" PRId64 "-%02u-%02u %02u:%02u:%02u",
+                     y, m, d, hh, mm, ss);
     }
-    unsigned hh = (unsigned)(secs_of_day / 3600);
-    unsigned mm = (unsigned)((secs_of_day / 60) % 60);
-    unsigned ss = (unsigned)(secs_of_day % 60);
-    return (size_t)snprintf(buf, bufsz, "%04d-%02u-%02u %02u:%02u:%02u",
-                            y, m, d, hh, mm, ss);
+    if (l < 0) {
+        throw std::runtime_error("date formatting failed");
+    }
+    return (size_t)l < bufsz ? (size_t)l : bufsz - 1;
 }
 
 // RawAt widens storage directly; At narrows through time_t on 32-bit platforms.
@@ -2664,6 +2769,16 @@ static void readNumericCell(Type::Code code, zval *arr, const ColumnRef& columnR
     default:
         throw std::logic_error("readNumericCell: non-numeric type code");
     }
+}
+
+/* zend_hash_check_size() raises a fatal error rather than failing at or
+ * above HT_MAX_SIZE, and no PHP array can hold that many elements. */
+static uint32_t checkedArrayHint(size_t n, const char *what)
+{
+    if (n >= (size_t)HT_MAX_SIZE) {
+        throw std::runtime_error(std::string(what) + ": element count exceeds the PHP array limit");
+    }
+    return (uint32_t)n;
 }
 
 void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string& column_name, int8_t is_array, long fetch_mode)
@@ -2814,6 +2929,11 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     {
         // FIXEDSTRING_BINARY preserves trailing NULs that may be payload rather than padding.
         auto fs_col = as_or_throw<ColumnFixedString>(columnRef, "FixedString read");
+        /* At() bounds only the first byte; a width x rows product that wrapped
+         * on load leaves fewer whole cells than the enclosing column claims. */
+        if ((size_t)row >= fs_col->Size()) {
+            throw std::runtime_error("FixedString read: row is outside the column data");
+        }
         auto col = (*fs_col)[row];
         size_t len = col.length();
         if (!(fetch_mode & SC_FETCH_FIXEDSTRING_BINARY)) {
@@ -2956,11 +3076,22 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     case Type::Code::Array:
     {
         auto array = as_or_throw<ColumnArray>(columnRef, "Array read");
+        if ((size_t)row >= array->Size()) {
+            throw std::runtime_error("Array read: row is outside the column data");
+        }
+        /* Slice() of some nested columns (Nothing) trusts the length, so
+         * non-monotonic offsets would otherwise yield a bogus element count. */
+        size_t elem_begin = array->GetOffset(row);
+        size_t elem_end = array->GetOffset((size_t)row + 1);
+        if (elem_end < elem_begin || elem_end > array->GetData()->Size()) {
+            throw std::runtime_error("Array read: element offsets are out of range");
+        }
         auto col = array->GetAsColumn(row);
+        uint32_t elem_hint = checkedArrayHint(col->Size(), "Array read");
         /* Nested cells accept value-shaping flags only, never result-shape flags. */
         long nested_mode = fetch_mode & SC_FETCH_VALUE_FLAGS;
         if (fetch_mode & SC_FETCH_ONE) {
-            array_init_size(arr, (uint32_t)col->Size());
+            array_init_size(arr, elem_hint);
             for (size_t i = 0; i < col->Size(); ++i)
             {
                 convertToZval(arr, col, i, "array", 1, nested_mode);
@@ -2968,7 +3099,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         } else {
             zval *return_tmp;
             SC_MAKE_STD_ZVAL(return_tmp);
-            array_init_size(return_tmp, (uint32_t)col->Size());
+            array_init_size(return_tmp, elem_hint);
             /* Free partial nested output on throw before ownership transfers to arr. */
             try {
                 for (size_t i = 0; i < col->Size(); ++i)
@@ -3132,9 +3263,11 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             throw std::runtime_error("Map column key/value size mismatch");
         }
 
+        uint32_t entry_hint = checkedArrayHint(entry_count, "Map read");
+
         zval *map_zv;
         SC_MAKE_STD_ZVAL(map_zv);
-        array_init_size(map_zv, (uint32_t)entry_count);
+        array_init_size(map_zv, entry_hint);
         /* Free partial map output on throw before ownership transfers to the parent. */
         struct MapZvGuard {
             zval *z;
