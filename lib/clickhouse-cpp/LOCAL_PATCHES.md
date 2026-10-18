@@ -288,3 +288,18 @@ Data-block reader throws `unsupported column type`. Exercised by
 `tests/253_type_parser_depth_limit.phpt`, and
 `tests/254_external_type_parser_errors.phpt`.
 Upstream: pending PR (fix/type-parser-unbalanced-depth on iliaal/clickhouse-cpp).
+
+## clickhouse/columns/factory.cpp: LowCardinality subtree copies
+
+`CreateColumnFromAst()` bound the `LowCardinality` child as
+`const auto nested = GetASTChildElement(ast, 0)`, copying the whole subtree
+at every level. A type such as `LowCardinality(Nullable(` repeated 255 times
+around a wide `Tuple` held one copy per level during the recursion, so a
+server-supplied type of tens of kilobytes drove peak memory to hundreds of
+megabytes (outside `memory_limit`) before the type was rejected.
+
+Patch: `0031-Avoid-copying-the-type-AST-at-each-LowCardinality-level.patch`.
+Binds the child by `const auto&`; no other `GetASTChildElement()` result in
+`factory.cpp` is copied. Exercised by
+`tests/272_lowcardinality_nested_ast_memory.phpt`.
+Upstream: pending PR (fix/lowcardinality-ast-copy on iliaal/clickhouse-cpp).
