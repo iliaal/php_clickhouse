@@ -303,7 +303,7 @@ foreach ($ch-&gt;select("SELECT id, ts, tag FROM events ORDER BY id",
 </table>
 
 <h3 id="config-tls">TLS <a class="anchor" href="#config-tls">#</a></h3>
-<p class="muted">Requires a build with <code>--enable-clickhouse-openssl</code>. Building without it and passing <code>ssl =&gt; true</code> raises <code>ClickHouseException</code> at construct time. Any other <code>ssl_*</code> option also requires <code>ssl =&gt; true</code>; setting one with TLS off raises <code>ClickHouseException</code> instead of connecting in plaintext. <code>null</code> and booleans left at their default (<code>ssl_skip_verify =&gt; false</code>, <code>ssl_use_default_ca =&gt; true</code>) are allowed.</p>
+<p class="muted">Requires a build with <code>--enable-clickhouse-openssl</code>. Building without it and passing <code>ssl =&gt; true</code> raises <code>ClickHouseException</code> at construct time. Any other <code>ssl_*</code> option also requires <code>ssl =&gt; true</code>; setting one with TLS off raises <code>ClickHouseException</code> instead of connecting in plaintext. <code>null</code>, empty CA paths (<code>""</code>, <code>[]</code>, or <code>false</code> for <code>ssl_ca_directory</code>), and booleans left at their default (<code>ssl_skip_verify =&gt; false</code>, <code>ssl_use_default_ca =&gt; true</code>) are allowed.</p>
 <table>
 <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
 <tbody>
@@ -312,7 +312,7 @@ foreach ($ch-&gt;select("SELECT id, ts, tag FROM events ORDER BY id",
 <tr><td><code>ssl_skip_verify</code></td><td>bool</td><td><code>false</code></td><td>Skip cert validation; dev only</td></tr>
 <tr><td><code>ssl_use_default_ca</code></td><td>bool</td><td><code>true</code></td><td>Trust the system CA bundle, in addition to any <code>ssl_ca_files</code> / <code>ssl_ca_directory</code></td></tr>
 <tr><td><code>ssl_ca_files</code></td><td>string | array</td><td>(none)</td><td>PEM CA file path(s); added to the system store unless <code>ssl_use_default_ca =&gt; false</code></td></tr>
-<tr><td><code>ssl_ca_directory</code></td><td>string</td><td>(none)</td><td>OpenSSL hashed-cert directory; added to the system store unless <code>ssl_use_default_ca =&gt; false</code></td></tr>
+<tr><td><code>ssl_ca_directory</code></td><td>string | false</td><td>(none)</td><td>OpenSSL hashed-cert directory; added to the system store unless <code>ssl_use_default_ca =&gt; false</code></td></tr>
 </tbody>
 </table>
 <p>Configured CA files and directories <strong>extend</strong> the system trust store; they do not replace it. To pin the server to your own CA, set <code>ssl_use_default_ca =&gt; false</code> alongside <code>ssl_ca_files</code>, otherwise any certificate a public CA issues for the host name also verifies.</p>

@@ -35,6 +35,8 @@ attempt("ca_files string NUL", array_merge($base, ["ssl_ca_files" => $ca . "\0/n
 attempt("ca_files element NUL", array_merge($base, ["ssl_ca_files" => [$ca . "\0/nonexistent"]]));
 attempt("ca_files second element NUL", array_merge($base, ["ssl_ca_files" => [$ca, $ca . "\0x"]]));
 attempt("ca_directory NUL", $base + ["ssl_ca_directory" => "/nonexistent-dir\0/etc/ssl/certs"]);
+attempt("ca_directory false", $base + ["ssl_ca_directory" => false]);
+attempt("ca_directory empty", $base + ["ssl_ca_directory" => ""]);
 attempt("ca_directory array", $base + ["ssl_ca_directory" => ["/etc/ssl/certs"]]);
 attempt("min_protocol NUL", $base + ["ssl_min_protocol_version" => "tls1.2\0junk"]);
 attempt("min_protocol prefix", $base + ["ssl_min_protocol_version" => "tls1.2x"]);
@@ -57,6 +59,8 @@ ca_files string NUL: ssl_ca_files must not contain NUL bytes
 ca_files element NUL: ssl_ca_files must not contain NUL bytes
 ca_files second element NUL: ssl_ca_files must not contain NUL bytes
 ca_directory NUL: ssl_ca_directory must not contain NUL bytes
+ca_directory false: connected 1
+ca_directory empty: connected 1
 ca_directory array: ssl_ca_directory must be a string
 min_protocol NUL: ssl_min_protocol_version must be one of tls1.0, tls1.1, tls1.2, tls1.3
 min_protocol prefix: ssl_min_protocol_version must be one of tls1.0, tls1.1, tls1.2, tls1.3

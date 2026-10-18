@@ -769,11 +769,30 @@ static bool loadConfigBool(HashTable *ht, const char *key, bool &out)
     if (Z_ISNULL_P(v)) return false;
     if (!parseConfigBool(v, out)) {
         std::string msg = std::string(key) +
-            " must be a boolean (true, false, 0, 1, \"true\", \"false\", \"0\", or \"1\")";
+            " must be a boolean (true, false, 0, 1, \"true\", \"false\", \"0\", \"1\", or \"\" for false)";
         zend_throw_exception(clickhouse_exception_ce, msg.c_str(), 0);
         return false;
     }
     return true;
+}
+
+/* Templated configs pass "" / [] (and getenv() false for the directory) to
+ * mean "no CA path"; they carry no TLS material. */
+static bool isUnsetTlsPath(const char *key, zval *v)
+{
+    ZVAL_DEREF(v);
+    switch (Z_TYPE_P(v)) {
+    case IS_NULL:
+        return true;
+    case IS_FALSE:
+        return strcmp(key, "ssl_ca_directory") == 0;
+    case IS_STRING:
+        return Z_STRLEN_P(v) == 0;
+    case IS_ARRAY:
+        return zend_hash_num_elements(Z_ARRVAL_P(v)) == 0;
+    default:
+        return false;
+    }
 }
 
 /* {{{ proto object __construct(array connectParams)
@@ -1070,7 +1089,7 @@ PHP_METHOD(ClickHouse, __construct)
             } else if (EG(exception)) { return; }
         }
         /* OpenSSL takes C strings; an embedded NUL would load a different path. */
-        if (php_array_get_value(_ht, "ssl_ca_directory", value)) {
+        if (php_array_get_value(_ht, "ssl_ca_directory", value) && Z_TYPE_P(value) != IS_FALSE) {
             if (Z_TYPE_P(value) != IS_STRING && Z_TYPE_P(value) != IS_OBJECT) {
                 zend_throw_exception(clickhouse_exception_ce,
                     "ssl_ca_directory must be a string", 0);
@@ -1159,6 +1178,7 @@ PHP_METHOD(ClickHouse, __construct)
                 zval *sv = zend_hash_str_find(_ht, k, strlen(k));
                 if (sv) ZVAL_DEREF(sv);
                 if (!sv || Z_ISNULL_P(sv)) continue;
+                if (strcmp(k, "ssl_min_protocol_version") != 0 && isUnsetTlsPath(k, sv)) continue;
                 std::string msg = std::string("ssl_* option '") + k + "' requires 'ssl' => true";
                 zend_throw_exception(clickhouse_exception_ce, msg.c_str(), 0);
                 return;
@@ -1217,6 +1237,10 @@ PHP_METHOD(ClickHouse, __construct)
                 bool b;
                 if (!loadConfigBool(_ht, bool_key, b)) return;
                 if (b == def) continue;
+            } else if ((zend_string_equals_literal(sk, "ssl_ca_files") ||
+                        zend_string_equals_literal(sk, "ssl_ca_directory")) &&
+                       isUnsetTlsPath(ZSTR_VAL(sk), v)) {
+                continue;
             }
             offending.assign(ZSTR_VAL(sk), ZSTR_LEN(sk));
         } ZEND_HASH_FOREACH_END();

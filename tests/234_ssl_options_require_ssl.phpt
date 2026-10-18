@@ -63,6 +63,15 @@ attempt("ssl absent, default booleans as strings", $base + [
     "ssl_skip_verify" => "false",
     "ssl_use_default_ca" => "1",
 ]);
+attempt("ssl absent, empty CA paths", $base + [
+    "ssl_ca_files" => "",
+    "ssl_ca_directory" => false,
+]);
+attempt("ssl false, empty CA paths", $base + [
+    "ssl" => false,
+    "ssl_ca_files" => [],
+    "ssl_ca_directory" => "",
+]);
 attempt("ssl absent, invalid boolean", $base + ["ssl_skip_verify" => "no"]);
 attempt("ssl absent, unknown key", $base + ["ssl_verify_peer" => true]);
 ?>
@@ -84,5 +93,7 @@ ssl '0', ssl_skip_verify: ssl_* option 'ssl_skip_verify' requires 'ssl' => true
 ssl '0', ssl_use_default_ca: ssl_* option 'ssl_use_default_ca' requires 'ssl' => true
 ssl false, default booleans and nulls: connected 1
 ssl absent, default booleans as strings: connected 1
-ssl absent, invalid boolean: ssl_skip_verify must be a boolean (true, false, 0, 1, "true", "false", "0", or "1")
+ssl absent, empty CA paths: connected 1
+ssl false, empty CA paths: connected 1
+ssl absent, invalid boolean: ssl_skip_verify must be a boolean (true, false, 0, 1, "true", "false", "0", "1", or "" for false)
 ssl absent, unknown key: unknown ssl_* option 'ssl_verify_peer'
