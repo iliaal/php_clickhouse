@@ -7,16 +7,150 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- With compression enabled, a malicious or compromised server could overflow
+  a heap buffer in the client by sending a compressed block whose declared size
+  is smaller than the 9-byte frame header. Such blocks now raise
+  `ClickHouseException`. Backport of ClickHouse/clickhouse-cpp#566.
+- A malicious or compromised server could crash the PHP process through the
+  following malformed column metadata or block contents. Each case now raises
+  `ClickHouseException`:
+  - a `FixedString(0)` column, even in an empty result, or a negative,
+    malformed, or out-of-range FixedString width. A failed type parse is no
+    longer cached, so repeating the query can't crash either;
+  - a type name with surplus closing parentheses or separators, such as
+    `UInt8))`, or nested more than 512 levels deep;
+  - a wrapper type over an unsupported nested type, such as `Array(5)`,
+    `Nullable(DateTime64)` or `LowCardinality(Nullable(5))`;
+  - a `FixedString` width whose byte total for the block overflows, inside a
+    `Tuple` or `Nullable`;
+  - `Array` or `Map` offsets that run backwards or past the nested data. Previously
+    `Array(Nothing)` hit a PHP fatal error and other element types came back
+    silently truncated;
+  - ProfileInfo flag bytes other than 0 or 1;
+  - a `LowCardinality(FixedString)` dictionary index outside the dictionary.
+- `selectWithExternalData()` column type names longer than 1 MiB or nested
+  deeper than 64 levels are rejected before parsing. Previously they could
+  overflow the native stack. Malformed short type names such as `))` no
+  longer crash.
+- A malicious or compromised server could make the client commit gigabytes
+  of native memory, outside `memory_limit`, from a packet of a few dozen
+  bytes. Three things did this:
+  - declaring large row counts, FixedString widths, String lengths, Array
+    sizes, or protocol string lengths;
+  - with compression enabled, declaring a decompressed size above 1 GiB, the
+    server's own limit;
+  - sending a deeply nested `LowCardinality(Nullable(...))` type over a wide
+    `Tuple`.
+
+  Column bodies, protocol strings, and compressed payloads now grow only as
+  their bytes arrive. Oversized frames raise `ClickHouseException`.
+- Inserting `Array(Map(...))` values, or `Map` values in ordered-pairs form,
+  could cause a use-after-free or an invalid pointer dereference. This
+  happened when the map's elements were PHP references and an element's
+  `__toString()` reassigned or resized a referenced map, pair, or row during
+  conversion. It affected `insert()`, `insertAssoc()`, `write()` and
+  `selectWithExternalData()`. Such inserts now use the values as they were
+  before the mutation.
+- A `{name}` placeholder could change the meaning of the statement around
+  it, silently dropping the rest of the statement, filters included. Both
+  shapes now throw `ClickHouseException`:
+  - a negative value written directly after `-`, as in `0-{n}`, formed a
+    `--` comment;
+  - a value written after `$`, as in `${t}$`, became part of a `$tag$`
+    heredoc delimiter.
+- `ssl`, `ssl_skip_verify` and `ssl_use_default_ca` accept only booleans,
+  `0`/`1`, the strings `"0"`, `"1"`, `"true"`, `"false"` (case-insensitive),
+  or `""` (false). Any other value throws `ClickHouseException`. Previously
+  any value PHP treats as true, such as `"false"` or `"no"`, given as
+  `ssl_skip_verify` turned off certificate verification, and
+  `ssl_use_default_ca => "false"` kept the system CA store.
+- `ClickHouse::__construct()` marks its config array
+  `#[\SensitiveParameter]`. On PHP 8.2+ with `zend.exception_ignore_args=0`,
+  the password no longer appears in exception trace arguments.
+
+### Changed
+
+- `tcp_nodelay`, `tcp_keepalive` and `ping_before_query` follow the same
+  strict boolean rule as the `ssl` options.
+- Without `ssl => true`, the following settings now throw instead of being
+  ignored while the client connects in plaintext: a non-empty `ssl_ca_files`
+  or `ssl_ca_directory`, any `ssl_min_protocol_version`, `ssl_skip_verify =>
+  true`, and `ssl_use_default_ca => false`. `null`, empty CA paths, and
+  booleans left at their default are still accepted, in both TLS and non-TLS
+  builds. In non-TLS builds, an invalid boolean reports the boolean error.
+- `ssl_ca_directory` must be a string, `false`, or `null`.
+- Placeholder array keys containing `:`, `{`, or `}` throw
+  `ClickHouseException`, because they collide with `{name:Type}`
+  typed-placeholder syntax.
+- Integer-form Decimal inserts are now scaled the way the server scales
+  them: `"7"`, `7` or `true` into `Decimal(9,2)` stores 7.00 instead of 0.07.
+  Code that passed pre-scaled integers (`700` meaning 7.00) now stores 700.00;
+  pass `"7.00"` or `7` instead.
+- `connect_timeout` now also bounds the TLS handshake, separately from the
+  TCP connect, so a TLS endpoint can take up to twice the timeout.
+
+### Fixed
+
+- Decimal values could come back with another column's scale, and DateTime64
+  or Time64 values with another column's precision, when a result arrived in
+  more than one block or across consecutive queries. For example, 12.34 came
+  back as 0.001234. Release builds were affected; ASan builds usually hid it.
+- A TLS peer that accepted the TCP connection but never completed the
+  handshake blocked the constructor indefinitely when `receive_timeout` was 0
+  (the default), and failover to later `endpoints` never ran. The handshake
+  now fails with `ClickHouseException` once `connect_timeout` expires, and
+  the next endpoint is tried.
+- `selectWithExternalData()` resets the connection when the server rejects
+  the external table data. Previously the next `ping()` or `select()` on the
+  same client failed, or waited forever with the default `receive_timeout`.
+  Session state set with `execute()` (such as `SET` or temporary tables) does
+  not survive that reset.
+- Redaction in `getLogQueries()` and verbose output now follows the server's
+  token boundaries. It could previously expose string literals in four cases:
+  - an apostrophe in a double-quoted, backtick, or Unicode-quoted identifier
+    or comment;
+  - number and tuple-element forms that the server lexes differently;
+  - an untyped `{name}` placeholder written against text its value could
+    merge with;
+  - `$$…$$` / `$tag$…$tag$` heredocs, Unicode-quoted strings, and
+    `x''`/`b''` literals, which weren't recognized.
+
+  Redaction work stays bounded. SQL with more than 1,024 distinct heredoc
+  tags is redacted from the first heredoc onward.
+- With compression enabled, a frame that decompressed to fewer bytes than it
+  declared returned zero-filled data, and a frame declaring an original size
+  of 0 triggered undefined behaviour. Both now raise `ClickHouseException`,
+  and well-formed empty frames are skipped.
+- `getServerInfo()` returned stale memory for `version_patch` when the server
+  announced a protocol revision below 54401, and kept the previous server's
+  timezone, display name, and patch after reconnecting to an older server.
+- `DATE_AS_STRINGS` and `selectToStream()` format `DateTime64(0)` values at
+  the Int64 limits correctly instead of printing a wrong year and hour.
+- IPv4 and IPv6 inserts reject text containing a NUL byte instead of storing
+  the address before it.
+- Decimal inserts reject malformed text (`1.2345x`, `-`, `.`, empty) instead
+  of storing a truncated value or zero.
+- `Array(Nullable(String))` inserts no longer store `""` for an element that
+  a `__toString()` nulls during conversion.
+- Inserts built from a copy of `$GLOBALS` no longer crash on PHP 7.4 and 8.0.
+- A failed `Map` insert in ordered-pairs form no longer leaks memory.
+- `compression`, `ssl_min_protocol_version`, `ssl_ca_files` and
+  `ssl_ca_directory` reject values containing NUL bytes, which were
+  previously cut short and accepted.
+- The `host` connection option rejects NUL bytes instead of connecting to,
+  and verifying, the text before the NUL.
+- A missing or unreadable CA file reports its path and the OS reason instead
+  of `Unknown SSL error`.
+- Reject malformed server packets before callbacks, rotate endpoints within
+  bounded retries, and validate UInt64/IPv4 and associative map-key inputs.
+
 ### Performance
 
 - `selectStream()` and `selectStreamCallback()` rows are pre-sized with
   `array_init_size`, matching `select()` and avoiding hash-table rehashing
   on wide results.
-
-### Fixed
-
-- Reject malformed server packets before callbacks, rotate endpoints within
-  bounded retries, and validate UInt64/IPv4 and associative map-key inputs.
 
 ## [0.12.1] - 2026-09-04
 
