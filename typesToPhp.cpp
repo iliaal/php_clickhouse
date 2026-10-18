@@ -2433,12 +2433,17 @@ static void emitDoubleCell(zval *arr, double v,
  * civil-date arithmetic, paired with days_from_civil in to_time_t. */
 static inline int64_t floor_div_86400(int64_t epoch, int64_t &secs_of_day)
 {
-    int64_t days = epoch >= 0 ? epoch / 86400 : -((-epoch + 86399) / 86400);
-    secs_of_day = epoch - days * 86400;
+    /* Negating or re-multiplying would overflow at INT64_MIN. */
+    int64_t days = epoch / 86400;
+    secs_of_day = epoch % 86400;
+    if (secs_of_day < 0) {
+        secs_of_day += 86400;
+        --days;
+    }
     return days;
 }
 
-static inline void civil_from_days(int64_t z, int &y, unsigned &m, unsigned &d)
+static inline void civil_from_days(int64_t z, int64_t &y, unsigned &m, unsigned &d)
 {
     z += 719468;
     int64_t era = (z >= 0 ? z : z - 146096) / 146097;
@@ -2449,24 +2454,30 @@ static inline void civil_from_days(int64_t z, int &y, unsigned &m, unsigned &d)
     unsigned mp = (5 * doy + 2) / 153;
     d = doy - (153 * mp + 2) / 5 + 1;
     m = mp < 10 ? mp + 3 : mp - 9;
-    y = (int)(y_ + (m <= 2 ? 1 : 0));
+    y = y_ + (m <= 2 ? 1 : 0);
 }
 
 static inline size_t format_epoch_utc(int64_t epoch, char *buf, size_t bufsz, bool with_time)
 {
     int64_t secs_of_day = 0;
     int64_t days = floor_div_86400(epoch, secs_of_day);
-    int y = 0;
+    int64_t y = 0;
     unsigned m = 0, d = 0;
     civil_from_days(days, y, m, d);
+    int l;
     if (!with_time) {
-        return (size_t)snprintf(buf, bufsz, "%04d-%02u-%02u", y, m, d);
+        l = snprintf(buf, bufsz, "%04" PRId64 "-%02u-%02u", y, m, d);
+    } else {
+        unsigned hh = (unsigned)(secs_of_day / 3600);
+        unsigned mm = (unsigned)((secs_of_day / 60) % 60);
+        unsigned ss = (unsigned)(secs_of_day % 60);
+        l = snprintf(buf, bufsz, "%04" PRId64 "-%02u-%02u %02u:%02u:%02u",
+                     y, m, d, hh, mm, ss);
     }
-    unsigned hh = (unsigned)(secs_of_day / 3600);
-    unsigned mm = (unsigned)((secs_of_day / 60) % 60);
-    unsigned ss = (unsigned)(secs_of_day % 60);
-    return (size_t)snprintf(buf, bufsz, "%04d-%02u-%02u %02u:%02u:%02u",
-                            y, m, d, hh, mm, ss);
+    if (l < 0) {
+        throw std::runtime_error("date formatting failed");
+    }
+    return (size_t)l < bufsz ? (size_t)l : bufsz - 1;
 }
 
 // RawAt widens storage directly; At narrows through time_t on 32-bit platforms.
