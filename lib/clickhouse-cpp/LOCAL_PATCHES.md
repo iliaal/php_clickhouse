@@ -326,3 +326,24 @@ cached. `ParseTypeName()` returns
 `std::shared_ptr<const TypeAst>` so an AST still in use survives a clear; the
 binding only reaches it through `CreateColumnByType()`.
 Upstream: pending PR (fix/type-ast-cache-bound on iliaal/clickhouse-cpp)
+## clickhouse/columns/factory.cpp: wrapper types over unsupported nested types
+
+`CreateColumnFromAst()` built `ColumnArray`, `ColumnNullable`, and the
+`LowCardinality(Nullable(T))` dictionary around whatever the nested call
+returned. For a nested type the factory cannot create (`Array(5)`,
+`Array(Null)`, `Nullable(DateTime64)`, `LowCardinality(Nullable(5))`, ...)
+that is `nullptr`, and the wrapper constructor dereferenced it. A malicious
+or compromised server reaches this with one column type string in a Data or
+ProfileEvents block; `selectWithExternalData()` reaches it with a
+caller-supplied column type.
+
+Patch: `0019-Reject-wrapper-types-over-unsupported-nested-types.patch`.
+Array and Nullable return `nullptr` when the nested column is null, matching
+Tuple and Map, so `ReadBlock()` throws `UnimplementedError("unsupported column
+type: ...")`. `LowCardinality(Nullable(T))` throws `UnimplementedError`, like
+the generic LowCardinality branch. Exercised by
+`tests/255_wire_nullable_unsupported_nested_type.phpt`,
+`tests/256_wire_array_unsupported_nested_type.phpt`, and
+`tests/257_unsupported_nested_type_external_data.phpt`.
+
+Upstream: pending PR (fix/factory-null-nested on iliaal/clickhouse-cpp)
