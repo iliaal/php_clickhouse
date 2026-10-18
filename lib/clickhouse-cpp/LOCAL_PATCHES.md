@@ -347,3 +347,61 @@ the generic LowCardinality branch. Exercised by
 `tests/257_unsupported_nested_type_external_data.phpt`.
 
 Upstream: pending PR (fix/factory-null-nested on iliaal/clickhouse-cpp)
+## clickhouse/columns/{string,tuple,nullable}.cpp: FixedString row total overflows
+
+`ColumnFixedString::LoadBody` sized its buffer as `string_size_ * rows` with
+no overflow check. A server that declares `FixedString(4611686018427387905)`
+with 4 rows wraps the product to 4 bytes: `Size()` then reports 0 rows while
+`At()` returns views of the full declared width past the end of the buffer.
+`ColumnTuple::LoadBody` and `ColumnNullable::LoadBody` never compare the
+loaded child sizes with the requested row count (and `ColumnTuple::Size()`
+reports only its first element), so `Tuple(UInt8, FixedString(huge))` and
+`Nullable(FixedString(huge))` reached the binding as 4-row columns whose
+FixedString reads went out of bounds (SIGSEGV). A plain top-level
+`FixedString(huge)` instead returned zero rows for a 4-row block.
+
+Patch: `0020-Reject-FixedString-loads-whose-byte-size-overflows.patch`.
+`ColumnFixedString::LoadBody` throws `ProtocolError` when the multiplication
+overflows; `ColumnTuple::LoadBody` and `ColumnNullable::LoadBody` throw
+`ProtocolError` when an element or the nested column holds a different number
+of rows than was loaded. Exercised by
+`tests/258_wire_fixedstring_width_overflow.phpt`, with valid shapes covered by
+`tests/260_column_load_valid_nested_shapes.phpt`.
+
+Upstream: pending PR (fix/fixedstring-size-overflow on iliaal/clickhouse-cpp).
+
+## clickhouse/columns/array.cpp: Array offsets not validated on load
+
+`ColumnArray`'s constructor rejects decreasing offsets and a nested column
+whose size differs from the last offset, but `ColumnArray::LoadBody` checked
+neither. Server-sent decreasing offsets made `GetSize()` / `GetAsColumn()`
+compute `offsets[n] - offsets[n - 1]` with unsigned wraparound; for
+`Array(Nothing)`, whose `Slice()` keeps any length, a row reported a length
+near 2^64 and the binding died on a huge allocation hint (PHP fatal).
+
+Patch: `0021-Validate-Array-offsets-when-loading-from-the-wire.patch`.
+`LoadBody` throws `ProtocolError` on a decreasing offset and when the nested
+column does not hold exactly as many values as the last offset; with no rows
+or only empty arrays it clears the stale nested values instead of returning
+early. Exercised by
+`tests/259_wire_array_offsets_decreasing.phpt`.
+
+Upstream: pending PR (fix/array-offsets-monotonic on iliaal/clickhouse-cpp).
+
+## clickhouse/columns/tuple.cpp: `ColumnTuple::Clear` drops the element columns
+
+In v2.6.2 `ColumnTuple::Clear()` runs `columns_.clear()`, so a cleared Tuple
+becomes `Tuple()` and a cleared `Map` (an `Array(Tuple(K, V))`) loses its key
+and value columns. Patch 0021 clears the nested column when every Array
+offset in a block is 0, which reaches this path for an all-empty `Map`,
+`Array(Map(...))`, or `Map` inside a `Tuple`: the binding then dereferenced the
+missing elements (SIGSEGV) or rejected the column as `Array(Tuple())`.
+
+Patch: `0030-Clear-Tuple-elements-in-place.patch`, the `ColumnTuple::Clear`
+hunk of upstream commit 44f54c5 ("Make composite Swap and Tuple Clear
+alias-coherent"), applied verbatim. It clears each element in place. 0021
+depends on it; drop both together once the vendored library includes 44f54c5.
+Exercised by the all-empty and mixed Map rows in
+`tests/260_column_load_valid_nested_shapes.phpt`.
+
+Upstream: already on master (44f54c5), not in a release yet.

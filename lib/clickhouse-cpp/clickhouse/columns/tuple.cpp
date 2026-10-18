@@ -120,6 +120,10 @@ bool ColumnTuple::LoadBody(InputStream* input, size_t rows) {
         if (!(*ci)->LoadBody(input, rows)) {
             return false;
         }
+        if ((*ci)->Size() != rows) {
+            throw ProtocolError("Tuple element " + std::to_string(ci - columns_.begin()) + " loaded " + std::to_string((*ci)->Size()) +
+                                " rows, expected " + std::to_string(rows));
+        }
     }
 
     return true;
@@ -138,7 +142,11 @@ void ColumnTuple::SaveBody(OutputStream* output) {
 }
 
 void ColumnTuple::Clear() {
-    columns_.clear();
+    // Clear each element column in place (do NOT drop the element handles): this preserves the
+    // tuple structure and the element objects' identity, so any As<>/Wrap views stay coherent.
+    for (auto & column : columns_) {
+        column->Clear();
+    }
 }
 
 void ColumnTuple::Swap(Column& other) {
