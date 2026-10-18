@@ -4,12 +4,12 @@ Date: Sun, 18 Oct 2026 00:00:00 -0400
 Subject: [PATCH 15/15] Fix compressed block size validation
 
 CompressedInput::Decompress() accepted a declared compressed size below
-the 9-byte frame header. It allocated that many bytes, wrote the header
-past the end, and read `compressed - HEADER_SIZE` (an unsigned underflow)
-bytes into the buffer, a peer-controlled heap overflow. Reject sizes
-below HEADER_SIZE before allocating, and report the declared size in
-both size errors. Backport of upstream commits f0f2927 and 1d60058
-(ClickHouse/clickhouse-cpp#566).
+the 9-byte frame header. The header write grows the buffer to 9 bytes,
+but the payload read then asks for `compressed - HEADER_SIZE` bytes,
+which wraps to nearly 2^64 in size_t, so the peer can write as many
+bytes past the buffer as it sends. Reject sizes below HEADER_SIZE before
+allocating, and report the declared size in both size errors. Backport
+of upstream commits f0f2927 and 1d60058 (ClickHouse/clickhouse-cpp#566).
 ---
  clickhouse/base/compressed.cpp | 6 +++++-
  1 file changed, 5 insertions(+), 1 deletion(-)

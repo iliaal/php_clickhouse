@@ -272,13 +272,17 @@ complete decoding, including handshake exceptions; and `RetryGuard()` honors
 ## clickhouse/base/compressed.cpp: compressed sizes below the frame header
 
 `CompressedInput::Decompress()` capped the declared compressed size at
-1 GB but had no lower bound. A frame declaring 0..8 bytes, below the
-9-byte method + size header, allocated that many bytes, wrote the
-header past the end, and read `compressed - HEADER_SIZE` bytes, which
-underflows to a huge length, into the buffer. A malicious or broken
-server with compression enabled could overflow the heap with whatever
-bytes followed (ASan heap-buffer-overflow WRITE; release builds abort
-in malloc).
+1 GB but had no lower bound. For a frame declaring 0..8 bytes, below the
+9-byte method and size header, `BufferOutput` grows the buffer to 9
+bytes for the header, and the following
+`ReadBytes(tmp.data() + HEADER_SIZE, compressed - HEADER_SIZE)` gets a
+`size_t` length that wraps to just under 2^64. The write past the 9-byte
+buffer is then bounded only by how many bytes the peer sends. A
+malicious or broken server with compression enabled could overflow the
+heap with those bytes: ASan reports a heap-buffer-overflow WRITE, and
+release builds were observed to abort (SIGABRT, `malloc(): corrupted
+top size`), crash (SIGSEGV), or continue with silently corrupted heap
+memory when the overflow was only a couple of bytes.
 
 Patch: `0015-Fix-compressed-block-size-validation.patch`. Rejects
 `compressed < HEADER_SIZE` with `CompressionError` before allocating,
