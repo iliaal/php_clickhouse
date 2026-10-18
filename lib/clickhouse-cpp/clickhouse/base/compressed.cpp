@@ -45,7 +45,7 @@ CompressedInput::~CompressedInput() {
 }
 
 size_t CompressedInput::DoNext(const void** ptr, size_t len) {
-    if (mem_.Exhausted()) {
+    while (mem_.Exhausted()) {
         if (!Decompress()) {
             return 0;
         }
@@ -103,9 +103,14 @@ bool CompressedInput::Decompress() {
 
     data_ = Buffer(original);
 
+    // Buffer(0).data() is null, and the decompressors do pointer arithmetic on
+    // the destination even when its capacity is zero.
+    char empty_output = 0;
+    char* const output = original > 0 ? reinterpret_cast<char*>(data_.data()) : &empty_output;
+
     switch (method) {
     case static_cast<uint8_t>(CompressionMethodByte::LZ4): {
-        if (LZ4_decompress_safe((const char*)tmp.data() + HEADER_SIZE, (char*)data_.data(), static_cast<int>(compressed - HEADER_SIZE), original) < 0) {
+        if (LZ4_decompress_safe((const char*)tmp.data() + HEADER_SIZE, output, static_cast<int>(compressed - HEADER_SIZE), original) < 0) {
             throw CompressionError("can't decompress LZ4-encoded data");
         } else {
             mem_.Reset(data_.data(), original);
@@ -114,7 +119,7 @@ bool CompressedInput::Decompress() {
     }
 
     case static_cast<uint8_t>(CompressionMethodByte::ZSTD): {
-        size_t res = ZSTD_decompress((char*)data_.data(), original, (const char*)tmp.data() + HEADER_SIZE, static_cast<int>(compressed - HEADER_SIZE));
+        size_t res = ZSTD_decompress(output, original, (const char*)tmp.data() + HEADER_SIZE, static_cast<int>(compressed - HEADER_SIZE));
 
         if (ZSTD_isError(res)) {
             throw CompressionError("can't decompress ZSTD-encoded data, ZSTD error: " + std::string(ZSTD_getErrorName(res)));
