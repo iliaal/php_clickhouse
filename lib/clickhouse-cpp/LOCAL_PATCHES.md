@@ -475,3 +475,19 @@ handshake, so a TLS endpoint can take up to twice the connect timeout
 `tests/266_tls_handshake_tarpit_timeout.phpt`.
 
 Upstream: pending PR (fix/tls-handshake-timeout on iliaal/clickhouse-cpp).
+## clickhouse/base/sslsocket.cpp: CA-load failures report "Unknown SSL error"
+
+With OpenSSL 3, `ERR_reason_error_string()` returns NULL for system errors,
+so a missing or unreadable `ssl_ca_files` entry failed with
+`OpenSSL error: -2147483646 : Unknown SSL error` and no path. `throwSSLError()`
+also popped one queue entry and left the rest for a later failure to report.
+The comment above the disabled `X509_check_ip` block claimed IP addresses are
+not verified; OpenSSL 3.0+ `SSL_set1_host()` checks IP literals against the
+certificate's IP SANs.
+
+Patch: `0026-Name-the-CA-file-or-directory-when-loading-it-fails.patch`.
+Falls back to `ERR_error_string_n()` (which formats errno), prefixes CA
+file/directory load failures with the path, clears the error queue before
+each CA load and after reporting, and corrects the comment. Exercised by
+`tests/233_ssl_ca_path_validation.phpt`.
+Upstream: pending PR (fix/ssl-ca-load-error on iliaal/clickhouse-cpp).

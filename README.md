@@ -134,6 +134,8 @@ foreach ($ch->select("SELECT id, ts, tag FROM events ORDER BY id",
 
 Shape flags (`FETCH_ONE` / `FETCH_KEY_PAIR` / `FETCH_COLUMN`) are ignored on `selectStatement` / `selectStream` / `selectStreamCallback`; only value flags apply there. See the [documentation site](https://iliaal.github.io/php_clickhouse/) for full signatures and streaming formats.
 
+TLS (`"ssl" => true`, built with `--enable-clickhouse-openssl`) verifies the server certificate by default. CA files given in `ssl_ca_files` are added to the system trust store, not used instead of it; set `"ssl_use_default_ca" => false` as well to trust only your own CA.
+
 The `passwd` key also accepts the `password` alias. Returning `false` from a `selectStreamCallback()` callback stops the stream cleanly.
 
 ## 📊 Benchmarks
