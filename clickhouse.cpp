@@ -1879,7 +1879,8 @@ static std::string getInsertSql(std::string_view table_name, const zval *columns
  *                 literal. Whitespace, commas, and other punctuation are
  *                 rejected so `{tbl}` = "a, b" cannot turn `FROM {tbl}`
  *                 into a cross join. An array joins validated tokens
- *                 with ", " for column lists.
+ *                 with ", " for column lists. A negative value placed
+ *                 directly after '-' throws instead of composing `--`.
  *
  *   {name:Type}   server-side parameter. The SQL text is left untouched;
  *                 the value goes into `out_params` for Query::SetParam,
@@ -2047,6 +2048,17 @@ static void applyPlaceholders(string &sql, HashTable *params_ht, std::vector<Typ
                 "Placeholder {" + name + "} does not appear in the SQL");
         }
         while (pos != std::string::npos) {
+            /* A token's first byte is the only one that can join template text
+             * into a comment opener; of the openers (two dashes, two slashes,
+             * slash-star, hash-space, hash-bang) it can only complete two
+             * dashes. Parenthesizing instead would change `{n}::String` and
+             * break `SETTINGS x = {n}`. */
+            if (repl[0] == '-' && pos > 0 && sql[pos - 1] == '-') {
+                throw std::runtime_error(
+                    "Placeholder value for {" + name + "} is invalid: a negative "
+                    "value directly after '-' would form a SQL comment; separate "
+                    "them with a space or parentheses in the SQL");
+            }
             sql.replace(pos, needle.size(), repl);
             pos = sql.find(needle, pos + repl.size());
         }

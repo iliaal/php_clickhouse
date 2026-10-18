@@ -518,7 +518,7 @@ echo "$n rows inserted\n";</code></pre>
 <ul>
 <li><code>{name}</code> is client-side identifier substitution. Two value shapes:
   <ul>
-  <li><strong>Scalar</strong> (string / int / float): coerces to a single token, validated as either an identifier (<code>[A-Za-z_][A-Za-z0-9_]*</code>, optionally db-qualified by one dot like <code>db.tbl</code>) or a numeric literal. Whitespace, commas, quotes, semicolons, backslashes, and other SQL meta-characters are rejected.</li>
+  <li><strong>Scalar</strong> (string / int / float): coerces to a single token, validated as either an identifier (<code>[A-Za-z_][A-Za-z0-9_]*</code>, optionally db-qualified by one dot like <code>db.tbl</code>) or a numeric literal. Whitespace, commas, quotes, semicolons, backslashes, and other SQL meta-characters are rejected. That check covers the value, not the text it lands in: a negative value placed directly after <code>-</code> (as in <code>0-{n}</code>) would compose <code>--</code>, which starts a comment, so it throws. Write <code>0 - {n}</code> or <code>0-({n})</code> instead.</li>
   <li><strong>Array</strong>: each element is validated as a single scalar token, then joined with <code>", "</code> for the SQL replacement. Use this for legitimate column lists; an element with internal whitespace or commas is still rejected. A scalar value containing commas is rejected; that ambiguity (single identifier vs. list) is the point of the array-shape API.</li>
   </ul>
 </li>
@@ -561,7 +561,7 @@ $stats = $ch-&gt;getStatistics();
 </div>
 
 <h2 id="logging">Query log <a class="anchor" href="#logging">#</a></h2>
-<p><code>enableLogQueries(true)</code> turns on a per-client buffer that records each completed <code>select</code> / <code>insert</code> / <code>execute</code> / streaming <code>writeEnd</code>. Each entry is <code>{sql, query_id, elapsed_ms, rows_read, bytes_read, error_code, error_message}</code>. <code>sql</code> is capped before retention. <code>error_code</code> is <code>0</code> on success, the server error code on a <code>ServerException</code>, or <code>-1</code> on client/network failure. <code>getLogQueries()</code> returns the buffer and clears it.</p>
+<p><code>enableLogQueries(true)</code> turns on a per-client buffer that records each completed <code>select</code> / <code>insert</code> / <code>execute</code> / streaming <code>writeEnd</code>. Each entry is <code>{sql, query_id, elapsed_ms, rows_read, bytes_read, error_code, error_message}</code>. <code>sql</code> is the pre-substitution template with string literals (<code>'...'</code>, <code>$$...$$</code>, <code>$tag$...$tag$</code>, <code>x'...'</code>, and Unicode-quoted strings) replaced by <code>'?'</code>-style markers, including quoted text inside comments; identifiers and comment text are kept. The same redaction applies to the <code>sql</code> field of verbose events. <code>sql</code> is capped before retention. <code>error_code</code> is <code>0</code> on success, the server error code on a <code>ServerException</code>, or <code>-1</code> on client/network failure. <code>getLogQueries()</code> returns the buffer and clears it.</p>
 <pre><code>$ch-&gt;enableLogQueries(true);
 $ch-&gt;select("SELECT count() FROM users");
 $ch-&gt;insert("logins", ["user_id", "ts"], $batch);
