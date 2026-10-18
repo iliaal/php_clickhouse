@@ -281,7 +281,7 @@ certificate's IP SANs.
 
 Patch: `0026-Name-the-CA-file-or-directory-when-loading-it-fails.patch`.
 Falls back to `ERR_error_string_n()` (which formats errno), prefixes CA
-file/directory load failures with the path, clears the error queue after
-reporting, and corrects the comment. Exercised by
+file/directory load failures with the path, clears the error queue before
+each CA load and after reporting, and corrects the comment. Exercised by
 `tests/233_ssl_ca_path_validation.phpt`.
 Upstream: pending PR (fix/ssl-ca-load-error on iliaal/clickhouse-cpp).

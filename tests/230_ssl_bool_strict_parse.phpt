@@ -44,7 +44,7 @@ function attempt($label, array $cfg) {
 }
 
 foreach (["ssl", "ssl_skip_verify", "ssl_use_default_ca"] as $key) {
-    foreach (["no", "off", "yes", "on", "", " true", "2", 2, -1, 1.0, [], [0], new stdClass()] as $bad) {
+    foreach (["no", "off", "yes", "on", " true", "2", 2, -1, 1.0, [], [0], new stdClass()] as $bad) {
         $cfg = $base;
         $cfg[$key] = $bad;
         try {
@@ -59,7 +59,7 @@ foreach (["ssl", "ssl_skip_verify", "ssl_use_default_ca"] as $key) {
 }
 echo "invalid spellings checked\n";
 
-foreach (["false", "FALSE", "0", 0, false] as $v) {
+foreach (["false", "FALSE", "0", "", 0, false] as $v) {
     attempt("skip_verify=" . var_export($v, true), $base + ["ssl_use_default_ca" => false, "ssl_skip_verify" => $v]);
 }
 foreach (["true", "True", "1", 1, true] as $v) {
@@ -87,6 +87,7 @@ invalid spellings checked
 skip_verify='false': verification failed
 skip_verify='FALSE': verification failed
 skip_verify='0': verification failed
+skip_verify='': verification failed
 skip_verify=0: verification failed
 skip_verify=false: verification failed
 skip_verify='true': connected 1

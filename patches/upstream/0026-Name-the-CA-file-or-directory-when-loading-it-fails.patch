@@ -7,12 +7,13 @@ Under OpenSSL 3, a missing or unreadable CA file failed with "Unknown SSL
 error" because ERR_reason_error_string() returns NULL for system errors.
 Fall back to ERR_error_string_n() so the errno text is reported, prefix
 CA-load failures with the offending path, and clear the error queue after
-reporting so leftover entries cannot surface as the reason of a later
-failure. Also correct the comment that claimed IP addresses are not
-verified: OpenSSL 3.0+ checks IP literals passed to SSL_set1_host().
+reporting (and before each CA load) so a stale entry cannot surface as
+the reason of an unrelated failure. Also correct the comment that claimed
+IP addresses are not verified: OpenSSL 3.0+ checks IP literals passed to
+SSL_set1_host().
 ---
- clickhouse/base/sslsocket.cpp | 57 +++++++++++++++++++++++++++++++++++----------------------
- 1 file changed, 35 insertions(+), 22 deletions(-)
+ clickhouse/base/sslsocket.cpp | 59 +++++++++++++++++++++++++++++++++++++----------------------
+ 1 file changed, 37 insertions(+), 22 deletions(-)
 
 --- a/clickhouse/base/sslsocket.cpp
 +++ b/clickhouse/base/sslsocket.cpp
@@ -40,11 +41,13 @@ verified: OpenSSL 3.0+ checks IP literals passed to SSL_set1_host().
      if (ssl) {
          // Print certificate only if handshake isn't completed 
          if (auto ssl_session = SSL_get_session(ssl); ssl_session && SSL_get_state(ssl) != TLS_ST_OK)
-@@ -129,16 +139,18 @@
+@@ -129,16 +139,20 @@
  
      if (context_params.use_default_ca_locations)
          HANDLE_SSL_CTX_ERROR(SSL_CTX_set_default_verify_paths(ctx.get()));
 +    const auto load_verify_locations = [&ctx](const char* file, const char* dir, const std::string& what) {
++        // Otherwise an entry queued by unrelated earlier work would be reported as the reason.
++        ERR_clear_error();
 +        if (!SSL_CTX_load_verify_locations(ctx.get(), file, dir))
 +            throwSSLError(nullptr, static_cast<int>(ERR_peek_error()), LOCATION, "SSL_CTX_load_verify_locations",
 +                          "Failed to load " + what + ": ");
@@ -67,7 +70,7 @@ verified: OpenSSL 3.0+ checks IP literals passed to SSL_set1_host().
  
      if (context_params.context_options != -1)
          SSL_CTX_set_options(ctx.get(), context_params.context_options);
-@@ -255,17 +267,18 @@
+@@ -255,17 +269,18 @@
                  + "\nServer certificate: " + getCertificateInfo(peer_cert.get()));
      }
  

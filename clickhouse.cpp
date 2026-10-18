@@ -749,7 +749,8 @@ static bool parseConfigBool(zval *v, bool &out)
             out = true;
             return true;
         }
-        if ((n == 1 && s[0] == '0') || (n == 5 && strncasecmp(s, "false", 5) == 0)) {
+        /* INI files yield "" for off/false, and zend_is_true("") was false too. */
+        if (n == 0 || (n == 1 && s[0] == '0') || (n == 5 && strncasecmp(s, "false", 5) == 0)) {
             out = false;
             return true;
         }
@@ -836,9 +837,10 @@ PHP_METHOD(ClickHouse, __construct)
         ZVAL_DEREF(value);
         if (Z_TYPE_P(value) == IS_STRING) {
             const char *s = Z_STRVAL_P(value);
-            if (strcasecmp(s, "lz4") == 0)        cv = 1;
-            else if (strcasecmp(s, "zstd") == 0)  cv = 2;
-            else if (strcasecmp(s, "none") == 0)  cv = 0;
+            size_t n = Z_STRLEN_P(value);
+            if (n == 3 && strncasecmp(s, "lz4", 3) == 0)        cv = 1;
+            else if (n == 4 && strncasecmp(s, "zstd", 4) == 0)  cv = 2;
+            else if (n == 4 && strncasecmp(s, "none", 4) == 0)  cv = 0;
             else {
                 zend_throw_exception(clickhouse_exception_ce,
                     "Unknown compression name; expected 'lz4', 'zstd', 'none', 0, 1, 2, true, or false", 0);
@@ -1148,7 +1150,7 @@ PHP_METHOD(ClickHouse, __construct)
         }
         }
         /* TLS material without ssl => true would otherwise connect in plaintext.
-         * Explicit false booleans are no-ops and stay allowed. */
+         * Booleans set to their library default are no-ops and stay allowed. */
         if (!want_ssl) {
             static const char *ssl_material_keys[] = {
                 "ssl_min_protocol_version", "ssl_ca_directory", "ssl_ca_files",
@@ -1161,10 +1163,13 @@ PHP_METHOD(ClickHouse, __construct)
                 zend_throw_exception(clickhouse_exception_ce, msg.c_str(), 0);
                 return;
             }
-            static const char *ssl_bool_keys[] = {"ssl_skip_verify", "ssl_use_default_ca"};
-            for (const char *k : ssl_bool_keys) {
-                bool b = false;
-                if (loadConfigBool(_ht, k, b) && b) {
+            static const struct { const char *key; bool def; } ssl_bool_keys[] = {
+                {"ssl_skip_verify", false}, {"ssl_use_default_ca", true},
+            };
+            for (const auto &bk : ssl_bool_keys) {
+                const char *k = bk.key;
+                bool b = bk.def;
+                if (loadConfigBool(_ht, k, b) && b != bk.def) {
                     std::string msg = std::string("ssl_* option '") + k + "' requires 'ssl' => true";
                     zend_throw_exception(clickhouse_exception_ce, msg.c_str(), 0);
                     return;
@@ -1182,11 +1187,13 @@ PHP_METHOD(ClickHouse, __construct)
                 return;
             }
         }
-        /* Any ssl_* material needs a TLS-enabled build. Explicit false
-         * booleans (ssl_skip_verify=false) are no-ops and stay allowed; any
-         * other value or unknown ssl_* key is rejected. */
+        /* Any ssl_* material needs a TLS-enabled build. Booleans set to their
+         * library default (ssl_skip_verify=false, ssl_use_default_ca=true) are
+         * no-ops and stay allowed; any other value or unknown ssl_* key is rejected. */
         {
-        static const char *bool_ssl_keys[] = {"ssl_skip_verify", "ssl_use_default_ca"};
+        static const struct { const char *key; bool def; } bool_ssl_keys[] = {
+            {"ssl_skip_verify", false}, {"ssl_use_default_ca", true},
+        };
         std::string offending;
         zend_string *sk;
         zend_ulong snk;
@@ -1197,15 +1204,20 @@ PHP_METHOD(ClickHouse, __construct)
             zval *v = sv;
             if (Z_ISREF_P(v)) v = Z_REFVAL_P(v);
             if (Z_ISNULL_P(v)) continue;
-            bool is_bool_key = false;
-            for (const char *k : bool_ssl_keys) {
-                if (ZSTR_LEN(sk) == strlen(k) && memcmp(ZSTR_VAL(sk), k, ZSTR_LEN(sk)) == 0) {
-                    is_bool_key = true;
+            const char *bool_key = nullptr;
+            bool def = false;
+            for (const auto &bk : bool_ssl_keys) {
+                if (ZSTR_LEN(sk) == strlen(bk.key) && memcmp(ZSTR_VAL(sk), bk.key, ZSTR_LEN(sk)) == 0) {
+                    bool_key = bk.key;
+                    def = bk.def;
                     break;
                 }
             }
-            bool b = true;
-            if (is_bool_key && parseConfigBool(v, b) && !b) continue;
+            if (bool_key) {
+                bool b;
+                if (!loadConfigBool(_ht, bool_key, b)) return;
+                if (b == def) continue;
+            }
             offending.assign(ZSTR_VAL(sk), ZSTR_LEN(sk));
         } ZEND_HASH_FOREACH_END();
         if (!offending.empty()) {

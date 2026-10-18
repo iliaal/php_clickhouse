@@ -140,6 +140,8 @@ SSL_CTX * prepareSSLContext(const clickhouse::SSLParams & context_params) {
     if (context_params.use_default_ca_locations)
         HANDLE_SSL_CTX_ERROR(SSL_CTX_set_default_verify_paths(ctx.get()));
     const auto load_verify_locations = [&ctx](const char* file, const char* dir, const std::string& what) {
+        // Otherwise an entry queued by unrelated earlier work would be reported as the reason.
+        ERR_clear_error();
         if (!SSL_CTX_load_verify_locations(ctx.get(), file, dir))
             throwSSLError(nullptr, static_cast<int>(ERR_peek_error()), LOCATION, "SSL_CTX_load_verify_locations",
                           "Failed to load " + what + ": ");

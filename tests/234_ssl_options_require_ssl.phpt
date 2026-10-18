@@ -38,7 +38,7 @@ $material = [
     "ssl_ca_directory" => "/etc/ssl/certs",
     "ssl_min_protocol_version" => "tls1.3",
     "ssl_skip_verify" => true,
-    "ssl_use_default_ca" => true,
+    "ssl_use_default_ca" => false,
 ];
 foreach ([["absent", null], ["false", false], ["'0'", "0"]] as $mode) {
     foreach ($material as $key => $val) {
@@ -51,13 +51,17 @@ foreach ([["absent", null], ["false", false], ["'0'", "0"]] as $mode) {
     }
 }
 
-attempt("ssl false, explicit false booleans and nulls", $base + [
+attempt("ssl false, default booleans and nulls", $base + [
     "ssl" => false,
     "ssl_skip_verify" => false,
-    "ssl_use_default_ca" => "0",
+    "ssl_use_default_ca" => true,
     "ssl_ca_files" => null,
     "ssl_ca_directory" => null,
     "ssl_min_protocol_version" => null,
+]);
+attempt("ssl absent, default booleans as strings", $base + [
+    "ssl_skip_verify" => "false",
+    "ssl_use_default_ca" => "1",
 ]);
 attempt("ssl absent, invalid boolean", $base + ["ssl_skip_verify" => "no"]);
 attempt("ssl absent, unknown key", $base + ["ssl_verify_peer" => true]);
@@ -78,6 +82,7 @@ ssl '0', ssl_ca_directory: ssl_* option 'ssl_ca_directory' requires 'ssl' => tru
 ssl '0', ssl_min_protocol_version: ssl_* option 'ssl_min_protocol_version' requires 'ssl' => true
 ssl '0', ssl_skip_verify: ssl_* option 'ssl_skip_verify' requires 'ssl' => true
 ssl '0', ssl_use_default_ca: ssl_* option 'ssl_use_default_ca' requires 'ssl' => true
-ssl false, explicit false booleans and nulls: connected 1
+ssl false, default booleans and nulls: connected 1
+ssl absent, default booleans as strings: connected 1
 ssl absent, invalid boolean: ssl_skip_verify must be a boolean (true, false, 0, 1, "true", "false", "0", or "1")
 ssl absent, unknown key: unknown ssl_* option 'ssl_verify_peer'
