@@ -218,7 +218,12 @@ jobs:
             tests/027.phpt tests/064.phpt tests/070.phpt tests/188.phpt \
             tests/207_reentrant_ssl_ca_files.phpt \
             tests/209_windows_x86_config_bounds.phpt \
-            tests/216_ssl_ca_files_invalid_type.phpt
+            tests/216_ssl_ca_files_invalid_type.phpt \
+            tests/230_ssl_bool_strict_parse.phpt \
+            tests/233_ssl_ca_path_validation.phpt \
+            tests/234_ssl_options_require_ssl.phpt \
+            tests/265_tls_handshake_tarpit_failover.phpt \
+            tests/266_tls_handshake_tarpit_timeout.phpt
 
       - name: Rebuild with TLS and run the TLS suite
         env:
@@ -281,20 +286,25 @@ jobs:
           export CLICKHOUSE_TLS_WRONG_CA_FILE="$RUNNER_TEMP/ch-certs/wrong.crt"
           # run-tests.php exits 0 on all-skip, so a skipped 027 (no TLS server /
           # no TLS build) would pass this step silently. Capture the summary and
-          # require all four tests actually ran and passed.
+          # require every listed test actually ran and passed.
           out=$(php run-tests.php -j1 --show-diff -g FAIL,BORK,LEAK,XLEAK \
             tests/027.phpt \
             tests/188.phpt \
             tests/207_reentrant_ssl_ca_files.phpt \
-            tests/216_ssl_ca_files_invalid_type.phpt 2>&1) || true
+            tests/216_ssl_ca_files_invalid_type.phpt \
+            tests/230_ssl_bool_strict_parse.phpt \
+            tests/233_ssl_ca_path_validation.phpt \
+            tests/234_ssl_options_require_ssl.phpt \
+            tests/265_tls_handshake_tarpit_failover.phpt \
+            tests/266_tls_handshake_tarpit_timeout.phpt 2>&1) || true
           echo "$out"
           skipped=$(echo "$out" | sed -n 's/.*Tests skipped *: *\([0-9]\{1,\}\).*/\1/p' | head -1)
           passed=$(echo "$out" | sed -n 's/.*Tests passed *: *\([0-9]\{1,\}\).*/\1/p' | head -1)
           if [ "$skipped" != "0" ]; then
             echo "::error::a TLS test was skipped -- server unreachable or extension built without TLS"; exit 1
           fi
-          if [ "$passed" != "4" ]; then
-            echo "::error::TLS verification suite did not pass all four tests (passed=$passed)"; exit 1
+          if [ "$passed" != "9" ]; then
+            echo "::error::TLS verification suite did not pass all nine tests (passed=$passed)"; exit 1
           fi
 
           docker rm -f clickhouse-tls
@@ -400,7 +410,12 @@ jobs:
             tests/027.phpt tests/064.phpt tests/070.phpt tests/188.phpt \
             tests/207_reentrant_ssl_ca_files.phpt \
             tests/209_windows_x86_config_bounds.phpt \
-            tests/216_ssl_ca_files_invalid_type.phpt
+            tests/216_ssl_ca_files_invalid_type.phpt \
+            tests/230_ssl_bool_strict_parse.phpt \
+            tests/233_ssl_ca_path_validation.phpt \
+            tests/234_ssl_options_require_ssl.phpt \
+            tests/265_tls_handshake_tarpit_failover.phpt \
+            tests/266_tls_handshake_tarpit_timeout.phpt
 
   # Windows extension builds need the official PHP SDK + matching MSVC
   # toolset, not the autotools phpize/configure flow. The php-org
@@ -584,7 +599,12 @@ jobs:
             tests/027.phpt tests/064.phpt tests/070.phpt tests/188.phpt \
             tests/207_reentrant_ssl_ca_files.phpt \
             tests/209_windows_x86_config_bounds.phpt \
-            tests/216_ssl_ca_files_invalid_type.phpt
+            tests/216_ssl_ca_files_invalid_type.phpt \
+            tests/230_ssl_bool_strict_parse.phpt \
+            tests/233_ssl_ca_path_validation.phpt \
+            tests/234_ssl_options_require_ssl.phpt \
+            tests/265_tls_handshake_tarpit_failover.phpt \
+            tests/266_tls_handshake_tarpit_timeout.phpt
 
       - name: Run leak-enabled client lifecycle probe
         env:
