@@ -92,11 +92,6 @@ $hello = hex2bin("000a436c69636b486f7573651a09dca903035554430c356366636365333932
 $select = function ($client) {
     return $client->select("SELECT * FROM t");
 };
-$stream = function ($client) {
-    $rows = [];
-    foreach ($client->selectStream("SELECT * FROM t", [], "", [], 468) as $row) $rows[] = $row;
-    return $rows;
-};
 
 function varint($value) {
     $out = "";
@@ -128,12 +123,12 @@ echo "W-11b bytes: ", strlen($w11b), " ", md5($w11b), "\n";
 echo "W-11: ", summary(replay($mockFile, $responseFile, $hello, $w11, "none", $select)), "\n";
 echo "W-11b: ", summary(replay($mockFile, $responseFile, $hello, $w11b, "none", $select)), "\n";
 
-foreach ([1001, 5000] as $depth) {
+foreach ([513, 5000] as $depth) {
     echo "depth $depth: ", summary(replay($mockFile, $responseFile, $hello,
         dataBlock(nestedArray($depth, true), ""), "none", $select)), "\n";
 }
-echo "depth 1000: ", replay($mockFile, $responseFile, $hello,
-    dataBlock(nestedArray(1000, true), ""), "none", $select), "\n";
+echo "depth 512: ", replay($mockFile, $responseFile, $hello,
+    dataBlock(nestedArray(512, true), ""), "none", $select), "\n";
 echo "depth 8: ", replay($mockFile, $responseFile, $hello,
     dataBlock(nestedArray(8, true), str_repeat("\x01\x00\x00\x00\x00\x00\x00\x00", 8) . "\x07"), "none", $select), "\n";
 echo "map: ", replay($mockFile, $responseFile, $hello,
@@ -145,8 +140,8 @@ W-11 bytes: 700025 77bd0738ed682a90f6062bda821ad9bd
 W-11b bytes: 600020 c9877e6644bd25673f0e642834436511
 W-11: exception:unsupported column type: Array(Array(Array(Array(Array(Array(Array(Arr...(4106)
 W-11b: exception:unsupported column type: Array(Array(Array(Array(Array(Array(Array(Arr...(4106)
-depth 1001: exception:unsupported column type: Array(Array(Array(Array(Array(Array(Array(Arr...(4106)
+depth 513: exception:unsupported column type: Array(Array(Array(Array(Array(Array(Array(Arr...(3631)
 depth 5000: exception:unsupported column type: Array(Array(Array(Array(Array(Array(Array(Arr...(4106)
-depth 1000: accepted:[]
+depth 512: accepted:[]
 depth 8: accepted:[{"c0":[[[[[[[[7]]]]]]]]}]
 map: accepted:[{"c0":{"k":9}}]
