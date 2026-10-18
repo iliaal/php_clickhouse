@@ -603,4 +603,4 @@ Patch: `0031-Reject-LowCardinality-indexes-outside-the-dictionary.patch`.
 `createIndexColumn()` switches on the raw `uint64_t`. The failed index
 `LoadBody()` check that the upstream PR also adds is already applied here by
 patch 0030. Exercised by `tests/273_lowcardinality_index_bounds.phpt`.
-Upstream: pending PR (fix/lowcardinality-index-bounds on iliaal/clickhouse-cpp).
+Upstream: https://github.com/ClickHouse/clickhouse-cpp/pull/593
