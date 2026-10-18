@@ -97,7 +97,10 @@ public:
     }
 
 private:
-    enum class Kind { Other, Dot, Number, BareWord, QuotedIdent, CloseRound, CloseSquare };
+    /* MaybeBareWord: BareWord or Other. MaybeDot: BareWord, Number, or Dot.
+     * Both arise after a `{name}` whose value the template does not show. */
+    enum class Kind { Other, Dot, Number, BareWord, QuotedIdent, CloseRound, CloseSquare,
+                      MaybeBareWord, MaybeDot };
 
     const std::string &sql_;
     const size_t n_;
@@ -108,6 +111,8 @@ private:
     bool significant_ = true;
     bool heredocs_indexed_ = false;
     bool heredoc_index_overflow_ = false;
+    size_t next_close_brace_ = 0;
+    size_t next_colon_ = 0;
     std::unordered_map<std::string_view, size_t> last_heredoc_tag_;
 
     bool full() const { return out_.size() >= max_; }
@@ -186,6 +191,8 @@ private:
             emitRange(i, e);
             return e;
         }
+        case '{':
+            return brace(i);
         case ')':
             cur_ = Kind::CloseRound;
             break;
@@ -417,13 +424,89 @@ private:
         return (j < n_ && sql_[j] == '\'') ? j + 1 : n_;
     }
 
+    /* Earliest offset >= from holding `c`, or npos; `cache` only moves forward
+     * so repeated calls over one statement stay linear. */
+    size_t nextByte(size_t from, char c, size_t &cache) const
+    {
+        if (cache != std::string::npos && cache < from) {
+            const void *q = from < n_ ? memchr(sql_.data() + from, c, n_ - from) : nullptr;
+            cache = q ? (size_t)((const char *)q - sql_.data()) : std::string::npos;
+        }
+        return cache;
+    }
+
+    size_t failClosed()
+    {
+        emit("?");
+        return n_;
+    }
+
+    /* The log keeps the template, but the server lexes the substituted text.
+     * A `{name}` value is a bare word or number, so it is modeled as one token;
+     * where the value could merge with or change the lexing of a neighbor,
+     * everything from the placeholder on is redacted. */
+    size_t brace(size_t i)
+    {
+        size_t close = nextByte(i + 1, '}', next_close_brace_);
+        if (close == std::string::npos || close == i + 1) {
+            emitRange(i, i + 1);
+            return i + 1;
+        }
+        bool word_key = true;
+        for (size_t k = i + 1; k < close; ++k) {
+            if (!isSqlWordChar((unsigned char)sql_[k])) {
+                word_key = false;
+                break;
+            }
+        }
+        if (!word_key) {
+            size_t colon = nextByte(i + 1, ':', next_colon_);
+            if (colon != std::string::npos && colon < close) {
+                emitRange(i, i + 1);
+                return i + 1;
+            }
+            return failClosed();
+        }
+        bool after_dot = prev_ == Kind::Dot || prev_ == Kind::MaybeDot;
+        if (i > 0) {
+            unsigned char l = (unsigned char)sql_[i - 1];
+            if (isSqlWordChar(l) || l == '$' || l == '\\' || l == '}' || (l == '.' && !after_dot)) {
+                return failClosed();
+            }
+        }
+        size_t r = close + 1;
+        if (r < n_) {
+            unsigned char c = (unsigned char)sql_[r];
+            if (isSqlWordChar(c) || c == '$' || c == '\'' || c == '{') return failClosed();
+            if (c == '.') {
+                if (r + 1 >= n_) return failClosed();
+                unsigned char d = (unsigned char)sql_[r + 1];
+                bool ident = (d >= 'A' && d <= 'Z') || (d >= 'a' && d <= 'z') || d == '_';
+                if (!ident || d == 'e' || d == 'E') return failClosed();
+                size_t k = r + 2;
+                while (k < n_ && isSqlWordChar((unsigned char)sql_[k])) ++k;
+                if (k < n_ && (sql_[k] == '$' || sql_[k] == '\'')) return failClosed();
+                emitRange(i, k);
+                cur_ = Kind::MaybeBareWord;
+                return k;
+            }
+        }
+        emitRange(i, r);
+        cur_ = after_dot ? Kind::MaybeDot : Kind::BareWord;
+        return r;
+    }
+
     /* A '.' is a Dot after an operand-like token, so `t.1e-5` reads 1e as a
      * tuple element; otherwise `.5e-3` is a number that owns its sign. */
     size_t dot(size_t i)
     {
+        if (digitAt(i + 1) && (prev_ == Kind::MaybeBareWord || prev_ == Kind::MaybeDot)) {
+            return failClosed();
+        }
         if (i > 0 && (!digitAt(i + 1) || prev_ == Kind::CloseRound ||
                       prev_ == Kind::CloseSquare || prev_ == Kind::BareWord ||
-                      prev_ == Kind::QuotedIdent || prev_ == Kind::Number)) {
+                      prev_ == Kind::QuotedIdent || prev_ == Kind::Number ||
+                      prev_ == Kind::MaybeBareWord || prev_ == Kind::MaybeDot)) {
             cur_ = Kind::Dot;
             emitRange(i, i + 1);
             return i + 1;
@@ -444,6 +527,7 @@ private:
 
     size_t number(size_t i)
     {
+        if (prev_ == Kind::MaybeDot) return failClosed();
         size_t p = i + 1;
         if (prev_ == Kind::Dot) {
             while (p < n_ && (digitAt(p) || separatorAt(false, false, p))) ++p;

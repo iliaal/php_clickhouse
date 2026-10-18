@@ -57,6 +57,28 @@ foreach ($errors as $name => $sql) {
     echo $name, ": ", $logged === $verbose ? "" : "verbose differs, ",
         preg_match('/SECRET/', $logged . $verbose) ? "leaked" : "redacted", "\n";
 }
+
+// The log keeps the template, but the server lexes the substituted SQL.
+$templates = [
+    "dot after placeholder" => ["SELECT {col}.5e-- the tuple's field\n AS a, 'SECRET_T1' AS pw FROM (SELECT CAST(tuple(7), 'Tuple(`5e` UInt8)') AS t)", ["col" => "t"]],
+    "exponent after placeholder" => ["SELECT {n}e--1, \$\$SECRET_T2\$\$ AS pw", ["n" => 1]],
+    "exponent before placeholder" => ["SELECT 1{n}--1, \$\$SECRET_T3\$\$ AS pw", ["n" => "e"]],
+    "adjacent placeholders" => ["SELECT {a}{b}--1, \$\$SECRET_T7\$\$ AS pw", ["a" => 1, "b" => "e"]],
+    "spaced placeholder" => ["SELECT {n} AS a, 'SECRET_T4' AS pw", ["n" => 5]],
+    "qualified column" => ["SELECT {t}.number AS a, 'SECRET_T5' AS pw FROM system.numbers AS n LIMIT 1", ["t" => "n"]],
+    "typed placeholder" => ["SELECT {v:UInt8} AS a, 'SECRET_T6' AS pw", ["v" => 5]],
+];
+foreach ($templates as $name => $case) {
+    $verbose = null;
+    try {
+        $c->select($case[0], $case[1]);
+    } catch (ClickHouseException $e) {
+    }
+    $logs = $c->getLogQueries();
+    $logged = count($logs) === 1 ? $logs[0]["sql"] : "(missing)";
+    echo $name, ": ", $logged === $verbose ? "" : "verbose differs: ", $logged, "\n";
+    echo "  leaked: ", preg_match('/SECRET/', $logged . $verbose) ? "yes" : "no", "\n";
+}
 ?>
 --EXPECT--
 double-quoted: SELECT 1 AS "it's", '?' AS pw
@@ -92,3 +114,17 @@ double dot: redacted
 spaced dot: redacted
 binary exponent: redacted
 vertical delimiter: redacted
+dot after placeholder: SELECT ?
+  leaked: no
+exponent after placeholder: SELECT ?
+  leaked: no
+exponent before placeholder: SELECT 1?
+  leaked: no
+adjacent placeholders: SELECT ?
+  leaked: no
+spaced placeholder: SELECT {n} AS a, '?' AS pw
+  leaked: no
+qualified column: SELECT {t}.number AS a, '?' AS pw FROM system.numbers AS n LIMIT 1
+  leaked: no
+typed placeholder: SELECT {v:UInt8} AS a, '?' AS pw
+  leaked: no
