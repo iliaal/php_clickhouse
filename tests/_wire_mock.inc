@@ -146,17 +146,20 @@ function wire_str(string $s): string
 }
 
 /* Little-endian UInt64 values. pack("P") needs a 64-bit PHP; limiting values
- * to 31 bits keeps the high word zero and the output the same on both. */
+ * to 31 bits keeps the high word zero and the output the same on both. One
+ * pack() call, because appending per value is quadratic when realloc always
+ * moves the string, as it does under ASan with USE_ZEND_ALLOC=0. */
 function wire_u64(int ...$values): string
 {
-    $out = "";
+    $words = [];
     foreach ($values as $v) {
         if ($v < 0 || $v > 0x7fffffff) {
             throw new InvalidArgumentException("wire_u64 value out of range: $v");
         }
-        $out .= pack("VV", $v, 0);
+        $words[] = $v;
+        $words[] = 0;
     }
-    return $out;
+    return pack("V*", ...$words);
 }
 
 /* $columns: list of [name, type, encoded column body]; empty bodies give a header block. */
