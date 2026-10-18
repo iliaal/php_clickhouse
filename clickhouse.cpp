@@ -2013,7 +2013,8 @@ static std::string getInsertSql(std::string_view table_name, const zval *columns
  *                 literal. Whitespace, commas, and other punctuation are
  *                 rejected so `{tbl}` = "a, b" cannot turn `FROM {tbl}`
  *                 into a cross join. An array joins validated tokens
- *                 with ", " for column lists.
+ *                 with ", " for column lists. A negative value placed
+ *                 directly after '-' throws instead of composing `--`.
  *
  *   {name:Type}   server-side parameter. The SQL text is left untouched;
  *                 the value goes into `out_params` for Query::SetParam,
@@ -2095,11 +2096,29 @@ static std::string validatePlaceholderToken(const char *val, size_t vlen,
     return std::string(val, vlen);
 }
 
+static bool isTypedSyntaxKey(const zend_string *key)
+{
+    return memchr(ZSTR_VAL(key), ':', ZSTR_LEN(key)) ||
+           memchr(ZSTR_VAL(key), '{', ZSTR_LEN(key)) ||
+           memchr(ZSTR_VAL(key), '}', ZSTR_LEN(key));
+}
+
 static void applyPlaceholders(string &sql, HashTable *params_ht, std::vector<TypedParam> &out_params)
 {
     zval *pzval;
     zend_string *zk;
     zend_ulong nk;
+
+    /* `{a:b}` reads as a typed placeholder, so query-log redaction could not
+     * tell a substituted key containing these from one left intact. Check
+     * every key before any value so this error, which makes the logged
+     * template redact from its first brace, cannot be preempted. */
+    ZEND_HASH_FOREACH_STR_KEY(params_ht, zk) {
+        if (zk && isTypedSyntaxKey(zk)) {
+            throw PlaceholderKeyError(
+                "Placeholder array keys must not contain ':', '{' or '}'");
+        }
+    } ZEND_HASH_FOREACH_END();
 
     ZEND_HASH_FOREACH_KEY_VAL(params_ht, nk, zk, pzval) {
         (void)nk;
@@ -2181,6 +2200,34 @@ static void applyPlaceholders(string &sql, HashTable *params_ht, std::vector<Typ
                 "Placeholder {" + name + "} does not appear in the SQL");
         }
         while (pos != std::string::npos) {
+            /* A token's first byte is the only one that can join template text
+             * into a comment opener; of the openers (two dashes, two slashes,
+             * slash-star, hash-space, hash-bang) it can only complete two
+             * dashes. Parenthesizing instead would change `{n}::String` and
+             * break `SETTINGS x = {n}`. */
+            if (repl[0] == '-' && pos > 0 && sql[pos - 1] == '-') {
+                throw std::runtime_error(
+                    "Placeholder value for {" + name + "} is invalid: a negative "
+                    "value directly after '-' would form a SQL comment; separate "
+                    "them with a space or parentheses in the SQL");
+            }
+            /* Placeholder values are word characters, so after `$` and a run of
+             * word characters they extend a `$tag$` heredoc delimiter and can
+             * open or close a literal that swallows the SQL between them. */
+            size_t word_start = pos;
+            while (word_start > 0) {
+                unsigned char wc = (unsigned char)sql[word_start - 1];
+                if (!((wc >= '0' && wc <= '9') || (wc >= 'A' && wc <= 'Z') ||
+                      (wc >= 'a' && wc <= 'z') || wc == '_')) {
+                    break;
+                }
+                --word_start;
+            }
+            if (word_start > 0 && sql[word_start - 1] == '$') {
+                throw std::runtime_error(
+                    "Placeholder value for {" + name + "} is invalid: a value "
+                    "after '$' would become part of a $tag$ heredoc delimiter");
+            }
             sql.replace(pos, needle.size(), repl);
             pos = sql.find(needle, pos + repl.size());
         }
