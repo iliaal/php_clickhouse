@@ -2754,6 +2754,11 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     {
         // FIXEDSTRING_BINARY preserves trailing NULs that may be payload rather than padding.
         auto fs_col = as_or_throw<ColumnFixedString>(columnRef, "FixedString read");
+        /* At() bounds only the first byte; a width x rows product that wrapped
+         * on load leaves fewer whole cells than the enclosing column claims. */
+        if ((size_t)row >= fs_col->Size()) {
+            throw std::runtime_error("FixedString read: row is outside the column data");
+        }
         auto col = (*fs_col)[row];
         size_t len = col.length();
         if (!(fetch_mode & SC_FETCH_FIXEDSTRING_BINARY)) {
