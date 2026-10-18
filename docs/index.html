@@ -523,7 +523,7 @@ echo "$n rows inserted\n";</code></pre>
   </ul>
 </li>
 <li><code>{name:Type}</code> is a server-side typed parameter. The SQL text is passed through unchanged; the value is bound via <code>Query::SetParam</code> and the server quotes and parses it according to <code>Type</code>. Pass PHP arrays for <code>Array(T)</code> types; <code>null</code> becomes a server <code>NULL</code>.</li>
-<li><strong>Reserved syntax:</strong> both placeholder forms are matched anywhere in the SQL text, including inside string literals and comments. Avoid writing text shaped like <code>{identifier}</code> or <code>{identifier:Type}</code> inside a literal when a params key of the same name exists; it will be treated as a placeholder.</li>
+<li><strong>Reserved syntax:</strong> both placeholder forms are matched anywhere in the SQL text, including inside string literals and comments. Avoid writing text shaped like <code>{identifier}</code> or <code>{identifier:Type}</code> inside a literal when a params key of the same name exists; it will be treated as a placeholder. A params key must not contain <code>:</code>, <code>{</code>, or <code>}</code>; such a key throws, because <code>{a:b}</code> already reads as a typed placeholder.</li>
 </ul>
 <pre><code>// Single-identifier substitution.
 $ch-&gt;select("SELECT * FROM {tbl}", ["tbl" =&gt; "users"]);

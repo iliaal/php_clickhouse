@@ -23,6 +23,7 @@
 
 #include <chrono>
 #include <deque>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -89,11 +90,18 @@ static inline clickhouse_object *clickhouse_from_obj(zend_object *obj)
 
 #define Z_CLICKHOUSE_P(zv) clickhouse_from_obj(Z_OBJ_P(zv))
 
+/* A params key the query-log redactor cannot tell apart from typed
+ * placeholder syntax; the logged template is redacted from its first brace. */
+struct PlaceholderKeyError : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
 std::string queryLogString(const std::string &value);
 std::string redactSqlLiterals(const std::string &sql);
 void appendQueryLogCapped(clickhouse_object *obj, QueryLog &&ql);
 QueryLog buildQueryLog(const clickhouse_object *obj,
-                       const std::string &sql, const std::string &qid);
+                       const std::string &sql, const std::string &qid,
+                       bool distrust_braces = false);
 void recordQuerySuccess(clickhouse_object *obj, const std::string &sql, const std::string &qid);
 void recordQueryError(clickhouse_object *obj, const std::string &sql,
                       const std::string &qid, const std::exception &e);

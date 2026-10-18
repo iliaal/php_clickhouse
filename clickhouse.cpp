@@ -1978,6 +1978,12 @@ static void applyPlaceholders(string &sql, HashTable *params_ht, std::vector<Typ
         }
         ZVAL_DEREF(pzval);
         std::string name(ZSTR_VAL(zk), ZSTR_LEN(zk));
+        /* `{a:b}` reads as a typed placeholder, so query-log redaction could
+         * not tell a substituted key containing these from one left intact. */
+        if (name.find_first_of(":{}") != std::string::npos) {
+            throw PlaceholderKeyError(
+                "Placeholder array keys must not contain ':', '{' or '}'");
+        }
 
         std::string typed_prefix = "{" + name + ":";
         size_t tpos = sql.find(typed_prefix);

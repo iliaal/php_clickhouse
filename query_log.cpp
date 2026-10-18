@@ -81,8 +81,8 @@ bool isHexDigitChar(unsigned char c)
  * one, or a single apostrophe would shift every later literal boundary. */
 class SqlRedactor {
 public:
-    SqlRedactor(const std::string &sql, size_t max_bytes)
-        : sql_(sql), n_(sql.size()), max_(max_bytes)
+    SqlRedactor(const std::string &sql, size_t max_bytes, bool distrust_braces = false)
+        : sql_(sql), n_(sql.size()), max_(max_bytes), distrust_braces_(distrust_braces)
     {
         out_.reserve(std::min(n_, max_bytes));
     }
@@ -97,14 +97,17 @@ public:
     }
 
 private:
-    /* MaybeBareWord: BareWord or Other. MaybeDot: BareWord, Number, or Dot.
-     * Both arise after a `{name}` whose value the template does not show. */
+    /* After a `{name}` the template does not show whether it was substituted
+     * (bare word or number) or left as braces (Other). MaybeDot adds Dot, for
+     * a value such as `5.` that follows a Dot. dot() and number() fail closed
+     * wherever these alternatives would lex differently. */
     enum class Kind { Other, Dot, Number, BareWord, QuotedIdent, CloseRound, CloseSquare,
                       MaybeBareWord, MaybeDot };
 
     const std::string &sql_;
     const size_t n_;
     const size_t max_;
+    const bool distrust_braces_;
     std::string out_;
     Kind prev_ = Kind::Other;
     Kind cur_ = Kind::Other;
@@ -452,6 +455,7 @@ private:
             emitRange(i, i + 1);
             return i + 1;
         }
+        if (distrust_braces_) return failClosed();
         bool word_key = true;
         for (size_t k = i + 1; k < close; ++k) {
             if (!isSqlWordChar((unsigned char)sql_[k])) {
@@ -475,12 +479,23 @@ private:
             }
         }
         size_t r = close + 1;
+        /* `{a}.{b}` may compose `1.e`, a number that takes an adjacent sign. */
+        if (prev_ == Kind::Dot && i >= 2 && sql_[i - 1] == '.' && sql_[i - 2] == '}' &&
+            r < n_ && (sql_[r] == '+' || sql_[r] == '-')) {
+            return failClosed();
+        }
         if (r < n_) {
             unsigned char c = (unsigned char)sql_[r];
             if (isSqlWordChar(c) || c == '$' || c == '\'' || c == '{') return failClosed();
             if (c == '.') {
                 if (r + 1 >= n_) return failClosed();
                 unsigned char d = (unsigned char)sql_[r + 1];
+                if (d == '{') {
+                    if (!wordPlaceholderAt(r + 1)) return failClosed();
+                    emitRange(i, r);
+                    cur_ = after_dot ? Kind::MaybeDot : Kind::MaybeBareWord;
+                    return r;
+                }
                 bool ident = (d >= 'A' && d <= 'Z') || (d >= 'a' && d <= 'z') || d == '_';
                 if (!ident || d == 'e' || d == 'E') return failClosed();
                 size_t k = r + 2;
@@ -492,8 +507,18 @@ private:
             }
         }
         emitRange(i, r);
-        cur_ = after_dot ? Kind::MaybeDot : Kind::BareWord;
+        cur_ = after_dot ? Kind::MaybeDot : Kind::MaybeBareWord;
         return r;
+    }
+
+    bool wordPlaceholderAt(size_t p)
+    {
+        size_t close = nextByte(p + 1, '}', next_close_brace_);
+        if (close == std::string::npos || close == p + 1) return false;
+        for (size_t k = p + 1; k < close; ++k) {
+            if (!isSqlWordChar((unsigned char)sql_[k])) return false;
+        }
+        return true;
     }
 
     /* A '.' is a Dot after an operand-like token, so `t.1e-5` reads 1e as a
@@ -590,9 +615,10 @@ private:
 /* Redact string literals, heredocs, and quoted text inside comments; keep
  * identifiers and comment text. Unterminated tokens are redacted through end
  * of input. Used for logs and traces, never wire SQL. */
-static std::string redactSqlLiteralsBounded(const std::string &sql, size_t max_bytes)
+static std::string redactSqlLiteralsBounded(const std::string &sql, size_t max_bytes,
+                                            bool distrust_braces = false)
 {
-    return SqlRedactor(sql, max_bytes).run();
+    return SqlRedactor(sql, max_bytes, distrust_braces).run();
 }
 
 std::string redactSqlLiterals(const std::string &sql)
@@ -609,14 +635,15 @@ void appendQueryLogCapped(clickhouse_object *obj, QueryLog &&ql)
 }
 
 QueryLog buildQueryLog(const clickhouse_object *obj,
-                       const std::string &sql, const std::string &qid)
+                       const std::string &sql, const std::string &qid,
+                       bool distrust_braces)
 {
     QueryLog ql;
     /* One byte beyond the cap distinguishes an exact fit from truncation.
      * Do not allocate or scan an unbounded redacted suffix just to discard it.
      * The unrestricted helper remains available for verbose callbacks. */
     ql.sql = queryLogString(redactSqlLiteralsBounded(
-        sql, CLICKHOUSE_QUERY_LOG_STRING_MAX_BYTES + 1));
+        sql, CLICKHOUSE_QUERY_LOG_STRING_MAX_BYTES + 1, distrust_braces));
     ql.query_id = queryLogString(qid);
     ql.elapsed_ms = obj->stats.elapsed_ms;
     ql.rows_read = obj->stats.rows_read;
@@ -636,7 +663,8 @@ void recordQueryError(clickhouse_object *obj, const std::string &sql, const std:
 {
     if (!obj->log_enabled) return;
     try {
-        QueryLog ql = buildQueryLog(obj, sql, qid);
+        QueryLog ql = buildQueryLog(obj, sql, qid,
+                                    dynamic_cast<const PlaceholderKeyError *>(&e) != nullptr);
         if (auto se = dynamic_cast<const clickhouse::ServerException*>(&e)) {
             ql.error_code = se->GetException().code;
         } else {

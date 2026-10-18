@@ -66,6 +66,10 @@ $templates = [
     "adjacent placeholders" => ["SELECT {a}{b}--1, \$\$SECRET_T7\$\$ AS pw", ["a" => 1, "b" => "e"]],
     "spaced placeholder" => ["SELECT {n} AS a, 'SECRET_T4' AS pw", ["n" => 5]],
     "qualified column" => ["SELECT {t}.number AS a, 'SECRET_T5' AS pw FROM system.numbers AS n LIMIT 1", ["t" => "n"]],
+    "colon key" => ["SELECT {a:b}.5e-- the tuple's field\n AS a, 'SECRET_C1' AS pw FROM (SELECT CAST(tuple(7), 'Tuple(`5e` UInt8)') AS t)", ["a:b" => "t"]],
+    "unsubstituted braces" => ["SELECT {z} .5e--1, \$\$SECRET_C2\$\$ AS pw", []],
+    "qualified table" => ["SELECT count() AS n FROM {db}.{tbl} WHERE dummy = 0 AND 'SECRET_C5' != ''", ["db" => "system", "tbl" => "one"]],
+    "qualified then sign" => ["SELECT {a}.{b}-1 AS x, 'SECRET_C8' AS pw", ["a" => 1, "b" => "e"]],
     "typed placeholder" => ["SELECT {v:UInt8} AS a, 'SECRET_T6' AS pw", ["v" => 5]],
 ];
 foreach ($templates as $name => $case) {
@@ -76,7 +80,8 @@ foreach ($templates as $name => $case) {
     }
     $logs = $c->getLogQueries();
     $logged = count($logs) === 1 ? $logs[0]["sql"] : "(missing)";
-    echo $name, ": ", $logged === $verbose ? "" : "verbose differs: ", $logged, "\n";
+    echo $name, ": ", $verbose === null ? "(no start event) "
+        : ($logged === $verbose ? "" : "verbose differs: "), $logged, "\n";
     echo "  leaked: ", preg_match('/SECRET/', $logged . $verbose) ? "yes" : "no", "\n";
 }
 ?>
@@ -125,6 +130,14 @@ adjacent placeholders: SELECT ?
 spaced placeholder: SELECT {n} AS a, '?' AS pw
   leaked: no
 qualified column: SELECT {t}.number AS a, '?' AS pw FROM system.numbers AS n LIMIT 1
+  leaked: no
+colon key: (no start event) SELECT ?
+  leaked: no
+unsubstituted braces: SELECT {z} ?
+  leaked: no
+qualified table: SELECT count() AS n FROM {db}.{tbl} WHERE dummy = 0 AND '?' != '?'
+  leaked: no
+qualified then sign: SELECT {a}.?
   leaked: no
 typed placeholder: SELECT {v:UInt8} AS a, '?' AS pw
   leaked: no

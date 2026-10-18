@@ -44,6 +44,8 @@ function columns($c, $sql, $params) {
 echo "heredoc tag: ", columns($c, 'SELECT 1 AS a, ${t}$ AS b, 2 AS c, $end$ AS d', ["t" => "end"]), "\n";
 echo "heredoc tag suffix: ", columns($c, 'SELECT 1 AS a, $e{t}$ AS b, 2 AS c, $end$ AS d', ["t" => "nd"]), "\n";
 echo "heredoc control: ", columns($c, 'SELECT {t} AS a, $end$x$end$ AS b', ["t" => "7"]), "\n";
+echo "colon key: ", columns($c, 'SELECT {a:b} AS x', ["a:b" => 1]), "\n";
+echo "brace key: ", columns($c, 'SELECT {a}} AS x', ["a}" => 1]), "\n";
 
 $c->execute("SYSTEM FLUSH LOGS");
 $logged = function ($needle) use ($c, $marker) {
@@ -70,5 +72,7 @@ exponent: ["alice"]
 heredoc tag: rejected: Placeholder value for {t} is invalid: a value after '$' would become part of a $tag$ heredoc delimiter
 heredoc tag suffix: rejected: Placeholder value for {t} is invalid: a value after '$' would become part of a $tag$ heredoc delimiter
 heredoc control: [{"a":7,"b":"x"}]
+colon key: rejected: Placeholder array keys must not contain ':', '{' or '}'
+brace key: rejected: Placeholder array keys must not contain ':', '{' or '}'
 logged spaced: yes
 logged comment: 0
