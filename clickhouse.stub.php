@@ -29,7 +29,7 @@ final class ClickHouse
     protected int $receive_timeout = 0;
     protected int $connect_timeout = 5;
 
-    public function __construct(array $connectParams) {}
+    public function __construct(#[\SensitiveParameter] array $connectParams) {}
 
     public function __destruct() {}
 

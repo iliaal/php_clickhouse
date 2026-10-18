@@ -726,6 +726,55 @@ static void validateDatabaseName(const char *s, size_t len)
     }
 }
 
+/* zend_is_true() maps "false", "no", and non-empty arrays to true, which
+ * silently flips trust-related options. */
+static bool parseConfigBool(zval *v, bool &out)
+{
+    ZVAL_DEREF(v);
+    switch (Z_TYPE_P(v)) {
+    case IS_TRUE:
+        out = true;
+        return true;
+    case IS_FALSE:
+        out = false;
+        return true;
+    case IS_LONG:
+        if (Z_LVAL_P(v) != 0 && Z_LVAL_P(v) != 1) return false;
+        out = Z_LVAL_P(v) == 1;
+        return true;
+    case IS_STRING: {
+        const char *s = Z_STRVAL_P(v);
+        size_t n = Z_STRLEN_P(v);
+        if ((n == 1 && s[0] == '1') || (n == 4 && strncasecmp(s, "true", 4) == 0)) {
+            out = true;
+            return true;
+        }
+        if ((n == 1 && s[0] == '0') || (n == 5 && strncasecmp(s, "false", 5) == 0)) {
+            out = false;
+            return true;
+        }
+        return false;
+    }
+    default:
+        return false;
+    }
+}
+
+static bool loadConfigBool(HashTable *ht, const char *key, bool &out)
+{
+    zval *v = zend_hash_str_find(ht, key, strlen(key));
+    if (!v) return false;
+    ZVAL_DEREF(v);
+    if (Z_ISNULL_P(v)) return false;
+    if (!parseConfigBool(v, out)) {
+        std::string msg = std::string(key) +
+            " must be a boolean (true, false, 0, 1, \"true\", \"false\", \"0\", or \"1\")";
+        zend_throw_exception(clickhouse_exception_ce, msg.c_str(), 0);
+        return false;
+    }
+    return true;
+}
+
 /* {{{ proto object __construct(array connectParams)
  */
 PHP_METHOD(ClickHouse, __construct)
@@ -941,14 +990,17 @@ PHP_METHOD(ClickHouse, __construct)
         if (!apply_timeout_ms(
                 "send_timeout_ms", (int64_t)UINT32_MAX,
                 &ClientOptions::SetConnectionSendTimeout)) return;
-        if (php_array_get_value(_ht, "tcp_nodelay", value)) {
-            Options = Options.TcpNoDelay(zend_is_true(value));
-        }
-        if (php_array_get_value(_ht, "tcp_keepalive", value)) {
-            Options = Options.TcpKeepAlive(zend_is_true(value));
-        }
-        if (php_array_get_value(_ht, "ping_before_query", value)) {
-            Options = Options.SetPingBeforeQuery(zend_is_true(value));
+        {
+            bool b;
+            if (loadConfigBool(_ht, "tcp_nodelay", b)) {
+                Options = Options.TcpNoDelay(b);
+            } else if (EG(exception)) { return; }
+            if (loadConfigBool(_ht, "tcp_keepalive", b)) {
+                Options = Options.TcpKeepAlive(b);
+            } else if (EG(exception)) { return; }
+            if (loadConfigBool(_ht, "ping_before_query", b)) {
+                Options = Options.SetPingBeforeQuery(b);
+            } else if (EG(exception)) { return; }
         }
         auto apply_nonneg_int_max = [&](const char *key, auto apply) -> bool {
             zval *v = zend_hash_str_find(_ht, (char*)key, strlen(key));
@@ -978,9 +1030,7 @@ PHP_METHOD(ClickHouse, __construct)
             })) return;
     #ifdef WITH_OPENSSL
         bool want_ssl = false;
-        if (php_array_get_value(_ht, "ssl", value)) {
-            want_ssl = zend_is_true(value);
-        }
+        if (!loadConfigBool(_ht, "ssl", want_ssl) && EG(exception)) return;
         /* Validate TLS options even when disabled so invalid configuration cannot hide. */
         {
         ClientOptions::SSLOptions ssl_opts;
@@ -995,7 +1045,7 @@ PHP_METHOD(ClickHouse, __construct)
             {
                 ZStrGuard sg(value);
                 for (const auto &tv : tls_versions) {
-                    if (strcasecmp(sg.val(), tv.name) == 0) {
+                    if (sg.len() == strlen(tv.name) && strncasecmp(sg.val(), tv.name, sg.len()) == 0) {
                         ver = tv.version;
                         break;
                     }
@@ -1008,14 +1058,28 @@ PHP_METHOD(ClickHouse, __construct)
             }
             ssl_opts.SetMinProtocolVersion(ver);
         }
-        if (php_array_get_value(_ht, "ssl_skip_verify", value)) {
-            ssl_opts.SetSkipVerification(zend_is_true(value));
+        {
+            bool b;
+            if (loadConfigBool(_ht, "ssl_skip_verify", b)) {
+                ssl_opts.SetSkipVerification(b);
+            } else if (EG(exception)) { return; }
+            if (loadConfigBool(_ht, "ssl_use_default_ca", b)) {
+                ssl_opts.SetUseDefaultCALocations(b);
+            } else if (EG(exception)) { return; }
         }
-        if (php_array_get_value(_ht, "ssl_use_default_ca", value)) {
-            ssl_opts.SetUseDefaultCALocations(zend_is_true(value));
-        }
+        /* OpenSSL takes C strings; an embedded NUL would load a different path. */
         if (php_array_get_value(_ht, "ssl_ca_directory", value)) {
+            if (Z_TYPE_P(value) != IS_STRING && Z_TYPE_P(value) != IS_OBJECT) {
+                zend_throw_exception(clickhouse_exception_ce,
+                    "ssl_ca_directory must be a string", 0);
+                return;
+            }
             ZStrGuard sg(value);
+            if (memchr(sg.val(), '\0', sg.len()) != nullptr) {
+                zend_throw_exception(clickhouse_exception_ce,
+                    "ssl_ca_directory must not contain NUL bytes", 0);
+                return;
+            }
             ssl_opts.SetPathToCADirectory(std::string(sg.val(), sg.len()));
         }
         if (php_array_get_value(_ht, "ssl_ca_files", value)) {
@@ -1042,6 +1106,13 @@ PHP_METHOD(ClickHouse, __construct)
                 zend_throw_exception(clickhouse_exception_ce,
                     "ssl_ca_files must be a string or an array of strings", 0);
                 return;
+            }
+            for (const auto &f : files) {
+                if (f.find('\0') != std::string::npos) {
+                    zend_throw_exception(clickhouse_exception_ce,
+                        "ssl_ca_files must not contain NUL bytes", 0);
+                    return;
+                }
             }
             ssl_opts.SetPathToCAFiles(files);
         }
@@ -1076,9 +1147,35 @@ PHP_METHOD(ClickHouse, __construct)
             return;
         }
         }
+        /* TLS material without ssl => true would otherwise connect in plaintext.
+         * Explicit false booleans are no-ops and stay allowed. */
+        if (!want_ssl) {
+            static const char *ssl_material_keys[] = {
+                "ssl_min_protocol_version", "ssl_ca_directory", "ssl_ca_files",
+            };
+            for (const char *k : ssl_material_keys) {
+                zval *sv = zend_hash_str_find(_ht, k, strlen(k));
+                if (sv) ZVAL_DEREF(sv);
+                if (!sv || Z_ISNULL_P(sv)) continue;
+                std::string msg = std::string("ssl_* option '") + k + "' requires 'ssl' => true";
+                zend_throw_exception(clickhouse_exception_ce, msg.c_str(), 0);
+                return;
+            }
+            static const char *ssl_bool_keys[] = {"ssl_skip_verify", "ssl_use_default_ca"};
+            for (const char *k : ssl_bool_keys) {
+                bool b = false;
+                if (loadConfigBool(_ht, k, b) && b) {
+                    std::string msg = std::string("ssl_* option '") + k + "' requires 'ssl' => true";
+                    zend_throw_exception(clickhouse_exception_ce, msg.c_str(), 0);
+                    return;
+                }
+            }
+        }
     #else
-        if (php_array_get_value(_ht, "ssl", value)) {
-            if (zend_is_true(value)) {
+        {
+            bool want_ssl = false;
+            if (!loadConfigBool(_ht, "ssl", want_ssl) && EG(exception)) return;
+            if (want_ssl) {
                 zend_throw_exception(clickhouse_exception_ce,
                     "php_clickhouse was built without TLS support. Reconfigure with --enable-clickhouse-openssl",
                     0);
@@ -1107,7 +1204,8 @@ PHP_METHOD(ClickHouse, __construct)
                     break;
                 }
             }
-            if (is_bool_key && !zend_is_true(v)) continue;
+            bool b = true;
+            if (is_bool_key && parseConfigBool(v, b) && !b) continue;
             offending.assign(ZSTR_VAL(sk), ZSTR_LEN(sk));
         } ZEND_HASH_FOREACH_END();
         if (!offending.empty()) {

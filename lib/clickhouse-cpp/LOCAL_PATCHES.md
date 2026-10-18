@@ -268,3 +268,20 @@ failures now throw `ProtocolError`; exception callbacks and throws are gated on
 complete decoding, including handshake exceptions; and `RetryGuard()` honors
 `send_retries` with an immediate failure at zero retries. Exercised by
 `tests/217_packet_decode_and_ping_retry.phpt`.
+
+## clickhouse/base/sslsocket.cpp: CA-load failures report "Unknown SSL error"
+
+With OpenSSL 3, `ERR_reason_error_string()` returns NULL for system errors,
+so a missing or unreadable `ssl_ca_files` entry failed with
+`OpenSSL error: -2147483646 : Unknown SSL error` and no path. `throwSSLError()`
+also popped one queue entry and left the rest for a later failure to report.
+The comment above the disabled `X509_check_ip` block claimed IP addresses are
+not verified; OpenSSL 3.0+ `SSL_set1_host()` checks IP literals against the
+certificate's IP SANs.
+
+Patch: `0026-Name-the-CA-file-or-directory-when-loading-it-fails.patch`.
+Falls back to `ERR_error_string_n()` (which formats errno), prefixes CA
+file/directory load failures with the path, clears the error queue after
+reporting, and corrects the comment. Exercised by
+`tests/233_ssl_ca_path_validation.phpt`.
+Upstream: pending PR (fix/ssl-ca-load-error on iliaal/clickhouse-cpp).

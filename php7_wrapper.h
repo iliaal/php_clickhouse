@@ -90,6 +90,19 @@ static zend_always_inline void zend_declare_typed_class_constant(
 }
 #endif
 
+/* SensitiveParameter is 8.2+; older runtimes keep the argument in traces. The
+ * header is pulled in first so the macro cannot rewrite its 8.0/8.1 inline. */
+#if PHP_VERSION_ID >= 80000
+# include "Zend/zend_attributes.h"
+#endif
+#if PHP_VERSION_ID >= 80200
+/* Generated arginfo passes the void * from zend_hash_str_find_ptr(), which C++ rejects. */
+# define zend_add_parameter_attribute(func, offset, name, argc) \
+    zend_add_parameter_attribute((zend_function *) (func), (offset), (name), (argc))
+#else
+# define zend_add_parameter_attribute(func, offset, name, argc) ((void) 0)
+#endif
+
 #if PHP_VERSION_ID < 80000
 # define ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(pass_by_ref, name, type, allow_null, default_value) \
     ZEND_ARG_TYPE_INFO(pass_by_ref, name, type, allow_null)
