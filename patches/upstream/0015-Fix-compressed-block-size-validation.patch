@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilia Alshanetsky <ilia@ilia.ws>
+Date: Sun, 18 Oct 2026 00:00:00 -0400
+Subject: [PATCH 15/15] Fix compressed block size validation
+
+CompressedInput::Decompress() accepted a declared compressed size below
+the 9-byte frame header. It allocated that many bytes, wrote the header
+past the end, and read `compressed - HEADER_SIZE` (an unsigned underflow)
+bytes into the buffer, a peer-controlled heap overflow. Reject sizes
+below HEADER_SIZE before allocating, and report the declared size in
+both size errors. Backport of upstream commits f0f2927 and 1d60058
+(ClickHouse/clickhouse-cpp#566).
+---
+ clickhouse/base/compressed.cpp | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/clickhouse/base/compressed.cpp b/clickhouse/base/compressed.cpp
+index f30b5f8..bc6eca4 100644
+--- a/clickhouse/base/compressed.cpp
++++ b/clickhouse/base/compressed.cpp
+@@ -79,7 +79,11 @@ bool CompressedInput::Decompress() {
+     }
+ 
+     if (compressed > DBMS_MAX_COMPRESSED_SIZE) {
+-        throw CompressionError("compressed data too big");
++        throw CompressionError("compressed block size " + std::to_string(compressed) + " exceeds maximum allowed, data is likely corrupted");
++    }
++
++    if (compressed < HEADER_SIZE) {
++        throw CompressionError("compressed block size " + std::to_string(compressed) + " is smaller than header, data is likely corrupted");
+     }
+ 
+     Buffer tmp(compressed);
+-- 
+2.55.0
+

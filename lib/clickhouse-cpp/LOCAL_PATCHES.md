@@ -268,3 +268,21 @@ failures now throw `ProtocolError`; exception callbacks and throws are gated on
 complete decoding, including handshake exceptions; and `RetryGuard()` honors
 `send_retries` with an immediate failure at zero retries. Exercised by
 `tests/217_packet_decode_and_ping_retry.phpt`.
+
+## clickhouse/base/compressed.cpp: compressed sizes below the frame header
+
+`CompressedInput::Decompress()` capped the declared compressed size at
+1 GB but had no lower bound. A frame declaring 0..8 bytes, below the
+9-byte method + size header, allocated that many bytes, wrote the
+header past the end, and read `compressed - HEADER_SIZE` bytes, which
+underflows to a huge length, into the buffer. A malicious or broken
+server with compression enabled could overflow the heap with whatever
+bytes followed (ASan heap-buffer-overflow WRITE; release builds abort
+in malloc).
+
+Patch: `0015-Fix-compressed-block-size-validation.patch`. Rejects
+`compressed < HEADER_SIZE` with `CompressionError` before allocating,
+and both size errors now report the declared size. Exercised by
+`tests/222_compressed_frame_header_size.phpt`.
+
+Upstream: https://github.com/ClickHouse/clickhouse-cpp/pull/566 (commits f0f2927, 1d60058; unreleased as of v2.6.2)
