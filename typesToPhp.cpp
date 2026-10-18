@@ -589,55 +589,33 @@ static int64_t pow10_i64(size_t precision)
     return kPow10[precision];
 }
 
-/* A column shares one Type object; cache parameters to avoid per-cell casts. */
-struct ColParamMemo {
-    const void *type_ptr = nullptr;
-    size_t precision = 0;
-    size_t scale = 0;
-};
-static thread_local ColParamMemo g_dt64_memo;
-static thread_local ColParamMemo g_t64_memo;
-static thread_local ColParamMemo g_dec_memo;
-
-static inline size_t cachedDateTime64Precision(const TypeRef &t)
+static inline size_t dateTime64Precision(const TypeRef &t)
 {
-    if (g_dt64_memo.type_ptr != (const void *)t.get()) {
-        size_t p = type_as_or_throw<DateTime64Type>(t, "DateTime64")->GetPrecision();
-        if (p > 9) {
-            throw std::runtime_error("DateTime64 precision out of spec range (0..9)");
-        }
-        g_dt64_memo.type_ptr = (const void *)t.get();
-        g_dt64_memo.precision = p;
+    size_t p = type_as_or_throw<DateTime64Type>(t, "DateTime64")->GetPrecision();
+    if (p > 9) {
+        throw std::runtime_error("DateTime64 precision out of spec range (0..9)");
     }
-    return g_dt64_memo.precision;
+    return p;
 }
 
-static inline size_t cachedTime64Precision(const TypeRef &t)
+static inline size_t time64Precision(const TypeRef &t)
 {
-    if (g_t64_memo.type_ptr != (const void *)t.get()) {
-        size_t p = type_as_or_throw<Time64Type>(t, "Time64")->GetPrecision();
-        if (p > 9) {
-            throw std::runtime_error("Time64 precision out of spec range (0..9)");
-        }
-        g_t64_memo.type_ptr = (const void *)t.get();
-        g_t64_memo.precision = p;
+    size_t p = type_as_or_throw<Time64Type>(t, "Time64")->GetPrecision();
+    if (p > 9) {
+        throw std::runtime_error("Time64 precision out of spec range (0..9)");
     }
-    return g_t64_memo.precision;
+    return p;
 }
 
-static inline size_t cachedDecimalScale(const TypeRef &t)
+static inline size_t decimalScale(const TypeRef &t)
 {
-    if (g_dec_memo.type_ptr != (const void *)t.get()) {
-        /* Preserve scale 0 for non-Decimal metadata under a Decimal code. */
-        auto dt = t->As<DecimalType>();
-        size_t s = dt ? dt->GetScale() : 0;
-        if (s > 38) {
-            throw std::runtime_error("Decimal scale out of supported range (max 38)");
-        }
-        g_dec_memo.type_ptr = (const void *)t.get();
-        g_dec_memo.scale = s;
+    /* Preserve scale 0 for non-Decimal metadata under a Decimal code. */
+    auto dt = t->As<DecimalType>();
+    size_t s = dt ? dt->GetScale() : 0;
+    if (s > 38) {
+        throw std::runtime_error("Decimal scale out of supported range (max 38)");
     }
-    return g_dec_memo.scale;
+    return s;
 }
 
 /* LowCardinality creation matrix: only String / FixedString payloads
@@ -2658,7 +2636,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     {
         auto col = as_or_throw<ColumnDecimal>(columnRef, "Decimal read");
         // Worst case: sign + 39 digits + decimal point = 41 bytes.
-        size_t scale = cachedDecimalScale(columnRef->Type());
+        size_t scale = decimalScale(columnRef->Type());
         Int128 raw = col->At(row);
         char buf[64];
         size_t l = format_int128_dec(raw, buf);
@@ -2789,7 +2767,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     case Type::Code::DateTime64:
     {
         auto col = as_or_throw<ColumnDateTime64>(columnRef, "DateTime64 read");
-        size_t precision = cachedDateTime64Precision(columnRef->Type());
+        size_t precision = dateTime64Precision(columnRef->Type());
         int64_t scale = pow10_i64(precision);
         int64_t raw = col->At(row);
         /* Floor-divide pre-epoch timestamps so the fraction stays in [0, scale). */
@@ -2850,7 +2828,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     case Type::Code::Time64:
     {
         auto col = as_or_throw<ColumnTime64>(columnRef, "Time64 read");
-        size_t precision = cachedTime64Precision(columnRef->Type());
+        size_t precision = time64Precision(columnRef->Type());
         int64_t scale = pow10_i64(precision);
         int64_t raw = col->At(row);
         if (fetch_mode & SC_FETCH_DATE_AS_STRINGS) {
