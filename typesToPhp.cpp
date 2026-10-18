@@ -2606,6 +2606,16 @@ static void readNumericCell(Type::Code code, zval *arr, const ColumnRef& columnR
     }
 }
 
+/* zend_hash_check_size() raises a fatal error rather than failing at or
+ * above HT_MAX_SIZE, and no PHP array can hold that many elements. */
+static uint32_t checkedArrayHint(size_t n, const char *what)
+{
+    if (n >= (size_t)HT_MAX_SIZE) {
+        throw std::runtime_error(std::string(what) + ": element count exceeds the PHP array limit");
+    }
+    return (uint32_t)n;
+}
+
 void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string& column_name, int8_t is_array, long fetch_mode)
 {
     ConvertDepthGuard depth_guard;
@@ -2901,11 +2911,22 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     case Type::Code::Array:
     {
         auto array = as_or_throw<ColumnArray>(columnRef, "Array read");
+        if ((size_t)row >= array->Size()) {
+            throw std::runtime_error("Array read: row is outside the column data");
+        }
+        /* Slice() of some nested columns (Nothing) trusts the length, so
+         * non-monotonic offsets would otherwise yield a bogus element count. */
+        size_t elem_begin = array->GetOffset(row);
+        size_t elem_end = array->GetOffset((size_t)row + 1);
+        if (elem_end < elem_begin || elem_end > array->GetData()->Size()) {
+            throw std::runtime_error("Array read: element offsets are out of range");
+        }
         auto col = array->GetAsColumn(row);
+        uint32_t elem_hint = checkedArrayHint(col->Size(), "Array read");
         /* Nested cells accept value-shaping flags only, never result-shape flags. */
         long nested_mode = fetch_mode & SC_FETCH_VALUE_FLAGS;
         if (fetch_mode & SC_FETCH_ONE) {
-            array_init_size(arr, (uint32_t)col->Size());
+            array_init_size(arr, elem_hint);
             for (size_t i = 0; i < col->Size(); ++i)
             {
                 convertToZval(arr, col, i, "array", 1, nested_mode);
@@ -2913,7 +2934,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         } else {
             zval *return_tmp;
             SC_MAKE_STD_ZVAL(return_tmp);
-            array_init_size(return_tmp, (uint32_t)col->Size());
+            array_init_size(return_tmp, elem_hint);
             /* Free partial nested output on throw before ownership transfers to arr. */
             try {
                 for (size_t i = 0; i < col->Size(); ++i)
@@ -3077,9 +3098,11 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             throw std::runtime_error("Map column key/value size mismatch");
         }
 
+        uint32_t entry_hint = checkedArrayHint(entry_count, "Map read");
+
         zval *map_zv;
         SC_MAKE_STD_ZVAL(map_zv);
-        array_init_size(map_zv, (uint32_t)entry_count);
+        array_init_size(map_zv, entry_hint);
         /* Free partial map output on throw before ownership transfers to the parent. */
         struct MapZvGuard {
             zval *z;
