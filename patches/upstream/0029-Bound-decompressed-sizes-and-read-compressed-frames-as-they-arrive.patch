@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Ilia Alshanetsky <ilia@ilia.ws>
 Date: Sun, 18 Oct 2026 00:00:00 -0400
-Subject: [PATCH 29/29] Bound decompressed sizes and read compressed frames as they arrive
+Subject: [PATCH 29/30] Bound decompressed sizes and read compressed frames as they arrive
 
 CompressedInput::Decompress() zero-filled a buffer of the declared
 decompressed size and allocated the declared compressed size before reading
@@ -17,10 +17,9 @@ the exact-length check from patch 0025 keeps stale bytes from leaking.
  2 files changed, 40 insertions(+), 13 deletions(-)
 
 diff --git a/clickhouse/base/compressed.cpp b/clickhouse/base/compressed.cpp
-index 2740184..780f19f 100644
 --- a/clickhouse/base/compressed.cpp
 +++ b/clickhouse/base/compressed.cpp
-@@ -23,6 +23,12 @@ enum class CompressionMethodByte : uint8_t {
+@@ -23,6 +23,12 @@
  // Documentation says that compression is faster when output buffer is larger than LZ4_compressBound/ZSTD_compressBound estimation.
  constexpr size_t EXTRA_COMPRESS_BUFFER_SIZE = 4096;
  constexpr size_t DBMS_MAX_COMPRESSED_SIZE = 0x40000000ULL;   // 1GB
@@ -33,7 +32,7 @@ index 2740184..780f19f 100644
  }
  
  namespace clickhouse {
-@@ -86,7 +92,12 @@ bool CompressedInput::Decompress() {
+@@ -86,7 +92,12 @@
          throw CompressionError("compressed block size " + std::to_string(compressed) + " is smaller than header, data is likely corrupted");
      }
  
@@ -47,7 +46,7 @@ index 2740184..780f19f 100644
  
      // Data header
      {
-@@ -97,20 +108,35 @@ bool CompressedInput::Decompress() {
+@@ -97,20 +108,35 @@
          out.Flush();
      }
  
@@ -92,7 +91,7 @@ index 2740184..780f19f 100644
  
      switch (method) {
      case static_cast<uint8_t>(CompressionMethodByte::LZ4): {
-@@ -123,7 +149,7 @@ bool CompressedInput::Decompress() {
+@@ -123,7 +149,7 @@
              throw CompressionError("LZ4-encoded block decompressed to " + std::to_string(res) + " bytes, expected " +
                                     std::to_string(original));
          }
@@ -101,7 +100,7 @@ index 2740184..780f19f 100644
          return true;
      }
  
-@@ -137,7 +163,7 @@ bool CompressedInput::Decompress() {
+@@ -137,7 +163,7 @@
              throw CompressionError("ZSTD-encoded block decompressed to " + std::to_string(res) + " bytes, expected " +
                                     std::to_string(original));
          }
@@ -111,10 +110,9 @@ index 2740184..780f19f 100644
      }
  
 diff --git a/clickhouse/base/compressed.h b/clickhouse/base/compressed.h
-index f1e6a6d..a90b588 100644
 --- a/clickhouse/base/compressed.h
 +++ b/clickhouse/base/compressed.h
-@@ -21,7 +21,8 @@ protected:
+@@ -21,7 +21,8 @@
  private:
      InputStream* const input_;
  
@@ -124,6 +122,3 @@ index f1e6a6d..a90b588 100644
      ArrayInput mem_;
  };
  
--- 
-2.55.0
-

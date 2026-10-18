@@ -310,7 +310,7 @@ server's `DataTypeFixedString` `MAX_FIXEDSTRING_SIZE`) with `ValidationError`,
 and the `ColumnFixedString` constructor rejects size 0. Exercised by
 `tests/249_fixedstring_zero_width_rejected.phpt` and
 `tests/250_fixedstring_malformed_width_not_cached.phpt`.
-Upstream: pending PR (fix/fixedstring-zero-width on iliaal/clickhouse-cpp)
+Upstream: https://github.com/ClickHouse/clickhouse-cpp/pull/577
 
 ## clickhouse/types/type_parser.{h,cpp}: bounded parsed type AST cache
 
@@ -326,7 +326,7 @@ mutex is released), and a longer name is parsed on every call without being
 cached. `ParseTypeName()` returns
 `std::shared_ptr<const TypeAst>` so an AST still in use survives a clear; the
 binding only reaches it through `CreateColumnByType()`.
-Upstream: pending PR (fix/type-ast-cache-bound on iliaal/clickhouse-cpp)
+Upstream: https://github.com/ClickHouse/clickhouse-cpp/pull/585
 
 ## clickhouse/types/type_parser.cpp: unbalanced and deeply nested type names
 
@@ -346,7 +346,7 @@ Data-block reader throws `unsupported column type`. Exercised by
 `tests/252_type_parser_unbalanced_close.phpt`,
 `tests/253_type_parser_depth_limit.phpt`, and
 `tests/254_external_type_parser_errors.phpt`.
-Upstream: pending PR (fix/type-parser-unbalanced-depth on iliaal/clickhouse-cpp).
+Upstream: https://github.com/ClickHouse/clickhouse-cpp/pull/587
 
 ## clickhouse/columns/factory.cpp: wrapper types over unsupported nested types
 
@@ -368,7 +368,7 @@ the generic LowCardinality branch. Exercised by
 `tests/256_wire_array_unsupported_nested_type.phpt`, and
 `tests/257_unsupported_nested_type_external_data.phpt`.
 
-Upstream: pending PR (fix/factory-null-nested on iliaal/clickhouse-cpp)
+Upstream: https://github.com/ClickHouse/clickhouse-cpp/pull/578
 
 ## clickhouse/columns/{string,tuple,nullable}.cpp: FixedString row total overflows
 
@@ -391,7 +391,7 @@ of rows than was loaded. Exercised by
 `tests/258_wire_fixedstring_width_overflow.phpt`, with valid shapes covered by
 `tests/260_column_load_valid_nested_shapes.phpt`.
 
-Upstream: pending PR (fix/fixedstring-size-overflow on iliaal/clickhouse-cpp).
+Upstream: https://github.com/ClickHouse/clickhouse-cpp/pull/579
 
 ## clickhouse/columns/tuple.cpp: `ColumnTuple::Clear` drops the element columns
 
@@ -428,7 +428,7 @@ or only empty arrays it clears the stale nested values instead of returning
 early. Exercised by
 `tests/259_wire_array_offsets_decreasing.phpt`.
 
-Upstream: pending PR (fix/array-offsets-monotonic on iliaal/clickhouse-cpp).
+Upstream: https://github.com/ClickHouse/clickhouse-cpp/pull/580
 
 ## clickhouse/client.{h,cpp}: `ServerInfo` fields a Hello omits stay uninitialized
 
@@ -441,7 +441,7 @@ returned; a reconnect to an older server kept the previous server's values.
 Patch: `0023-Zero-ServerInfo-fields-a-Hello-does-not-carry.patch`. Default-initializes
 every numeric `ServerInfo` member and resets `server_info_` before parsing each
 Hello. Exercised by `tests/261_old_revision_hello_server_info.phpt`.
-Upstream: pending PR (fix/serverinfo-init on iliaal/clickhouse-cpp).
+Upstream: https://github.com/ClickHouse/clickhouse-cpp/pull/581
 
 ## clickhouse/client.cpp: ProfileInfo flags read straight into `bool`
 
@@ -455,7 +455,7 @@ Patch: `0024-Read-ProfileInfo-flags-as-bytes-not-bool.patch`. Reads each flag in
 a `uint8_t` and stores `byte != 0`; `has_nested` is read as `uint8_t`. Exercised
 by `tests/262_profile_info_noncanonical_bool.phpt` and
 `tests/263_profile_info_noncanonical_bool_select.phpt`.
-Upstream: pending PR (fix/profileinfo-bool on iliaal/clickhouse-cpp).
+Upstream: https://github.com/ClickHouse/clickhouse-cpp/pull/582
 
 ## clickhouse/base/compressed.cpp: decompressed output not validated
 
@@ -475,7 +475,7 @@ until one yields data or the input ends; and LZ4/ZSTD output whose length
 differs from the declared original size throws `CompressionError`. Applies on
 top of patch 0015 (upstream `f0f2927`). Exercised by
 `tests/264_compressed_empty_frame.phpt`.
-Upstream: pending PR (fix/lz4-empty-frame on iliaal/clickhouse-cpp).
+Upstream: https://github.com/ClickHouse/clickhouse-cpp/pull/586
 
 ## clickhouse/base/sslsocket.cpp: TLS handshake not bounded by the connect timeout
 
@@ -500,7 +500,7 @@ handshake, so a TLS endpoint can take up to twice the connect timeout
 `tests/265_tls_handshake_tarpit_failover.phpt` and
 `tests/266_tls_handshake_tarpit_timeout.phpt`.
 
-Upstream: pending PR (fix/tls-handshake-timeout on iliaal/clickhouse-cpp).
+Upstream: https://github.com/ClickHouse/clickhouse-cpp/pull/583
 
 ## clickhouse/base/sslsocket.cpp: CA-load failures report "Unknown SSL error"
 
@@ -517,7 +517,7 @@ Falls back to `ERR_error_string_n()` (which formats errno), prefixes CA
 file/directory load failures with the path, clears the error queue before
 each CA load and after reporting, and corrects the comment. Exercised by
 `tests/233_ssl_ca_path_validation.phpt`.
-Upstream: pending PR (fix/ssl-ca-load-error on iliaal/clickhouse-cpp).
+Upstream: https://github.com/ClickHouse/clickhouse-cpp/pull/584
 
 ## clickhouse/columns/factory.cpp: LowCardinality subtree copies
 
@@ -532,7 +532,7 @@ Patch: `0028-Avoid-copying-the-type-AST-at-each-LowCardinality-level.patch`.
 Binds the child by `const auto&`; no other `GetASTChildElement()` result in
 `factory.cpp` is copied. Exercised by
 `tests/272_lowcardinality_nested_ast_memory.phpt`.
-Upstream: pending PR (fix/lowcardinality-ast-copy on iliaal/clickhouse-cpp).
+Upstream: https://github.com/ClickHouse/clickhouse-cpp/pull/588
 
 
 ## clickhouse/base/compressed.cpp: declared compressed-frame sizes
@@ -555,7 +555,7 @@ is what keeps stale bytes of the reused buffer from being returned. Exercised
 by `tests/268_declared_compressed_sizes.phpt` and
 `tests/269_large_results_load.phpt`.
 
-Upstream: pending PR (fix/compressed-frame-allocations on iliaal/clickhouse-cpp, stacked on fix/lz4-empty-frame)
+Upstream: https://github.com/ClickHouse/clickhouse-cpp/pull/592 (stacked on https://github.com/ClickHouse/clickhouse-cpp/pull/586)
 
 ## clickhouse/columns/{numeric,enum,string,lowcardinality}.cpp, base/wire_format.h: declared column and string sizes
 
@@ -584,4 +584,4 @@ deliver fewer rows than declared. Exercised by
 `tests/267_declared_column_sizes.phpt`, `tests/269_large_results_load.phpt`,
 and `tests/270_declared_protocol_strings.phpt`.
 
-Upstream: pending PR (fix/declared-size-allocations on iliaal/clickhouse-cpp)
+Upstream: https://github.com/ClickHouse/clickhouse-cpp/pull/591

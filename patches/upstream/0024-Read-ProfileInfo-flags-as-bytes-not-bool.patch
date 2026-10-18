@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Ilia Alshanetsky <ilia@ilia.ws>
 Date: Sun, 18 Oct 2026 10:21:52 -0400
-Subject: [PATCH 24/28] Read ProfileInfo flags as bytes, not bool
+Subject: [PATCH 24/30] Read ProfileInfo flags as bytes, not bool
 
 Read the ProfileInfo applied_limit and calculated_rows_before_limit bytes
 (and the obsolete has_nested exception byte) into uint8_t and store

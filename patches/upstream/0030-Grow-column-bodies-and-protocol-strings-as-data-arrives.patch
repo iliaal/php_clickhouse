@@ -23,7 +23,6 @@ rejects a short index column instead of ignoring the load result.
  5 files changed, 88 insertions(+), 18 deletions(-)
 
 diff --git a/clickhouse/base/wire_format.h b/clickhouse/base/wire_format.h
-index be58d7a..1648dc9 100644
 --- a/clickhouse/base/wire_format.h
 +++ b/clickhouse/base/wire_format.h
 @@ -1,7 +1,8 @@
@@ -36,7 +35,7 @@ index be58d7a..1648dc9 100644
  
  namespace clickhouse {
  
-@@ -15,6 +16,20 @@ public:
+@@ -15,6 +16,20 @@
      static bool ReadString(InputStream& input, std::string* value);
      static bool SkipString(InputStream& input);
      static bool ReadBytes(InputStream& input, void* buf, size_t len);
@@ -57,7 +56,7 @@ index be58d7a..1648dc9 100644
      static bool ReadUInt64(InputStream& input, uint64_t* value);
      static bool ReadVarint64(InputStream& output, uint64_t* value);
  
-@@ -43,8 +58,7 @@ inline bool WireFormat::ReadString(InputStream& input, std::string* value) {
+@@ -43,8 +58,7 @@
          if (len > 0x00FFFFFFULL) {
              return false;
          }
@@ -67,7 +66,7 @@ index be58d7a..1648dc9 100644
      }
  
      return false;
-@@ -54,6 +68,30 @@ inline bool WireFormat::ReadBytes(InputStream& input, void* buf, size_t len) {
+@@ -54,6 +68,30 @@
      return ReadAll(input, buf, len);
  }
  
@@ -99,10 +98,9 @@ index be58d7a..1648dc9 100644
      return ReadVarint64(input, value);
  }
 diff --git a/clickhouse/columns/enum.cpp b/clickhouse/columns/enum.cpp
-index 43fab89..bccf3b2 100644
 --- a/clickhouse/columns/enum.cpp
 +++ b/clickhouse/columns/enum.cpp
-@@ -82,8 +82,7 @@ void ColumnEnum<T>::Append(ColumnRef column) {
+@@ -82,8 +82,7 @@
  
  template <typename T>
  bool ColumnEnum<T>::LoadBody(InputStream* input, size_t rows) {
@@ -113,10 +111,9 @@ index 43fab89..bccf3b2 100644
  
  template <typename T>
 diff --git a/clickhouse/columns/lowcardinality.cpp b/clickhouse/columns/lowcardinality.cpp
-index 0722ea8..664fc50 100644
 --- a/clickhouse/columns/lowcardinality.cpp
 +++ b/clickhouse/columns/lowcardinality.cpp
-@@ -340,7 +340,7 @@ auto Load(ColumnRef new_dictionary_column, InputStream& input, size_t rows) {
+@@ -340,7 +340,7 @@
      if (number_of_rows != rows)
          throw AssertionError("LowCardinality column must be read in full.");
  
@@ -126,10 +123,9 @@ index 0722ea8..664fc50 100644
      if (auto nullable = new_dictionary_column->As<ColumnNullable>()) {
          nullable->Append(true);
 diff --git a/clickhouse/columns/numeric.cpp b/clickhouse/columns/numeric.cpp
-index 4819f37..4a52622 100644
 --- a/clickhouse/columns/numeric.cpp
 +++ b/clickhouse/columns/numeric.cpp
-@@ -72,9 +72,7 @@ void ColumnVector<T>::Append(ColumnRef column) {
+@@ -72,9 +72,7 @@
  
  template <typename T>
  bool ColumnVector<T>::LoadBody(InputStream* input, size_t rows) {
@@ -141,10 +137,9 @@ index 4819f37..4a52622 100644
  
  template <typename T>
 diff --git a/clickhouse/columns/string.cpp b/clickhouse/columns/string.cpp
-index de79ddf..b56ffa0 100644
 --- a/clickhouse/columns/string.cpp
 +++ b/clickhouse/columns/string.cpp
-@@ -7,6 +7,18 @@ namespace {
+@@ -7,6 +7,18 @@
  
  constexpr size_t DEFAULT_BLOCK_SIZE = 4096;
  
@@ -163,7 +158,7 @@ index de79ddf..b56ffa0 100644
  template <typename Container>
  size_t ComputeTotalSize(const Container & strings, size_t begin = 0, size_t len = -1) {
      size_t result = 0;
-@@ -83,12 +95,7 @@ bool ColumnFixedString::LoadBody(InputStream * input, size_t rows) {
+@@ -83,12 +95,7 @@
          throw ProtocolError("FixedString(" + std::to_string(string_size_) + ") column with " + std::to_string(rows) +
                              " rows exceeds the addressable size");
      }
@@ -177,7 +172,7 @@ index de79ddf..b56ffa0 100644
  }
  
  void ColumnFixedString::SaveBody(OutputStream* output) {
-@@ -135,6 +142,16 @@ struct ColumnString::Block
+@@ -135,6 +142,16 @@
          data_(new CharT[capacity])
      {}
  
@@ -194,7 +189,7 @@ index de79ddf..b56ffa0 100644
      inline auto GetAvailable() const {
          return capacity - size;
      }
-@@ -164,7 +181,7 @@ struct ColumnString::Block
+@@ -164,7 +181,7 @@
      }
  
      size_t size;
@@ -203,7 +198,7 @@ index de79ddf..b56ffa0 100644
      std::unique_ptr<CharT[]> data_;
  };
  
-@@ -275,7 +292,7 @@ bool ColumnString::LoadBody(InputStream* input, size_t rows) {
+@@ -275,7 +292,7 @@
      decltype(items_) new_items;
      decltype(blocks_) new_blocks;
  
@@ -212,7 +207,7 @@ index de79ddf..b56ffa0 100644
  
      // Suboptimzal if the first row string is >DEFAULT_BLOCK_SIZE, but that must be a very rare case.
      Block * block = &new_blocks.emplace_back(DEFAULT_BLOCK_SIZE);
-@@ -285,13 +302,31 @@ bool ColumnString::LoadBody(InputStream* input, size_t rows) {
+@@ -285,13 +302,31 @@
          if (!WireFormat::ReadUInt64(*input, &len))
              return false;
  
@@ -245,6 +240,3 @@ index de79ddf..b56ffa0 100644
      }
  
      items_.swap(new_items);
--- 
-2.55.0
-

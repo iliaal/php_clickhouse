@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Ilia Alshanetsky <ilia@ilia.ws>
 Date: Sun, 18 Oct 2026 10:21:39 -0400
-Subject: [PATCH 23/28] Zero ServerInfo fields a Hello does not carry
+Subject: [PATCH 23/30] Zero ServerInfo fields a Hello does not carry
 
 Default-initialize the numeric ServerInfo members and reset server_info_
 before parsing each Hello, so fields an old-revision server omits read as

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Ilia Alshanetsky <ilia@ilia.ws>
 Date: Sun, 18 Oct 2026 00:00:00 -0400
-Subject: [PATCH 18/28] Reject unbalanced and overly deep type names
+Subject: [PATCH 18/30] Reject unbalanced and overly deep type names
 
 TypeParser::Parse() called top() and pop() on its element stack for every
 closing parenthesis and comma, so a type name with a surplus ')' or a
