@@ -585,3 +585,22 @@ deliver fewer rows than declared. Exercised by
 and `tests/270_declared_protocol_strings.phpt`.
 
 Upstream: https://github.com/ClickHouse/clickhouse-cpp/pull/591
+
+## clickhouse/columns/lowcardinality.cpp: dictionary indexes are not range-checked
+
+`Load()` kept the index column read from the wire without comparing its
+values to the dictionary it had just loaded, and `GetItem()` passed them
+straight to the dictionary column. With a `FixedString(N)` dictionary,
+`index * N` can wrap modulo 2^64 to an in-range byte offset, so
+`ColumnFixedString::At()` returns a view that runs past the dictionary
+buffer: a hostile server read heap memory past it (ASan heap-buffer-overflow
+through `convertToZval`). `Load()` also cast the raw index type byte to
+`IndexType` before validating it, which is undefined for values 4..255.
+
+Patch: `0031-Reject-LowCardinality-indexes-outside-the-dictionary.patch`.
+`Load()` throws `ProtocolError` for any index at or above the dictionary size
+(one pass over the typed index data, for every index width), and
+`createIndexColumn()` switches on the raw `uint64_t`. The failed index
+`LoadBody()` check that the upstream PR also adds is already applied here by
+patch 0030. Exercised by `tests/273_lowcardinality_index_bounds.phpt`.
+Upstream: pending PR (fix/lowcardinality-index-bounds on iliaal/clickhouse-cpp).
