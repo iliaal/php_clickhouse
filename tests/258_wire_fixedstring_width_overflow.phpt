@@ -82,6 +82,13 @@ function response($type, $body, $rows = "\x04") {
     return bin2hex($block("\x00", "") . $block($rows, $body) . "\x05");
 }
 
+/* LowCardinality body: key version 1, UInt8 indexes with additional keys,
+ * the dictionary keys, then one index byte per row. */
+function lcBody($keyCount, $keys, $indexes) {
+    return "\x01\0\0\0\0\0\0\0\0\x02\0\0\0\0\0\0" . chr($keyCount) . "\0\0\0\0\0\0\0" . $keys .
+        chr(strlen($indexes)) . "\0\0\0\0\0\0\0" . $indexes;
+}
+
 $widthBound = "FixedString size must be between 1 and 16777215";
 $rowTotal = "exceeds the addressable size";
 
@@ -100,13 +107,16 @@ $cases = [
     ],
     "lowcardinality" => [
         "0100010002ffffffff000100026330304c6f7743617264696e616c697479284669786564537472696e6728343631313638363031383432373338373930352929000100010002ffffffff000104026330304c6f7743617264696e616c697479284669786564537472696e6728343631313638363031383432373338373930352929000100000000000000000200000000000004000000000000004142434404000000000000000000000005",
-        null,
+        $widthBound,
     ],
+    /* One past the width bound: rejected before a 16 MiB dictionary item is built. */
+    "lowcardinality-16m" => [response("LowCardinality(FixedString(16777216))", lcBody(1, "A", "\x00"), "\x01"), $widthBound],
     /* 8388608 * 2^41 wraps to 0 bytes within the width bound. */
     "plain-rows" => [response("FixedString(8388608)", "", "\x80\x80\x80\x80\x80\x40"), $rowTotal],
     "control-plain" => [response("FixedString(1)", "ABCD"), null],
     "control-tuple" => [response("Tuple(UInt8, FixedString(1))", "\x01\x02\x03\x04ABCD"), null],
     "control-nullable" => [response("Nullable(FixedString(1))", "\x00\x01\x00\x00ABCD"), null],
+    "control-lowcardinality" => [response("LowCardinality(FixedString(2))", lcBody(2, "ABCD", "\x00\x01\x01\x00")), null],
 ];
 
 foreach ($cases as $name => $case) {
@@ -152,7 +162,9 @@ tuple=ClickHouseException
 nullable=ClickHouseException
 plain=ClickHouseException
 lowcardinality=ClickHouseException
+lowcardinality-16m=ClickHouseException
 plain-rows=ClickHouseException
 control-plain=rows:[{"c0":"A"},{"c0":"B"},{"c0":"C"},{"c0":"D"}]
 control-tuple=rows:[{"c0":[1,"A"]},{"c0":[2,"B"]},{"c0":[3,"C"]},{"c0":[4,"D"]}]
 control-nullable=rows:[{"c0":"A"},{"c0":null},{"c0":"C"},{"c0":"D"}]
+control-lowcardinality=rows:[{"c0":"AB"},{"c0":"CD"},{"c0":"CD"},{"c0":"AB"}]

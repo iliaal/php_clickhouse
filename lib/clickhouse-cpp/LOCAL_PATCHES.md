@@ -307,9 +307,15 @@ so the existing erase-on-failure path runs; `ParseTypeName()` also parses into
 a local and caches only on success, so a parser exception cannot leave an
 entry behind. The factory rejects `FixedString` sizes outside 1..0xFFFFFF (the
 server's `DataTypeFixedString` `MAX_FIXEDSTRING_SIZE`) with `ValidationError`,
-and the `ColumnFixedString` constructor rejects size 0. Exercised by
-`tests/249_fixedstring_zero_width_rejected.phpt` and
-`tests/250_fixedstring_malformed_width_not_cached.phpt`.
+and the `ColumnFixedString` constructor rejects size 0. The same bound covers
+`LowCardinality(FixedString(N))`, with or without
+`backward_compatibility_lowcardinality_as_wrapped_column`: those paths built
+the column from the raw AST value, so a server could make the client allocate
+an item of any declared width while building the column, and on 32-bit a width
+of 2^32 or more truncated to `size_t` and decoded under the wrong width.
+Exercised by `tests/249_fixedstring_zero_width_rejected.phpt`,
+`tests/250_fixedstring_malformed_width_not_cached.phpt`, and the
+`lowcardinality` cases of `tests/258_wire_fixedstring_width_overflow.phpt`.
 Upstream: https://github.com/ClickHouse/clickhouse-cpp/pull/577
 
 ## clickhouse/types/type_parser.{h,cpp}: bounded parsed type AST cache

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Ilia Alshanetsky <ilia@ilia.ws>
 Date: Sun, 18 Oct 2026 00:00:00 -0400
-Subject: [PATCH 19/30] Reject wrapper types over unsupported nested types
+Subject: [PATCH 19/31] Reject wrapper types over unsupported nested types
 
 CreateColumnFromAst built ColumnArray, ColumnNullable, and the
 LowCardinality(Nullable) dictionary around whatever the nested call
@@ -16,7 +16,7 @@ UnimplementedError like the generic LowCardinality branch.
 diff --git a/clickhouse/columns/factory.cpp b/clickhouse/columns/factory.cpp
 --- a/clickhouse/columns/factory.cpp
 +++ b/clickhouse/columns/factory.cpp
-@@ -157,16 +157,17 @@
+@@ -160,16 +160,17 @@
  static ColumnRef CreateColumnFromAst(const TypeAst& ast, CreateColumnByTypeSettings settings) {
      switch (ast.meta) {
          case TypeAst::Array: {
@@ -41,9 +41,9 @@ diff --git a/clickhouse/columns/factory.cpp b/clickhouse/columns/factory.cpp
          }
  
          case TypeAst::Terminal: {
-@@ -247,12 +248,11 @@
+@@ -250,12 +251,11 @@
                      case Type::FixedString:
-                         return std::make_shared<ColumnLowCardinalityT<ColumnFixedString>>(GetASTChildElement(nested, 0).value);
+                         return std::make_shared<ColumnLowCardinalityT<ColumnFixedString>>(GetFixedStringSize(nested));
                      case Type::Nullable:
 -                        return std::make_shared<ColumnLowCardinality>(
 -                            std::make_shared<ColumnNullable>(

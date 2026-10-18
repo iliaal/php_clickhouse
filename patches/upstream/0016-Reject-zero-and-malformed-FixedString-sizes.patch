@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Ilia Alshanetsky <ilia@ilia.ws>
 Date: Sun, 18 Oct 2026 00:00:00 -0400
-Subject: [PATCH 16/30] Reject zero, oversized, and malformed FixedString sizes
+Subject: [PATCH 16/31] Reject zero, oversized, and malformed FixedString sizes
 
 A server-supplied FixedString(0) creates a ColumnFixedString with a
 zero width, and ColumnFixedString::Size() divides by it as soon as
@@ -23,33 +23,65 @@ The factory rejects sizes outside 1..0xFFFFFF, the server's own
 DataTypeFixedString limit (MAX_FIXEDSTRING_SIZE), and the
 ColumnFixedString constructor rejects 0. The server never accepts
 FixedString(0), so the tests that built one now use FixedString(1).
+
+The same check covers LowCardinality(FixedString(N)), wrapped or not.
+Those paths built the column straight from the AST value, so a server
+could declare any width and the client allocated an item of that width
+while building the column. On 32-bit, a width of 2^32 or more
+truncated to size_t and the data decoded under the wrong width.
 ---
- clickhouse/columns/factory.cpp   | 11 +++++++++--
+ clickhouse/columns/factory.cpp   | 18 ++++++++++++++----
  clickhouse/columns/string.cpp    | 1 +
  clickhouse/types/type_parser.cpp | 17 ++++++++++-------
- 3 files changed, 20 insertions(+), 9 deletions(-)
+ 3 files changed, 25 insertions(+), 11 deletions(-)
 
 diff --git a/clickhouse/columns/factory.cpp b/clickhouse/columns/factory.cpp
 --- a/clickhouse/columns/factory.cpp
 +++ b/clickhouse/columns/factory.cpp
-@@ -91,8 +91,15 @@
+@@ -46,6 +46,16 @@
+     return ast.elements[static_cast<size_t>(position)];
+ }
  
++size_t GetFixedStringSize(const TypeAst& ast) {
++    // Same bounds as the server's DataTypeFixedString (MAX_FIXEDSTRING_SIZE).
++    constexpr int64_t kMaxFixedStringSize = 0xFFFFFF;
++    const auto size                       = GetASTChildElement(ast, 0).value;
++    if (size <= 0 || size > kMaxFixedStringSize)
++        throw ValidationError("FixedString size must be between 1 and " + std::to_string(kMaxFixedStringSize) + ", got " +
++                              std::to_string(size));
++    return static_cast<size_t>(size);
++}
++
+ static ColumnRef CreateTerminalColumn(const TypeAst& ast) {
+     switch (ast.code) {
+     case Type::Void:
+@@ -92,7 +102,7 @@
      case Type::String:
          return std::make_shared<ColumnString>();
--    case Type::FixedString:
+     case Type::FixedString:
 -        return std::make_shared<ColumnFixedString>(GetASTChildElement(ast, 0).value);
-+    case Type::FixedString: {
-+        // Same bounds as the server's DataTypeFixedString (MAX_FIXEDSTRING_SIZE).
-+        constexpr int64_t kMaxFixedStringSize = 0xFFFFFF;
-+        const auto size                       = GetASTChildElement(ast, 0).value;
-+        if (size <= 0 || size > kMaxFixedStringSize)
-+            throw ValidationError("FixedString size must be between 1 and " + std::to_string(kMaxFixedStringSize) + ", got " +
-+                                  std::to_string(size));
-+        return std::make_shared<ColumnFixedString>(static_cast<size_t>(size));
-+    }
++        return std::make_shared<ColumnFixedString>(GetFixedStringSize(ast));
  
      case Type::DateTime:
          if (ast.elements.empty()) {
+@@ -225,7 +235,7 @@
+                     case Type::String:
+                         return std::make_shared<LowCardinalitySerializationAdaptor<ColumnString>>();
+                     case Type::FixedString:
+-                        return std::make_shared<LowCardinalitySerializationAdaptor<ColumnFixedString>>(GetASTChildElement(nested, 0).value);
++                        return std::make_shared<LowCardinalitySerializationAdaptor<ColumnFixedString>>(GetFixedStringSize(nested));
+                     case Type::Nullable:
+                         throw UnimplementedError("LowCardinality(" + nested.name + ") is not supported with LowCardinalityAsWrappedColumn on");
+                     default:
+@@ -238,7 +248,7 @@
+                     case Type::String:
+                         return std::make_shared<ColumnLowCardinalityT<ColumnString>>();
+                     case Type::FixedString:
+-                        return std::make_shared<ColumnLowCardinalityT<ColumnFixedString>>(GetASTChildElement(nested, 0).value);
++                        return std::make_shared<ColumnLowCardinalityT<ColumnFixedString>>(GetFixedStringSize(nested));
+                     case Type::Nullable:
+                         return std::make_shared<ColumnLowCardinality>(
+                             std::make_shared<ColumnNullable>(
 diff --git a/clickhouse/columns/string.cpp b/clickhouse/columns/string.cpp
 --- a/clickhouse/columns/string.cpp
 +++ b/clickhouse/columns/string.cpp
