@@ -455,6 +455,16 @@ static std::string strict_zval_string(zval *z, const char *type_label)
     return std::string(sg.val(), sg.len());
 }
 
+/* inet_pton() stops at the first NUL, which would silently drop the tail. */
+static std::string ipTextWithoutNul(std::string s, const char *type_label)
+{
+    if (memchr(s.data(), '\0', s.size()) != nullptr) {
+        throw std::runtime_error(
+            std::string("Invalid ") + type_label + " value: embedded NUL byte");
+    }
+    return s;
+}
+
 /* Return bytes written, excluding NUL; dashed and dashless forms encode identical bytes. */
 static int format_uuid(UUID u, bool dashed, char *buf, size_t bufsz)
 {
@@ -1602,8 +1612,9 @@ ColumnRef tryBuildScalarColumnFromRows(HashTable *rows_ht, size_t col_index,
     }
 }
 
-/* ColumnDecimal::Append does not enforce precision/scale; validate plain
- * decimals here and leave unusual forms to the native parser. */
+/* ColumnDecimal::Append does not enforce precision/scale and silently drops
+ * characters past the scale, so every value must pass the full grammar here.
+ * A leading '+' passes and is still rejected by the native parser. */
 static void validateDecimalText(const std::string &s, size_t precision,
                                 size_t scale, const char *label)
 {
@@ -1619,7 +1630,10 @@ static void validateDecimalText(const std::string &s, size_t precision,
         while (i < n && s[i] >= '0' && s[i] <= '9') ++i;
         frac_digits = i - f0;
     }
-    if (i != n || (int_digits == 0 && frac_digits == 0)) return;
+    if (i != n || (int_digits == 0 && frac_digits == 0)) {
+        throw std::runtime_error(
+            std::string(label) + " value is not a valid decimal number");
+    }
 
     size_t sig_int = int_digits;
     for (size_t k = int_start; k < int_start + int_digits && s[k] == '0'; ++k) {
@@ -1771,7 +1785,7 @@ static ColumnRef insertGeoIpColumn(Type::Code code, HashTable *values_ht)
                          (unsigned)((u >> 8) & 0xFF),  (unsigned)(u & 0xFF));
                 value->Append(std::string(ipbuf));
             } else {
-                value->Append(strict_zval_string(v, "IPv4"));
+                value->Append(ipTextWithoutNul(strict_zval_string(v, "IPv4"), "IPv4"));
             }
         }
         ZEND_HASH_FOREACH_END();
@@ -1789,7 +1803,7 @@ static ColumnRef insertGeoIpColumn(Type::Code code, HashTable *values_ht)
             } else {
                 /* Append(string_view) calls inet_pton on .data(); a view of
                  * a std::string is NUL-terminated, a bare view need not be. */
-                std::string s = strict_zval_string(v, "IPv6");
+                std::string s = ipTextWithoutNul(strict_zval_string(v, "IPv6"), "IPv6");
                 value->Append(std::string_view(s));
             }
         }
@@ -2255,6 +2269,9 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 Z_TYPE_P(v) == IS_RESOURCE) {
                 throw std::runtime_error(
                     "Decimal insert requires a scalar value (string, int, or float)");
+            } else if (Z_TYPE_P(v) == IS_FALSE) {
+                /* false stringifies to "", which the native parser read as zero. */
+                value->Append(std::string("0"));
             } else {
                 ZStrGuard sg(v);
                 std::string dv(sg.val(), sg.len());
