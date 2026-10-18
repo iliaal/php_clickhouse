@@ -280,9 +280,9 @@ or not) exhausted the native stack.
 
 Patch: `0018-Reject-unbalanced-and-overly-deep-type-names.patch`. `Parse()`
 returns false for a `)` or `,` with no open parenthesis and for nesting deeper
-than `TypeParser::kMaxNestingDepth` (512; the server never produces types
-deeper than 499 levels, and 512 levels keep the recursive paths to about
-250 KiB of stack at -O2); `CreateColumnByType()` then returns null and the
+than `TypeParser::kMaxNestingDepth` (512; current servers reject column types
+nested deeper than 499 levels, and 512 levels keep the recursive paths to
+about 250 KiB of stack at -O2); `CreateColumnByType()` then returns null and the
 Data-block reader throws `unsupported column type`. Exercised by
 `tests/252_type_parser_unbalanced_close.phpt`,
 `tests/253_type_parser_depth_limit.phpt`, and

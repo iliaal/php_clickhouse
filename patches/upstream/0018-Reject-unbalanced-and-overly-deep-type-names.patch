@@ -9,9 +9,9 @@ top-level ',' read from an empty std::stack. It also had no nesting limit,
 and the column factory and TypeAst destruction recurse once per level, so a
 type name nested 100000 levels deep exhausted the native stack. The parser
 now rejects a ')' or ',' that has no open parenthesis and any type nested
-deeper than TypeParser::kMaxNestingDepth (512) levels. The server never
-produces types deeper than 499 levels, and 512 levels keep the recursive
-paths to about 250 KiB of stack at -O2.
+deeper than TypeParser::kMaxNestingDepth (512) levels. Current servers
+reject column types nested deeper than 499 levels, and 512 levels keep the
+recursive paths to about 250 KiB of stack at -O2.
 ---
  clickhouse/types/type_parser.cpp | 6 ++++++
  clickhouse/types/type_parser.h   | 5 +++++
@@ -48,9 +48,9 @@ paths to about 250 KiB of stack at -O2.
      };
  
  public:
-+    // The server never produces types nested deeper than 499 levels. The column
-+    // factory and TypeAst destruction recurse once per level, so the limit also
-+    // bounds their stack use.
++    // Current servers reject column types nested deeper than 499 levels. The
++    // column factory and TypeAst destruction recurse once per level, so the
++    // limit also bounds their stack use.
 +    static constexpr size_t kMaxNestingDepth = 512;
 +
      explicit TypeParser(const StringView& name);
