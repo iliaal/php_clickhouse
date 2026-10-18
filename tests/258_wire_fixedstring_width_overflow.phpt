@@ -72,39 +72,45 @@ if (file_put_contents($mockFile, "<?php\n" . $mockCode) === false) {
 
 $hello = "000a436c69636b486f7573651a09dca903035554430c3563666363653339323563630d";
 
-/* Header block with no rows, then a 4-row data block, then EndOfStream. */
-function response($type, $body) {
+/* Header block with no rows, then a data block whose row count is the
+ * given varint (4 by default), then EndOfStream. */
+function response($type, $body, $rows = "\x04") {
     $block = function ($rows, $data) use ($type) {
-        return "\x01\x00\x01\x00\x02\xff\xff\xff\xff\x00\x01" . chr($rows) .
+        return "\x01\x00\x01\x00\x02\xff\xff\xff\xff\x00\x01" . $rows .
             "\x02c0" . chr(strlen($type)) . $type . "\x00" . $data;
     };
-    return bin2hex($block(0, "") . $block(4, $body) . "\x05");
+    return bin2hex($block("\x00", "") . $block($rows, $body) . "\x05");
 }
+
+$widthBound = "FixedString size must be between 1 and 16777215";
+$rowTotal = "exceeds the addressable size";
 
 $cases = [
     "tuple" => [
         "0100010002ffffffff0001000263302e5475706c652855496e74382c204669786564537472696e6728343631313638363031383432373338373930352929000100010002ffffffff0001040263302e5475706c652855496e74382c204669786564537472696e672834363131363836303138343237333837393035292900010203044142434405",
-        true,
+        $widthBound,
     ],
     "nullable" => [
         "0100010002ffffffff0001000263302a4e756c6c61626c65284669786564537472696e6728343631313638363031383432373338373930352929000100010002ffffffff0001040263302a4e756c6c61626c65284669786564537472696e672834363131363836303138343237333837393035292900000000004142434405",
-        true,
+        $widthBound,
     ],
     "plain" => [
         "0100010002ffffffff000100026330204669786564537472696e67283436313136383630313834323733383739303529000100010002ffffffff000104026330204669786564537472696e67283436313136383630313834323733383739303529004142434405",
-        true,
+        $widthBound,
     ],
     "lowcardinality" => [
         "0100010002ffffffff000100026330304c6f7743617264696e616c697479284669786564537472696e6728343631313638363031383432373338373930352929000100010002ffffffff000104026330304c6f7743617264696e616c697479284669786564537472696e6728343631313638363031383432373338373930352929000100000000000000000200000000000004000000000000004142434404000000000000000000000005",
-        false,
+        null,
     ],
-    "control-plain" => [response("FixedString(1)", "ABCD"), false],
-    "control-tuple" => [response("Tuple(UInt8, FixedString(1))", "\x01\x02\x03\x04ABCD"), false],
-    "control-nullable" => [response("Nullable(FixedString(1))", "\x00\x01\x00\x00ABCD"), false],
+    /* 8388608 * 2^41 wraps to 0 bytes within the width bound. */
+    "plain-rows" => [response("FixedString(8388608)", "", "\x80\x80\x80\x80\x80\x40"), $rowTotal],
+    "control-plain" => [response("FixedString(1)", "ABCD"), null],
+    "control-tuple" => [response("Tuple(UInt8, FixedString(1))", "\x01\x02\x03\x04ABCD"), null],
+    "control-nullable" => [response("Nullable(FixedString(1))", "\x00\x01\x00\x00ABCD"), null],
 ];
 
 foreach ($cases as $name => $case) {
-    list($responseHex, $expectWidthError) = $case;
+    list($responseHex, $expectedMessage) = $case;
     $process = proc_open([PHP_BINARY, "-n", "-f", $mockFile, $hello, $responseHex], [
         0 => ["pipe", "r"],
         1 => ["pipe", "w"],
@@ -127,8 +133,11 @@ foreach ($cases as $name => $case) {
         $rows = $client->select("SELECT * FROM t");
         echo "$name=rows:", json_encode($rows), "\n";
     } catch (ClickHouseException $e) {
-        $widthError = strpos($e->getMessage(), "exceeds the addressable size") !== false;
-        echo "$name=", get_class($e), $widthError === $expectWidthError ? "" : ":unexpected-message:" . $e->getMessage(), "\n";
+        $message = $e->getMessage();
+        $expected = $expectedMessage === null
+            ? strpos($message, $rowTotal) === false
+            : strpos($message, $expectedMessage) !== false;
+        echo "$name=", get_class($e), $expected ? "" : ":unexpected-message:" . $message, "\n";
     }
     unset($client);
     fclose($pipes[1]);
@@ -143,6 +152,7 @@ tuple=ClickHouseException
 nullable=ClickHouseException
 plain=ClickHouseException
 lowcardinality=ClickHouseException
+plain-rows=ClickHouseException
 control-plain=rows:[{"c0":"A"},{"c0":"B"},{"c0":"C"},{"c0":"D"}]
 control-tuple=rows:[{"c0":[1,"A"]},{"c0":[2,"B"]},{"c0":[3,"C"]},{"c0":[4,"D"]}]
 control-nullable=rows:[{"c0":"A"},{"c0":null},{"c0":"C"},{"c0":"D"}]
