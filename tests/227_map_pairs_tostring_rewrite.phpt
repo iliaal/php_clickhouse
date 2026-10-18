@@ -27,6 +27,14 @@ class PairRewriter {
     }
 }
 
+/* The 0x41.../0x42... replacements overflow a 32-bit zend_long and are
+ * floats there; "long" means the variable now holds that literal's type. */
+$longType = PHP_INT_SIZE > 4 ? "integer" : "double";
+function replacedType($value, $longType) {
+    $type = gettype($value);
+    return $type === $longType ? "long" : $type;
+}
+
 /* The rewritten pair is row 1's only element and a PHP reference. */
 $pair_modes = array(
     "null"   => array(),
@@ -42,7 +50,7 @@ foreach ($pair_modes as $label => $replacement) {
     try {
         $c->insert("test.t_o5l_pairs", array("id", "m"),
             array(array($id, $row0), array($id, $row1)));
-        echo "pair/$label: inserted, pair now ", gettype($pair), "\n";
+        echo "pair/$label: inserted, pair now ", replacedType($pair, $longType), "\n";
     } catch (ClickHouseException $e) {
         echo "pair/$label: ", get_class($e), ": ", $e->getMessage(), "\n";
     }
@@ -64,7 +72,7 @@ foreach ($row_modes as $label => $replacement) {
     $id++;
     try {
         $c->insert("test.t_o5l_arr_pairs", array("id", "m"), array(array($id, $cell)));
-        echo "row/$label: inserted, row now ", gettype($map_row1), "\n";
+        echo "row/$label: inserted, row now ", replacedType($map_row1, $longType), "\n";
     } catch (ClickHouseException $e) {
         echo "row/$label: ", get_class($e), ": ", $e->getMessage(), "\n";
     }
@@ -105,7 +113,7 @@ echo "done\n";
 ?>
 --EXPECT--
 pair/null: inserted, pair now array
-pair/long: inserted, pair now integer
+pair/long: inserted, pair now long
 pair/string: inserted, pair now string
 1: {"k0":"v0"}
 1: {"k1":"v1"}
@@ -113,7 +121,7 @@ pair/string: inserted, pair now string
 2: {"k1":"v1"}
 3: {"k0":"v0"}
 3: {"k1":"v1"}
-row/long: inserted, row now integer
+row/long: inserted, row now long
 row/null: inserted, row now NULL
 1: [{"k0":"v0"},{"k1":"v1"}]
 2: [{"k0":"v0"},{"k1":"v1"}]

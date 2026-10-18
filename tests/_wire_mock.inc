@@ -138,6 +138,20 @@ function wire_str(string $s): string
     return wire_varint(strlen($s)) . $s;
 }
 
+/* Little-endian UInt64 values. pack("P") needs a 64-bit PHP; limiting values
+ * to 31 bits keeps the high word zero and the output the same on both. */
+function wire_u64(int ...$values): string
+{
+    $out = "";
+    foreach ($values as $v) {
+        if ($v < 0 || $v > 0x7fffffff) {
+            throw new InvalidArgumentException("wire_u64 value out of range: $v");
+        }
+        $out .= pack("VV", $v, 0);
+    }
+    return $out;
+}
+
 /* $columns: list of [name, type, encoded column body]; empty bodies give a header block. */
 function wire_data_block(array $columns, int $rows): string
 {

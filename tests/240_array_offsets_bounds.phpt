@@ -42,7 +42,7 @@ echo "w9: ", $r[0] === "exception" ? "rejected" : json_encode($r), "\n";
 
 function offsets(array $values) {
     $out = "";
-    foreach ($values as $v) $out .= pack("P", $v);
+    foreach ($values as $v) $out .= wire_u64($v);
     return $out;
 }
 

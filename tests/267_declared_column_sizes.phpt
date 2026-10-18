@@ -9,6 +9,7 @@ elseif (!is_readable("/proc/self/status") || !is_readable("/proc/self/maps")) pr
 ?>
 --FILE--
 <?php
+require __DIR__ . "/_wire_mock.inc";
 /* Each malformed block declares 256 MiB of column data but carries a few
  * bytes, then the mock closes the connection. Before the fix the client
  * reserved the declared size up front (VmPeak) and zero-filled it for
@@ -161,7 +162,7 @@ $truncated = [
     "string-length" => response(1, "String", varint(DECLARED) . "abc"),
     "fixedstring-width" => response(1, "FixedString(" . DECLARED . ")", str_repeat("A", 16)),
     "uint64-rows" => response(DECLARED / 8, "UInt64", ""),
-    "array-offset" => response(1, "Array(UInt64)", pack("P", DECLARED / 8)),
+    "array-offset" => response(1, "Array(UInt64)", wire_u64(DECLARED / 8)),
 ];
 foreach ($truncated as $label => $response) {
     list($result, $peak, $hwm) = run($response);
@@ -175,8 +176,8 @@ $rows = 300000;
 $valid = [
     "string" => [response(3, "String", str("a") . str($large) . str("z"), true), ["a", $large, "z"]],
     "fixedstring" => [response(2, "FixedString(1048577)", $wide . $other, true), [$wide, $other]],
-    "uint64" => [response($rows, "UInt64", pack("P*", ...range(1, $rows)), true), range(1, $rows)],
-    "array" => [response(2, "Array(UInt64)", pack("P*", 1, $rows + 1) . pack("P*", ...range(0, $rows)), true),
+    "uint64" => [response($rows, "UInt64", wire_u64(...range(1, $rows)), true), range(1, $rows)],
+    "array" => [response(2, "Array(UInt64)", wire_u64(1, $rows + 1) . wire_u64(...range(0, $rows)), true),
         [[0], range(1, $rows)]],
 ];
 foreach ($valid as $label => list($response, $expected)) {

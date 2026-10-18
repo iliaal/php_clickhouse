@@ -10,6 +10,7 @@ if (!function_exists("proc_open")) {
 ?>
 --FILE--
 <?php
+require __DIR__ . "/_wire_mock.inc";
 $mockCode = <<<'PHP'
 $hello = hex2bin($argv[1]);
 $response = hex2bin($argv[2]);
@@ -131,7 +132,7 @@ foreach ([
 }
 
 runCase($mockFile, "Array(String) control", $hello,
-    bin2hex(dataBlock("Array(String)", 2, pack("P", 2) . pack("P", 3) . "\x01x\x01y\x01z") . "\x05"), "select");
+    bin2hex(dataBlock("Array(String)", 2, wire_u64(2, 3) . "\x01x\x01y\x01z") . "\x05"), "select");
 ?>
 --EXPECT--
 W-4 data block: ClickHouseException: unsupported column type: Array(Null)

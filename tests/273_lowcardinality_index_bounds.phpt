@@ -10,6 +10,7 @@ if (!function_exists("proc_open")) {
 ?>
 --FILE--
 <?php
+require __DIR__ . "/_wire_mock.inc";
 $mockCode = <<<'PHP'
 $hello = hex2bin($argv[1]);
 $response = hex2bin($argv[2]);
@@ -83,7 +84,7 @@ function response($type, $body, $rows) {
 /* Key version, index type (0 UInt8 .. 3 UInt64) with HasAdditionalKeys,
  * dictionary, row count, indexes already packed at that width. */
 function lcBody($keys, $dictionary, array $indexes, $indexType = 3) {
-    $out = pack("P", 1) . pack("P", 0x200 | $indexType) . pack("P", $keys) . $dictionary . pack("P", count($indexes));
+    $out = wire_u64(1, 0x200 | $indexType, $keys) . $dictionary . wire_u64(count($indexes));
     foreach ($indexes as $index) $out .= $index;
     return $out;
 }
@@ -92,13 +93,13 @@ $dict = str_repeat("A", 1001) . str_repeat("B", 1001);
 $fs = "LowCardinality(FixedString(1001))";
 $cases = [
     /* 1001 * index wraps modulo 2^64 to byte 1500 of the 2002-byte dictionary. */
-    "fixedstring-wrapping-index" => [response($fs, lcBody(2, $dict, [pack("P", 1), hex2bin("7c79ddee4a2306a8")]), 2), ClickHouse::FIXEDSTRING_BINARY],
-    "fixedstring-index-past-end" => [response($fs, lcBody(2, $dict, [pack("P", 1), pack("P", 2)]), 2), 0],
+    "fixedstring-wrapping-index" => [response($fs, lcBody(2, $dict, [wire_u64(1), hex2bin("7c79ddee4a2306a8")]), 2), ClickHouse::FIXEDSTRING_BINARY],
+    "fixedstring-index-past-end" => [response($fs, lcBody(2, $dict, [wire_u64(1), wire_u64(2)]), 2), 0],
     "fixedstring-uint8-index-past-end" => [response($fs, lcBody(2, $dict, ["\x01", "\x02"], 0), 2), 0],
-    "string-index-past-end" => [response("LowCardinality(String)", lcBody(2, "\x00\x03foo", [pack("P", 1), pack("P", 5)]), 2), 0],
-    "control-fixedstring" => [response($fs, lcBody(2, $dict, [pack("P", 1), pack("P", 0)]), 2), ClickHouse::FIXEDSTRING_BINARY],
+    "string-index-past-end" => [response("LowCardinality(String)", lcBody(2, "\x00\x03foo", [wire_u64(1), wire_u64(5)]), 2), 0],
+    "control-fixedstring" => [response($fs, lcBody(2, $dict, [wire_u64(1), wire_u64(0)]), 2), ClickHouse::FIXEDSTRING_BINARY],
     "control-fixedstring-uint8" => [response($fs, lcBody(2, $dict, ["\x01", "\x00"], 0), 2), 0],
-    "control-nullable-fixedstring" => [response("LowCardinality(Nullable(FixedString(3)))", lcBody(2, "\0\0\0xyz", [pack("P", 0), pack("P", 1)]), 2), 0],
+    "control-nullable-fixedstring" => [response("LowCardinality(Nullable(FixedString(3)))", lcBody(2, "\0\0\0xyz", [wire_u64(0), wire_u64(1)]), 2), 0],
 ];
 
 foreach ($cases as $name => $case) {
