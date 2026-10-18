@@ -828,6 +828,11 @@ PHP_METHOD(ClickHouse, __construct)
          * dispatcher and abort the process. */
         try {
             ZStrGuard sg(value);
+            if (memchr(sg.val(), '\0', sg.len()) != nullptr) {
+                zend_throw_exception(clickhouse_exception_ce,
+                    "host must not contain NUL bytes", 0);
+                return;
+            }
             sc_zend_update_property_stringl(clickhouse_ce, this_obj, "host", sizeof("host") - 1,
                                             sg.val(), sg.len());
         } catch (const std::exception &e) {
@@ -1286,6 +1291,11 @@ PHP_METHOD(ClickHouse, __construct)
                 Endpoint e;
                 {
                     ZStrGuard host_sg(host_hold.get());
+                    if (memchr(host_sg.val(), '\0', host_sg.len()) != nullptr) {
+                        zend_throw_exception(clickhouse_exception_ce,
+                            "host must not contain NUL bytes", 0);
+                        return;
+                    }
                     e.host = std::string(host_sg.val(), host_sg.len());
                 }
                 if (port_hold.get()) {

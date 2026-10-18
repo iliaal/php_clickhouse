@@ -107,6 +107,10 @@ $decreasing = "0100010002ffffffff00020001650e4172726179284e6f7468696e672900016e1
 
 $cases = [
     "decreasing" => [$decreasing, ClickHouse::DATE_AS_STRINGS, true],
+    /* Map is Array(Tuple(K, V)), so its offsets go through the same check. */
+    "map-backwards" => [response("Map(String, UInt8)", 2, pack("P2", 3, 1) . "\x01a" . "\x05"), 0, true],
+    "map-overlap" => [response("Map(String, UInt8)", 3, pack("P3", 2, 1, 3) . "\x01a\x01b\x01c" . "\x01\x02\x03"), 0, true],
+    "map-overlap-pairs" => [response("Map(String, UInt8)", 3, pack("P3", 2, 1, 3) . "\x01a\x01b\x01c" . "\x01\x02\x03"), ClickHouse::MAP_AS_PAIRS, true],
     "control-uint8" => [response("Array(UInt8)", 3, pack("P3", 2, 2, 3) . "\x01\x02\x03"), 0, false],
     "control-empty" => [response("Array(Nothing)", 2, pack("P2", 0, 0)), 0, false],
 ];
@@ -148,5 +152,8 @@ foreach ($cases as $name => $case) {
 ?>
 --EXPECT--
 decreasing=ClickHouseException
+map-backwards=ClickHouseException
+map-overlap=ClickHouseException
+map-overlap-pairs=ClickHouseException
 control-uint8=rows:[{"c0":[1,2]},{"c0":[]},{"c0":[3]}]
 control-empty=rows:[{"c0":[]},{"c0":[]}]
