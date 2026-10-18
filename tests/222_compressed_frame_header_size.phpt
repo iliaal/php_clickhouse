@@ -137,9 +137,10 @@ foreach ($frames as $name => $frame) {
         $header = str_repeat("\xaa", 16) . $frame["method"] . pack("V", $size) . pack("V", 0x40);
         echo "$name size=$size: ", runCase($mockFile, $name, $data . $header . $w1bTrailer), "\n";
     }
-    /* A 9-byte frame carries an empty payload. LZ4 fails to decompress it.
-     * ZSTD decodes it to zero bytes without an error, so the frame is
-     * rejected only by the unread-bytes check in ~CompressedInput. */
+    /* A 9-byte frame carries an empty payload but declares an original size
+     * of 20. LZ4 fails to decompress it. ZSTD decodes it to zero bytes
+     * without an error, so the frame is rejected by the check that the
+     * decompressed length matches the declared original size. */
     echo "$name size=9: ", runCase($mockFile, $name, $data . hex2bin($frame["empty"]) . $eos), "\n";
     echo "$name valid: ", runCase($mockFile, $name, $data . hex2bin($frame["valid"]) . $eos), "\n";
 }
@@ -154,5 +155,5 @@ lz4 valid: rows=[{"x":7}]
 zstd size=0: ClickHouseException: compressed block size 0 is smaller than header, data is likely corrupted
 zstd size=1: ClickHouseException: compressed block size 1 is smaller than header, data is likely corrupted
 zstd size=8: ClickHouseException: compressed block size 8 is smaller than header, data is likely corrupted
-zstd size=9: ClickHouseException: some data was not read
+zstd size=9: ClickHouseException: ZSTD-encoded block decompressed to 0 bytes, expected 20
 zstd valid: rows=[{"x":7}]

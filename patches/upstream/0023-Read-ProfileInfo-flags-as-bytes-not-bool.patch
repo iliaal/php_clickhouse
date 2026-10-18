@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Ilia Alshanetsky <ilia@ilia.ws>
 Date: Sun, 18 Oct 2026 10:21:52 -0400
-Subject: [PATCH 23/24] Read ProfileInfo flags as bytes, not bool
+Subject: [PATCH 23/26] Read ProfileInfo flags as bytes, not bool
 
 Read the ProfileInfo applied_limit and calculated_rows_before_limit bytes
 (and the obsolete has_nested exception byte) into uint8_t and store
@@ -11,10 +11,9 @@ byte != 0, so a non-canonical byte cannot produce an invalid bool.
  1 file changed, 8 insertions(+), 3 deletions(-)
 
 diff --git a/clickhouse/client.cpp b/clickhouse/client.cpp
-index a7e8f59..1803de3 100644
 --- a/clickhouse/client.cpp
 +++ b/clickhouse/client.cpp
-@@ -771,16 +771,21 @@ DecodedPacket Client::Impl::ReceivePacket(uint64_t* server_packet) {
+@@ -771,16 +771,21 @@
  
      case ServerCodes::ProfileInfo: {
          Profile ret{};
@@ -38,7 +37,7 @@ index a7e8f59..1803de3 100644
          if (events_) {
              events_->OnProfile(ret);
          }
-@@ -988,7 +993,7 @@ bool Client::Impl::ReceiveData(Block & block) {
+@@ -988,7 +993,7 @@
  
  bool Client::Impl::ReceiveException(bool rethrow, ServerError * error) {
      std::shared_ptr<Exception> e(new Exception);
@@ -47,6 +46,3 @@ index a7e8f59..1803de3 100644
  
      const bool exception_received =
          WireFormat::ReadFixed(*input_, &e->code)
--- 
-2.55.0
-

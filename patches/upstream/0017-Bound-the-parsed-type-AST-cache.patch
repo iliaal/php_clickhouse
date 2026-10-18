@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Ilia Alshanetsky <ilia@ilia.ws>
 Date: Sun, 18 Oct 2026 00:00:00 -0400
-Subject: [PATCH 17/17] Bound the parsed type AST cache
+Subject: [PATCH 17/26] Bound the parsed type AST cache
 
 ParseTypeName() keeps every distinct type name it parses in a
 process-wide map with no eviction, so a server that sends many
@@ -23,6 +23,7 @@ installed header; the in-tree caller compiles unchanged.
  clickhouse/types/type_parser.cpp | 29 ++++++++++++++++++-----------
  2 files changed, 25 insertions(+), 13 deletions(-)
 
+diff --git a/clickhouse/types/type_parser.h b/clickhouse/types/type_parser.h
 --- a/clickhouse/types/type_parser.h
 +++ b/clickhouse/types/type_parser.h
 @@ -92,7 +92,12 @@
@@ -40,6 +41,7 @@ installed header; the in-tree caller compiles unchanged.
 +/// Returns nullptr if type_name is not a valid type.
 +std::shared_ptr<const TypeAst> ParseTypeName(const std::string& type_name);
  }
+diff --git a/clickhouse/types/type_parser.cpp b/clickhouse/types/type_parser.cpp
 --- a/clickhouse/types/type_parser.cpp
 +++ b/clickhouse/types/type_parser.cpp
 @@ -336,25 +336,32 @@

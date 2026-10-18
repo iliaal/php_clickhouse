@@ -2262,7 +2262,11 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
 
         auto value = std::make_shared<ColumnArray>(createColumn(item_type));
 
-        /* Tuple-backed columns lose their nested shape when Clear() runs. */
+        /* Tuple-backed children (Tuple, Map, geo types) get a fresh column per
+         * row instead of Clear() and reuse. The exclusion dates from when
+         * ColumnTuple::Clear() dropped the element columns; the vendored
+         * ColumnTuple::Clear backport now clears them in place, but the
+         * per-row build is kept. */
         bool reuse_child = canReuseArrayChild(item_type);
         ColumnRef child = reuse_child ? createColumn(item_type) : nullptr;
 

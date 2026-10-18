@@ -24,10 +24,9 @@ Nothing, whose LoadBody appends to rows it already holds).
  3 files changed, 13 insertions(+), 1 deletion(-)
 
 diff --git a/clickhouse/columns/nullable.cpp b/clickhouse/columns/nullable.cpp
-index 23940c1..f65fd4f 100644
 --- a/clickhouse/columns/nullable.cpp
 +++ b/clickhouse/columns/nullable.cpp
-@@ -66,6 +66,9 @@ bool ColumnNullable::LoadBody(InputStream* input, size_t rows) {
+@@ -66,6 +66,9 @@
      if (!nested_->LoadBody(input, rows)) {
          return false;
      }
@@ -38,10 +37,9 @@ index 23940c1..f65fd4f 100644
  }
  
 diff --git a/clickhouse/columns/string.cpp b/clickhouse/columns/string.cpp
-index cb1b593..ddcb3b1 100644
 --- a/clickhouse/columns/string.cpp
 +++ b/clickhouse/columns/string.cpp
-@@ -77,7 +77,12 @@ void ColumnFixedString::Append(ColumnRef column) {
+@@ -78,7 +78,12 @@
  }
  
  bool ColumnFixedString::LoadBody(InputStream * input, size_t rows) {
@@ -56,10 +54,9 @@ index cb1b593..ddcb3b1 100644
          return false;
      }
 diff --git a/clickhouse/columns/tuple.cpp b/clickhouse/columns/tuple.cpp
-index 72d206b..75f01ce 100644
 --- a/clickhouse/columns/tuple.cpp
 +++ b/clickhouse/columns/tuple.cpp
-@@ -120,6 +120,10 @@ bool ColumnTuple::LoadBody(InputStream* input, size_t rows) {
+@@ -120,6 +120,10 @@
          if (!(*ci)->LoadBody(input, rows)) {
              return false;
          }
@@ -70,5 +67,3 @@ index 72d206b..75f01ce 100644
      }
  
      return true;
--- 
-2.34.1

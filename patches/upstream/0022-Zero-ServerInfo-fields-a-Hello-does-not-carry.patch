@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Ilia Alshanetsky <ilia@ilia.ws>
 Date: Sun, 18 Oct 2026 10:21:39 -0400
-Subject: [PATCH 22/24] Zero ServerInfo fields a Hello does not carry
+Subject: [PATCH 22/26] Zero ServerInfo fields a Hello does not carry
 
 Default-initialize the numeric ServerInfo members and reset server_info_
 before parsing each Hello, so fields an old-revision server omits read as
@@ -12,10 +12,9 @@ zero instead of indeterminate or previous-server values.
  2 files changed, 6 insertions(+), 4 deletions(-)
 
 diff --git a/clickhouse/client.cpp b/clickhouse/client.cpp
-index 1bed2c8..a7e8f59 100644
 --- a/clickhouse/client.cpp
 +++ b/clickhouse/client.cpp
-@@ -1222,6 +1222,8 @@ bool Client::Impl::ReceiveHello() {
+@@ -1222,6 +1222,8 @@
      }
  
      if (packet_type == ServerCodes::Hello) {
@@ -25,10 +24,9 @@ index 1bed2c8..a7e8f59 100644
              return false;
          }
 diff --git a/clickhouse/client.h b/clickhouse/client.h
-index 3879880..64b2a81 100644
 --- a/clickhouse/client.h
 +++ b/clickhouse/client.h
-@@ -37,10 +37,10 @@ struct ServerInfo {
+@@ -37,10 +37,10 @@
      std::string name;
      std::string timezone;
      std::string display_name;
@@ -43,6 +41,3 @@ index 3879880..64b2a81 100644
  };
  
  /// Methods of block compression.
--- 
-2.55.0
-

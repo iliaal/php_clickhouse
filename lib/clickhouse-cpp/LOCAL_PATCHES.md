@@ -290,6 +290,7 @@ and both size errors now report the declared size. Exercised by
 `tests/222_compressed_frame_header_size.phpt`.
 
 Upstream: https://github.com/ClickHouse/clickhouse-cpp/pull/566 (commits f0f2927, 1d60058; unreleased as of v2.6.2)
+
 ## clickhouse/types/type_parser.cpp, columns/factory.cpp, columns/string.cpp: zero, oversized, and malformed FixedString sizes
 
 A server-supplied `FixedString(0)` type built a `ColumnFixedString` with
@@ -326,6 +327,7 @@ cached. `ParseTypeName()` returns
 `std::shared_ptr<const TypeAst>` so an AST still in use survives a clear; the
 binding only reaches it through `CreateColumnByType()`.
 Upstream: pending PR (fix/type-ast-cache-bound on iliaal/clickhouse-cpp)
+
 ## clickhouse/columns/factory.cpp: wrapper types over unsupported nested types
 
 `CreateColumnFromAst()` built `ColumnArray`, `ColumnNullable`, and the
@@ -337,7 +339,7 @@ or compromised server reaches this with one column type string in a Data or
 ProfileEvents block; `selectWithExternalData()` reaches it with a
 caller-supplied column type.
 
-Patch: `0019-Reject-wrapper-types-over-unsupported-nested-types.patch`.
+Patch: `0018-Reject-wrapper-types-over-unsupported-nested-types.patch`.
 Array and Nullable return `nullptr` when the nested column is null, matching
 Tuple and Map, so `ReadBlock()` throws `UnimplementedError("unsupported column
 type: ...")`. `LowCardinality(Nullable(T))` throws `UnimplementedError`, like
@@ -347,6 +349,7 @@ the generic LowCardinality branch. Exercised by
 `tests/257_unsupported_nested_type_external_data.phpt`.
 
 Upstream: pending PR (fix/factory-null-nested on iliaal/clickhouse-cpp)
+
 ## clickhouse/columns/{string,tuple,nullable}.cpp: FixedString row total overflows
 
 `ColumnFixedString::LoadBody` sized its buffer as `string_size_ * rows` with
@@ -360,7 +363,7 @@ reports only its first element), so `Tuple(UInt8, FixedString(huge))` and
 FixedString reads went out of bounds (SIGSEGV). A plain top-level
 `FixedString(huge)` instead returned zero rows for a 4-row block.
 
-Patch: `0020-Reject-FixedString-loads-whose-byte-size-overflows.patch`.
+Patch: `0019-Reject-FixedString-loads-whose-byte-size-overflows.patch`.
 `ColumnFixedString::LoadBody` throws `ProtocolError` when the multiplication
 overflows; `ColumnTuple::LoadBody` and `ColumnNullable::LoadBody` throw
 `ProtocolError` when an element or the nested column holds a different number
@@ -369,6 +372,25 @@ of rows than was loaded. Exercised by
 `tests/260_column_load_valid_nested_shapes.phpt`.
 
 Upstream: pending PR (fix/fixedstring-size-overflow on iliaal/clickhouse-cpp).
+
+## clickhouse/columns/tuple.cpp: `ColumnTuple::Clear` drops the element columns
+
+In v2.6.2 `ColumnTuple::Clear()` runs `columns_.clear()`, so a cleared Tuple
+becomes `Tuple()` and a cleared `Map` (an `Array(Tuple(K, V))`) loses its key
+and value columns. Patch 0021 clears the nested column when every Array
+offset in a block is 0, which reaches this path for an all-empty `Map`,
+`Array(Map(...))`, or `Map` inside a `Tuple`: the binding then dereferenced the
+missing elements (SIGSEGV) or rejected the column as `Array(Tuple())`.
+
+Patch: `0020-Clear-Tuple-elements-in-place.patch`, the `ColumnTuple::Clear`
+hunk of upstream commit 44f54c5 ("Make composite Swap and Tuple Clear
+alias-coherent"), applied verbatim. It clears each element in place. Drop
+this backport once the vendored library includes 44f54c5; the Array offsets
+patch (0021) needs it until then.
+Exercised by the all-empty and mixed Map rows in
+`tests/260_column_load_valid_nested_shapes.phpt`.
+
+Upstream: already on master (44f54c5), not in a release yet.
 
 ## clickhouse/columns/array.cpp: Array offsets not validated on load
 
@@ -388,23 +410,6 @@ early. Exercised by
 
 Upstream: pending PR (fix/array-offsets-monotonic on iliaal/clickhouse-cpp).
 
-## clickhouse/columns/tuple.cpp: `ColumnTuple::Clear` drops the element columns
-
-In v2.6.2 `ColumnTuple::Clear()` runs `columns_.clear()`, so a cleared Tuple
-becomes `Tuple()` and a cleared `Map` (an `Array(Tuple(K, V))`) loses its key
-and value columns. Patch 0021 clears the nested column when every Array
-offset in a block is 0, which reaches this path for an all-empty `Map`,
-`Array(Map(...))`, or `Map` inside a `Tuple`: the binding then dereferenced the
-missing elements (SIGSEGV) or rejected the column as `Array(Tuple())`.
-
-Patch: `0030-Clear-Tuple-elements-in-place.patch`, the `ColumnTuple::Clear`
-hunk of upstream commit 44f54c5 ("Make composite Swap and Tuple Clear
-alias-coherent"), applied verbatim. It clears each element in place. 0021
-depends on it; drop both together once the vendored library includes 44f54c5.
-Exercised by the all-empty and mixed Map rows in
-`tests/260_column_load_valid_nested_shapes.phpt`.
-
-Upstream: already on master (44f54c5), not in a release yet.
 ## clickhouse/client.{h,cpp}: `ServerInfo` fields a Hello omits stay uninitialized
 
 `ServerInfo` had no default member initializers, and `ReceiveHello()` fills
@@ -451,6 +456,7 @@ differs from the declared original size throws `CompressionError`. Applies on
 top of patch 0015 (upstream `f0f2927`). Exercised by
 `tests/264_compressed_empty_frame.phpt`.
 Upstream: pending PR (fix/lz4-empty-frame on iliaal/clickhouse-cpp).
+
 ## clickhouse/base/sslsocket.cpp: TLS handshake not bounded by the connect timeout
 
 `connection_connect_timeout` bounds only the TCP connect poll in
@@ -475,6 +481,7 @@ handshake, so a TLS endpoint can take up to twice the connect timeout
 `tests/266_tls_handshake_tarpit_timeout.phpt`.
 
 Upstream: pending PR (fix/tls-handshake-timeout on iliaal/clickhouse-cpp).
+
 ## clickhouse/base/sslsocket.cpp: CA-load failures report "Unknown SSL error"
 
 With OpenSSL 3, `ERR_reason_error_string()` returns NULL for system errors,

@@ -19,10 +19,9 @@ instead of returning early, so a reused column keeps that invariant too.
  1 file changed, 15 insertions(+), 1 deletion(-)
 
 diff --git a/clickhouse/columns/array.cpp b/clickhouse/columns/array.cpp
-index 77f8f7f..317db2b 100644
 --- a/clickhouse/columns/array.cpp
 +++ b/clickhouse/columns/array.cpp
-@@ -101,18 +101,32 @@ bool ColumnArray::LoadPrefix(InputStream* input, size_t rows) {
+@@ -101,18 +101,32 @@
  
  bool ColumnArray::LoadBody(InputStream* input, size_t rows) {
      if (!rows) {
@@ -56,5 +55,3 @@ index 77f8f7f..317db2b 100644
      return true;
  }
  
--- 
-2.34.1

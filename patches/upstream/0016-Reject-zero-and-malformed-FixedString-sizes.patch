@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Ilia Alshanetsky <ilia@ilia.ws>
 Date: Sun, 18 Oct 2026 00:00:00 -0400
-Subject: [PATCH 16/17] Reject zero, oversized, and malformed FixedString sizes
+Subject: [PATCH 16/26] Reject zero, oversized, and malformed FixedString sizes
 
 A server-supplied FixedString(0) creates a ColumnFixedString with a
 zero width, and ColumnFixedString::Size() divides by it as soon as
@@ -29,6 +29,7 @@ FixedString(0), so the tests that built one now use FixedString(1).
  clickhouse/types/type_parser.cpp | 17 ++++++++++-------
  3 files changed, 20 insertions(+), 9 deletions(-)
 
+diff --git a/clickhouse/columns/factory.cpp b/clickhouse/columns/factory.cpp
 --- a/clickhouse/columns/factory.cpp
 +++ b/clickhouse/columns/factory.cpp
 @@ -91,8 +91,15 @@
@@ -49,6 +50,7 @@ FixedString(0), so the tests that built one now use FixedString(1).
  
      case Type::DateTime:
          if (ast.elements.empty()) {
+diff --git a/clickhouse/columns/string.cpp b/clickhouse/columns/string.cpp
 --- a/clickhouse/columns/string.cpp
 +++ b/clickhouse/columns/string.cpp
 @@ -28,6 +28,7 @@
@@ -59,6 +61,7 @@ FixedString(0), so the tests that built one now use FixedString(1).
  }
  
  void ColumnFixedString::Reserve(size_t new_cap) {
+diff --git a/clickhouse/types/type_parser.cpp b/clickhouse/types/type_parser.cpp
 --- a/clickhouse/types/type_parser.cpp
 +++ b/clickhouse/types/type_parser.cpp
 @@ -15,6 +15,7 @@

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Ilia Alshanetsky <ilia@ilia.ws>
 Date: Sun, 18 Oct 2026 00:00:00 -0400
-Subject: [PATCH 25/25] Bound the TLS handshake by the connect timeout
+Subject: [PATCH 25/26] Bound the TLS handshake by the connect timeout
 
 SSLSocket ran a blocking SSL_connect() whose reads are bounded only by
 SO_RCVTIMEO, i.e. the query receive timeout (infinite by default). A
@@ -12,10 +12,9 @@ and throw std::system_error(ETIMEDOUT) when it expires, so the endpoint
 rotation treats it as a connection failure.
 ---
 diff --git a/clickhouse/base/socket.cpp b/clickhouse/base/socket.cpp
-index be64515..b11bafa 100644
 --- a/clickhouse/base/socket.cpp
 +++ b/clickhouse/base/socket.cpp
-@@ -350,6 +350,34 @@ void Socket::Close() {
+@@ -350,6 +350,34 @@
      handle_ = INVALID_SOCKET;
  }
  
@@ -51,10 +50,9 @@ index be64515..b11bafa 100644
      int val = 1;
  
 diff --git a/clickhouse/base/socket.h b/clickhouse/base/socket.h
-index df1cdcc..ab43a14 100644
 --- a/clickhouse/base/socket.h
 +++ b/clickhouse/base/socket.h
-@@ -132,6 +132,12 @@ protected:
+@@ -132,6 +132,12 @@
      Socket& operator = (const Socket&) = delete;
      void Close();
  
@@ -68,10 +66,9 @@ index df1cdcc..ab43a14 100644
  };
  
 diff --git a/clickhouse/base/sslsocket.cpp b/clickhouse/base/sslsocket.cpp
-index 15c7947..dc265eb 100644
 --- a/clickhouse/base/sslsocket.cpp
 +++ b/clickhouse/base/sslsocket.cpp
-@@ -239,7 +239,7 @@ SSLSocket::SSLSocket(const NetworkAddress& addr, const SocketTimeoutParams& time
+@@ -239,7 +239,7 @@
          configureSSL(ssl_params.configuration, ssl);
  
      SSL_set_connect_state(ssl);
@@ -80,7 +77,7 @@ index 15c7947..dc265eb 100644
      HANDLE_SSL_ERROR(ssl, SSL_set_mode(ssl, SSL_MODE_AUTO_RETRY));
  
      if (const auto verify_result = SSL_get_verify_result(ssl); !ssl_params.skip_verification && verify_result != X509_V_OK) {
-@@ -268,6 +268,37 @@ SSLSocket::SSLSocket(const NetworkAddress& addr, const SocketTimeoutParams& time
+@@ -268,6 +268,37 @@
  //    }
  }
  
@@ -119,10 +116,9 @@ index 15c7947..dc265eb 100644
      // We need either SSL or SSL_CTX to properly validate configuration, so create a temporary one.
      std::unique_ptr<SSL_CTX, decltype(&SSL_CTX_free)> ctx(SSL_CTX_new(TLS_client_method()), &SSL_CTX_free);
 diff --git a/clickhouse/base/sslsocket.h b/clickhouse/base/sslsocket.h
-index 945de86..c3b4f6a 100644
 --- a/clickhouse/base/sslsocket.h
 +++ b/clickhouse/base/sslsocket.h
-@@ -62,6 +62,8 @@ public:
+@@ -62,6 +62,8 @@
  
      static void validateParams(const SSLParams & ssl_params);
  private:
@@ -132,10 +128,9 @@ index 945de86..c3b4f6a 100644
  };
  
 diff --git a/clickhouse/client.h b/clickhouse/client.h
-index 3879880..31fd8d6 100644
 --- a/clickhouse/client.h
 +++ b/clickhouse/client.h
-@@ -115,7 +115,9 @@ struct ClientOptions {
+@@ -115,7 +115,9 @@
      // TCP options
      DECLARE_FIELD(tcp_nodelay, bool, TcpNoDelay, true);
  
@@ -146,5 +141,3 @@ index 3879880..31fd8d6 100644
      DECLARE_FIELD(connection_connect_timeout, std::chrono::milliseconds, SetConnectionConnectTimeout, std::chrono::seconds(5));
  
      /// Connection socket timeout. If the timeout is set to zero then the operation will never timeout.
---
-2.34.1

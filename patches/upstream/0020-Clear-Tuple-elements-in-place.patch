@@ -12,10 +12,9 @@ lost its key/value columns. Clear each element in place instead.
  1 file changed, 5 insertions(+), 1 deletion(-)
 
 diff --git a/clickhouse/columns/tuple.cpp b/clickhouse/columns/tuple.cpp
-index 75f01ce..aca294d 100644
 --- a/clickhouse/columns/tuple.cpp
 +++ b/clickhouse/columns/tuple.cpp
-@@ -142,7 +142,11 @@ void ColumnTuple::SaveBody(OutputStream* output) {
+@@ -142,7 +142,11 @@
  }
  
  void ColumnTuple::Clear() {
@@ -28,5 +27,3 @@ index 75f01ce..aca294d 100644
  }
  
  void ColumnTuple::Swap(Column& other) {
--- 
-2.34.1

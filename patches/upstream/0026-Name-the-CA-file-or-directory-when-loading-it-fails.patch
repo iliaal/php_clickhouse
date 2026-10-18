@@ -15,6 +15,7 @@ SSL_set1_host().
  clickhouse/base/sslsocket.cpp | 59 +++++++++++++++++++++++++++++++++++++----------------------
  1 file changed, 37 insertions(+), 22 deletions(-)
 
+diff --git a/clickhouse/base/sslsocket.cpp b/clickhouse/base/sslsocket.cpp
 --- a/clickhouse/base/sslsocket.cpp
 +++ b/clickhouse/base/sslsocket.cpp
 @@ -31,10 +31,20 @@
@@ -99,4 +100,4 @@ SSL_set1_host().
 +    //    }
  }
  
- void SSLSocket::validateParams(const SSLParams & ssl_params) {
+ void SSLSocket::Handshake(SSL* ssl, std::chrono::milliseconds timeout) {
