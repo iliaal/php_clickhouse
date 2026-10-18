@@ -2237,10 +2237,15 @@ static void prepareQuery(clickhouse_object *obj,
 }
 
 /*
- * Select recovery: ServerException leaves the wire clean (no reset);
- * any other throw mid-stream resets the connection. Optional detach clears
- * stack-capturing callbacks before rethrow / after success. on_error runs
- * before rethrow (e.g. free a stream buffer). Sets elapsed_ms in all paths.
+ * Select recovery: a ServerException on a plain select leaves the wire
+ * clean (no reset); any other throw mid-stream resets the connection.
+ * With external tables the client has already written every data block
+ * before reading the reply, and a server that rejects that data answers
+ * with an Exception while its side of the session is no longer idle (the
+ * next Ping on the same socket gets no reply), so that ServerException
+ * resets too. Optional detach clears stack-capturing callbacks before
+ * rethrow / after success. on_error runs before rethrow (e.g. free a
+ * stream buffer). Sets elapsed_ms in all paths.
  */
 static void runSelectWithRecovery(Client *client,
                                   Query &query,
@@ -2251,8 +2256,9 @@ static void runSelectWithRecovery(Client *client,
                                   std::function<void()> on_error = nullptr)
 {
     auto t0 = std::chrono::steady_clock::now();
+    const bool with_external = external_tables && !external_tables->empty();
     try {
-        if (external_tables && !external_tables->empty()) {
+        if (with_external) {
             client->SelectWithExternalData(query, *external_tables);
         } else {
             client->Select(query);
@@ -2261,6 +2267,9 @@ static void runSelectWithRecovery(Client *client,
         setElapsedSince(obj, t0);
         if (on_error) {
             on_error();
+        }
+        if (with_external) {
+            tryResetConnectionReapplyDatabase(this_obj, obj, false);
         }
         if (detach_callbacks) {
             detachQueryCallbacks(query);
