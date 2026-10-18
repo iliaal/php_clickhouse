@@ -11,16 +11,24 @@ Array(Nothing), whose Slice() keeps any length, a row then reported a length
 near 2^64.
 
 LoadBody now throws a ProtocolError on a decreasing offset and when the
-nested column does not hold exactly as many values as the last offset.
+nested column does not hold exactly as many values as the last offset. When
+there are no rows or every array is empty it clears the stale nested values
+instead of returning early, so a reused column keeps that invariant too.
 ---
- clickhouse/columns/array.cpp | 14 +++++++++++++-
- 1 file changed, 13 insertions(+), 1 deletion(-)
+ clickhouse/columns/array.cpp | 16 +++++++++++++++-
+ 1 file changed, 15 insertions(+), 1 deletion(-)
 
 diff --git a/clickhouse/columns/array.cpp b/clickhouse/columns/array.cpp
-index 77f8f7f..7724488 100644
+index 77f8f7f..317db2b 100644
 --- a/clickhouse/columns/array.cpp
 +++ b/clickhouse/columns/array.cpp
-@@ -106,13 +106,25 @@ bool ColumnArray::LoadBody(InputStream* input, size_t rows) {
+@@ -101,18 +101,32 @@ bool ColumnArray::LoadPrefix(InputStream* input, size_t rows) {
+ 
+ bool ColumnArray::LoadBody(InputStream* input, size_t rows) {
+     if (!rows) {
++        Clear();
+         return true;
+     }
      if (!offsets_->LoadBody(input, rows)) {
          return false;
      }
@@ -35,6 +43,7 @@ index 77f8f7f..7724488 100644
 +        nested_rows = offset;
 +    }
      if (nested_rows == 0) {
++        data_->Clear();
          return true;
      }
      if (!data_->LoadBody(input, nested_rows)) {

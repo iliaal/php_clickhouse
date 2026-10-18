@@ -101,6 +101,7 @@ bool ColumnArray::LoadPrefix(InputStream* input, size_t rows) {
 
 bool ColumnArray::LoadBody(InputStream* input, size_t rows) {
     if (!rows) {
+        Clear();
         return true;
     }
     if (!offsets_->LoadBody(input, rows)) {
@@ -116,6 +117,7 @@ bool ColumnArray::LoadBody(InputStream* input, size_t rows) {
         nested_rows = offset;
     }
     if (nested_rows == 0) {
+        data_->Clear();
         return true;
     }
     if (!data_->LoadBody(input, nested_rows)) {

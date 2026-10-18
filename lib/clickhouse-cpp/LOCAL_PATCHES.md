@@ -303,7 +303,9 @@ near 2^64 and the binding died on a huge allocation hint (PHP fatal).
 
 Patch: `0021-Validate-Array-offsets-when-loading-from-the-wire.patch`.
 `LoadBody` throws `ProtocolError` on a decreasing offset and when the nested
-column does not hold exactly as many values as the last offset. Exercised by
+column does not hold exactly as many values as the last offset; with no rows
+or only empty arrays it clears the stale nested values instead of returning
+early. Exercised by
 `tests/259_wire_array_offsets_decreasing.phpt`.
 
 Upstream: pending PR (fix/array-offsets-monotonic on iliaal/clickhouse-cpp).

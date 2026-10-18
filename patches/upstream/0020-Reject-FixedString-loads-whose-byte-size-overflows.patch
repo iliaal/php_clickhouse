@@ -11,9 +11,12 @@ ColumnTuple::LoadBody and ColumnNullable::LoadBody did not notice, because
 they never compare the loaded child sizes with the requested row count and
 ColumnTuple::Size() reports only its first element.
 
-LoadBody now throws a ProtocolError when the multiplication overflows, and
-Tuple and Nullable throw when an element or the nested column holds a
-different number of rows than was loaded.
+LoadBody now throws a ProtocolError when the multiplication overflows. Tuple
+and Nullable also throw when an element or the nested column holds a
+different number of rows than was loaded; with the FixedString guard in place
+no fresh column read from the wire reaches that check today, so it is defence
+in depth for element columns that misreport their size (the tests use
+Nothing, whose LoadBody appends to rows it already holds).
 ---
  clickhouse/columns/nullable.cpp | 3 +++
  clickhouse/columns/string.cpp   | 7 ++++++-
