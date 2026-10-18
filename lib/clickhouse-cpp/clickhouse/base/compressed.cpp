@@ -79,7 +79,11 @@ bool CompressedInput::Decompress() {
     }
 
     if (compressed > DBMS_MAX_COMPRESSED_SIZE) {
-        throw CompressionError("compressed data too big");
+        throw CompressionError("compressed block size " + std::to_string(compressed) + " exceeds maximum allowed, data is likely corrupted");
+    }
+
+    if (compressed < HEADER_SIZE) {
+        throw CompressionError("compressed block size " + std::to_string(compressed) + " is smaller than header, data is likely corrupted");
     }
 
     Buffer tmp(compressed);
