@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrading from 0.12
+
+- Whole-number Decimal inserts change silently. `7`, `7.0` or `"7"`
+  into `Decimal(9,2)` now stores 7.00, as the server does; 0.12 stored 0.07.
+  Code that passed pre-scaled integers (`700` meaning 7.00) now stores
+  700.00 without any error, 10^S times the intended value. Pass `7` or
+  `"7.00"` instead. Values containing a `.` are unaffected.
+- The TLS option, placeholder key, and `ssl_*`-without-`ssl` changes under
+  Changed throw `ClickHouseException` on affected input instead of changing
+  results.
+
 ### Security
 
 - With compression enabled, a malicious or compromised server could overflow
@@ -86,10 +97,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Placeholder array keys containing `:`, `{`, or `}` throw
   `ClickHouseException`, because they collide with `{name:Type}`
   typed-placeholder syntax.
-- Integer-form Decimal inserts are now scaled the way the server scales
-  them: `"7"`, `7` or `true` into `Decimal(9,2)` stores 7.00 instead of 0.07.
-  Code that passed pre-scaled integers (`700` meaning 7.00) now stores 700.00;
-  pass `"7.00"` or `7` instead.
 - `connect_timeout` now also bounds the TLS handshake, separately from the
   TCP connect, so a TLS endpoint can take up to twice the timeout.
 
