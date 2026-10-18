@@ -1178,22 +1178,27 @@ struct PinnedArray {
     explicit PinnedArray(zval *src) {
         ZVAL_DEREF(src);
         HashTable *ht = Z_ARRVAL_P(src);
-        bool has_ref = false;
+        /* PHP < 8.1 hands out the global symbol table as a non-refcounted
+         * array: no reference can be taken, writes through any copy mutate
+         * it in place, and its named slots are IS_INDIRECT. */
+        bool by_value = !Z_REFCOUNTED_P(src) && !(GC_FLAGS(ht) & IS_ARRAY_IMMUTABLE);
         zval *e;
-        ZEND_HASH_FOREACH_VAL(ht, e) {
-            if (Z_ISREF_P(e)) {
-                has_ref = true;
-                break;
-            }
-        } ZEND_HASH_FOREACH_END();
-        if (!has_ref) {
+        if (!by_value) {
+            ZEND_HASH_FOREACH_VAL(ht, e) {
+                if (Z_ISREF_P(e) || Z_TYPE_P(e) == IS_INDIRECT) {
+                    by_value = true;
+                    break;
+                }
+            } ZEND_HASH_FOREACH_END();
+        }
+        if (!by_value) {
             ZVAL_COPY(&value, src);
             return;
         }
         array_init_size(&value, zend_hash_num_elements(ht));
         zend_ulong h;
         zend_string *k;
-        ZEND_HASH_FOREACH_KEY_VAL(ht, h, k, e) {
+        ZEND_HASH_FOREACH_KEY_VAL_IND(ht, h, k, e) {
             zval copy;
             ZVAL_COPY_DEREF(&copy, e);
             if (k) {
@@ -1304,8 +1309,12 @@ static ColumnRef appendMapPairsColumn(HashTable *values_ht,
                                       const TypeRef &key_type,
                                       const TypeRef &value_type)
 {
+    /* Named locals: GCC 11 leaks the already-built elements of an
+     * initializer list when a later element throws. */
+    ColumnRef key_template = createColumn(key_type);
+    ColumnRef value_template = createColumn(value_type);
     auto tuple_data = std::make_shared<ColumnTuple>(
-        std::vector<ColumnRef>{createColumn(key_type), createColumn(value_type)});
+        std::vector<ColumnRef>{key_template, value_template});
     auto rows = std::make_shared<ColumnArray>(tuple_data);
 
     uint32_t row_count = zend_hash_num_elements(values_ht);
@@ -1362,11 +1371,10 @@ static ColumnRef appendMapPairsColumn(HashTable *values_ht,
     for (uint32_t i = 0; i < row_count; ++i) {
         zval *keys = zend_hash_index_find(Z_ARRVAL(all_keys), i);
         zval *values = zend_hash_index_find(Z_ARRVAL(all_values), i);
+        ColumnRef key_col = insertColumn(key_type, keys);
+        ColumnRef value_col = insertColumn(value_type, values);
         auto row_tuple = std::make_shared<ColumnTuple>(
-            std::vector<ColumnRef>{
-                insertColumn(key_type, keys),
-                insertColumn(value_type, values),
-            });
+            std::vector<ColumnRef>{key_col, value_col});
         rows->AppendAsColumn(row_tuple);
     }
 
@@ -1534,7 +1542,9 @@ zval *extractRowCell(zval *row_pz, size_t col_index,
     zval *cell = zend_hash_index_find(Z_ARRVAL_P(row_pz), col_index);
     if (!cell && col_names) {
         zend_string *cn = (*col_names)[col_index];
-        cell = zend_hash_str_find(Z_ARRVAL_P(row_pz), ZSTR_VAL(cn), ZSTR_LEN(cn));
+        /* PHP < 8.1 rows can alias the global symbol table, whose named
+         * slots are IS_INDIRECT; an UNDEF slot is an unset variable. */
+        cell = zend_hash_str_find_ind(Z_ARRVAL_P(row_pz), ZSTR_VAL(cn), ZSTR_LEN(cn));
     }
     if (!cell) {
         throw std::runtime_error(

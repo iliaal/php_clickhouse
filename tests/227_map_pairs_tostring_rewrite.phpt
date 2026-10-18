@@ -74,6 +74,22 @@ foreach ($c->select("SELECT id, m FROM test.t_o5l_arr_pairs ORDER BY id") as $ro
     echo $row["id"], ": ", json_encode($row["m"]), "\n";
 }
 
+/* A value that fails conversion after its row's key column was built must
+ * release that key column (checked under LeakSanitizer). */
+$c->execute("DROP TABLE IF EXISTS test.t_o5l_leak");
+$c->execute("CREATE TABLE test.t_o5l_leak (m Map(String, UInt8)) ENGINE = Memory");
+for ($i = 0; $i < 3; $i++) {
+    try {
+        $c->insert("test.t_o5l_leak", array("m"), array(array(array(array("k$i", "not-a-number")))));
+        echo "bad value $i: inserted\n";
+    } catch (ClickHouseException $e) {
+        echo "bad value $i: ", get_class($e), "\n";
+    }
+}
+$c->insert("test.t_o5l_leak", array("m"), array(array(array(array("ok", 7)))));
+echo "valid after failures: ", json_encode($c->select("SELECT m FROM test.t_o5l_leak")), "\n";
+$c->execute("DROP TABLE IF EXISTS test.t_o5l_leak");
+
 /* A pair that was never a valid [key, value] array is still rejected. */
 try {
     $c->insert("test.t_o5l_pairs", array("id", "m"),
@@ -101,5 +117,9 @@ row/long: inserted, row now integer
 row/null: inserted, row now NULL
 1: [{"k0":"v0"},{"k1":"v1"}]
 2: [{"k0":"v0"},{"k1":"v1"}]
+bad value 0: ClickHouseException
+bad value 1: ClickHouseException
+bad value 2: ClickHouseException
+valid after failures: [{"m":{"ok":7}}]
 invalid: ClickHouseException
 done
