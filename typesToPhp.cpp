@@ -1169,6 +1169,47 @@ static ColumnRef appendFloatColumn(HashTable *values_ht, const char *type_label)
     return value;
 }
 
+/* Holds a userland array across a loop whose conversions may run __toString.
+ * The extra reference makes userland writes separate instead of freeing or
+ * resizing the table; referenced elements are copied by value, so a later
+ * reassignment of the reference cannot change what the loop reads. */
+struct PinnedArray {
+    zval value;
+    explicit PinnedArray(zval *src) {
+        ZVAL_DEREF(src);
+        HashTable *ht = Z_ARRVAL_P(src);
+        bool has_ref = false;
+        zval *e;
+        ZEND_HASH_FOREACH_VAL(ht, e) {
+            if (Z_ISREF_P(e)) {
+                has_ref = true;
+                break;
+            }
+        } ZEND_HASH_FOREACH_END();
+        if (!has_ref) {
+            ZVAL_COPY(&value, src);
+            return;
+        }
+        array_init_size(&value, zend_hash_num_elements(ht));
+        zend_ulong h;
+        zend_string *k;
+        ZEND_HASH_FOREACH_KEY_VAL(ht, h, k, e) {
+            zval copy;
+            ZVAL_COPY_DEREF(&copy, e);
+            if (k) {
+                zend_hash_add_new(Z_ARRVAL(value), k, &copy);
+            } else {
+                zend_hash_index_add_new(Z_ARRVAL(value), h, &copy);
+            }
+        } ZEND_HASH_FOREACH_END();
+    }
+    ~PinnedArray() { zval_ptr_dtor(&value); }
+    PinnedArray(const PinnedArray&) = delete;
+    PinnedArray& operator=(const PinnedArray&) = delete;
+    zval *zv() { return &value; }
+    HashTable *ht() { return Z_ARRVAL(value); }
+};
+
 template <typename K, typename V, typename KCol, typename VCol,
           typename KFn, typename VFn>
 static ColumnRef appendMapColumn(HashTable *values_ht, KFn extract_key, VFn extract_val)
@@ -1183,7 +1224,8 @@ static ColumnRef appendMapColumn(HashTable *values_ht, KFn extract_key, VFn extr
             throw std::runtime_error("Map row must be a PHP array");
         }
         entries.clear();
-        HashTable *mh = Z_ARRVAL_P(array_value);
+        PinnedArray row(array_value);
+        HashTable *mh = row.ht();
         zend_string *zk;
         zend_ulong nk;
         zval *mv;
@@ -1266,42 +1308,67 @@ static ColumnRef appendMapPairsColumn(HashTable *values_ht,
         std::vector<ColumnRef>{createColumn(key_type), createColumn(value_type)});
     auto rows = std::make_shared<ColumnArray>(tuple_data);
 
+    uint32_t row_count = zend_hash_num_elements(values_ht);
+    zval all_keys;
+    zval all_values;
+    array_init_size(&all_keys, row_count);
+    array_init_size(&all_values, row_count);
+    struct ReleasePairs {
+        zval *keys;
+        zval *values;
+        ~ReleasePairs() {
+            zval_ptr_dtor(keys);
+            zval_ptr_dtor(values);
+        }
+    } release_pairs{&all_keys, &all_values};
+
+    /* Copy every pair before converting any: key/value conversion may run
+     * __toString, which can rewrite rows or pairs that classifyMapInput()
+     * validated but this function has not reached yet. */
     zval *row;
     ZEND_HASH_FOREACH_VAL(values_ht, row) {
         ZVAL_DEREF(row);
-        HashTable *row_ht = Z_ARRVAL_P(row);
-        zval keys;
-        zval values;
-        array_init_size(&keys, zend_hash_num_elements(row_ht));
-        array_init_size(&values, zend_hash_num_elements(row_ht));
-        try {
-            zval *pair;
-            ZEND_HASH_FOREACH_VAL(row_ht, pair) {
-                ZVAL_DEREF(pair);
-                zval *key = zend_hash_index_find(Z_ARRVAL_P(pair), 0);
-                zval *value = zend_hash_index_find(Z_ARRVAL_P(pair), 1);
-                zval key_copy;
-                zval value_copy;
-                ZVAL_COPY_DEREF(&key_copy, key);
-                ZVAL_COPY_DEREF(&value_copy, value);
-                add_next_index_zval(&keys, &key_copy);
-                add_next_index_zval(&values, &value_copy);
-            } ZEND_HASH_FOREACH_END();
-
-            auto row_tuple = std::make_shared<ColumnTuple>(
-                std::vector<ColumnRef>{
-                    insertColumn(key_type, &keys),
-                    insertColumn(value_type, &values),
-                });
-            rows->AppendAsColumn(row_tuple);
-            zval_ptr_dtor(&keys);
-            zval_ptr_dtor(&values);
-        } catch (...) {
-            zval_ptr_dtor(&keys);
-            zval_ptr_dtor(&values);
-            throw;
+        if (Z_TYPE_P(row) != IS_ARRAY) {
+            throw std::runtime_error("Map row must be a PHP array");
         }
+        HashTable *row_ht = Z_ARRVAL_P(row);
+        zval tmp;
+        array_init_size(&tmp, zend_hash_num_elements(row_ht));
+        zval *keys = zend_hash_next_index_insert(Z_ARRVAL(all_keys), &tmp);
+        array_init_size(&tmp, zend_hash_num_elements(row_ht));
+        zval *values = zend_hash_next_index_insert(Z_ARRVAL(all_values), &tmp);
+        zval *pair;
+        ZEND_HASH_FOREACH_VAL(row_ht, pair) {
+            ZVAL_DEREF(pair);
+            zval *key = NULL;
+            zval *value = NULL;
+            if (Z_TYPE_P(pair) == IS_ARRAY) {
+                key = zend_hash_index_find(Z_ARRVAL_P(pair), 0);
+                value = zend_hash_index_find(Z_ARRVAL_P(pair), 1);
+            }
+            if (!key || !value) {
+                throw std::runtime_error(
+                    "Map ordered pair must be an array of [key, value]");
+            }
+            zval key_copy;
+            zval value_copy;
+            ZVAL_COPY_DEREF(&key_copy, key);
+            ZVAL_COPY_DEREF(&value_copy, value);
+            add_next_index_zval(keys, &key_copy);
+            add_next_index_zval(values, &value_copy);
+        } ZEND_HASH_FOREACH_END();
     } ZEND_HASH_FOREACH_END();
+
+    for (uint32_t i = 0; i < row_count; ++i) {
+        zval *keys = zend_hash_index_find(Z_ARRVAL(all_keys), i);
+        zval *values = zend_hash_index_find(Z_ARRVAL(all_values), i);
+        auto row_tuple = std::make_shared<ColumnTuple>(
+            std::vector<ColumnRef>{
+                insertColumn(key_type, keys),
+                insertColumn(value_type, values),
+            });
+        rows->AppendAsColumn(row_tuple);
+    }
 
     return std::make_shared<ColumnMap>(rows);
 }
@@ -2219,12 +2286,13 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 throw std::runtime_error("The inserted data is not an array type");
             }
 
+            PinnedArray cell(array_value);
             if (reuse_child) {
-                child->Append(insertColumn(item_type, array_value));
+                child->Append(insertColumn(item_type, cell.zv()));
                 value->AppendAsColumn(child);
                 child->Clear();
             } else {
-                value->AppendAsColumn(insertColumn(item_type, array_value));
+                value->AppendAsColumn(insertColumn(item_type, cell.zv()));
             }
         }
         ZEND_HASH_FOREACH_END();
