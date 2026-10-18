@@ -37,8 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A malicious or compromised server could make the client commit gigabytes
   of native memory, outside `memory_limit`, from a packet of a few dozen
   bytes. Three things did this:
-  - declaring large row counts, FixedString widths, String lengths, Array
-    sizes, or protocol string lengths;
+  - declaring large row counts, FixedString widths (including a
+    `LowCardinality(FixedString(N))` width outside 1..16777215, which on
+    32-bit builds could also be truncated and decoded under the wrong
+    width), String lengths, Array sizes, or protocol string lengths;
   - with compression enabled, declaring a decompressed size above 1 GiB, the
     server's own limit;
   - sending a deeply nested `LowCardinality(Nullable(...))` type over a wide
@@ -123,6 +125,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   declared returned zero-filled data, and a frame declaring an original size
   of 0 triggered undefined behaviour. Both now raise `ClickHouseException`,
   and well-formed empty frames are skipped.
+- On 32-bit builds, a data block declaring more rows or columns than
+  `size_t` can hold was truncated and returned as an empty result. It now
+  raises `ClickHouseException`.
 - `getServerInfo()` returned stale memory for `version_patch` when the server
   announced a protocol revision below 54401, and kept the previous server's
   timezone, display name, and patch after reconnecting to an older server.
