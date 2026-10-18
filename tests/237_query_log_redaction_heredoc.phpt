@@ -30,6 +30,16 @@ foreach ($cases as $name => $sql) {
     echo $name, ": ", $logged === $verbose ? "" : "verbose differs: ", $logged, "\n";
     echo "  leaked: ", preg_match('/SECRET/', $logged . $verbose) ? "yes" : "no", "\n";
 }
+
+// Past the heredoc tag index cap every heredoc is redacted through end of input.
+$tags = "";
+for ($i = 0; $i < 1100; $i++) $tags .= "\$$i\$";
+$sql = "SELECT 1 /* $tags */, \$\$SECRET_OVER\$\$ AS pw, 'x' AS y";
+$verbose = null;
+$c->select($sql);
+$logs = $c->getLogQueries();
+$expected = "SELECT 1 /* $tags */, \$\$?";
+echo "tag cap: ", $logs[0]["sql"] === $expected && $verbose === $expected ? "redacted to end" : "FAIL " . substr($verbose, -40), "\n";
 ?>
 --EXPECT--
 plain heredoc: SELECT $$?$$ AS pw
@@ -44,3 +54,4 @@ unclosed tag: SELECT 1 AS $a$b, '?' AS c
   leaked: no
 heredoc in array: SELECT 1 AS n, [$$?$$] AS a
   leaked: no
+tag cap: redacted to end

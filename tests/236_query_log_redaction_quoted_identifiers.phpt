@@ -25,6 +25,7 @@ $cases = [
     "nested block comment" => "SELECT 1 /* a /* it's */ b */, 'SECRET_BLOCK' AS pw",
     "comment literal" => "SELECT 1 /* pw = 'SECRET_IN_COMMENT' */ AS x",
     "exponent" => "SELECT 1e-5 AS e, 0x1p-2 AS h, 'SECRET_EXP' AS pw",
+    "tuple element after dot" => "SELECT CAST(tuple(7), 'Tuple(`1e` UInt8)').1e-- tuple's first field\n AS a, 'SECRET_VALID' AS pw",
     "hex and bin" => "SELECT x'4142' AS h, b'01000001' AS b, 'SECRET_HEX' AS pw",
 ];
 foreach ($cases as $name => $sql) {
@@ -34,6 +35,27 @@ foreach ($cases as $name => $sql) {
     $logged = count($logs) === 1 ? $logs[0]["sql"] : "(missing)";
     echo $name, ": ", $logged === $verbose ? "" : "verbose differs: ", $logged, "\n";
     echo "  leaked: ", preg_match('/SECRET/', $logged . $verbose) ? "yes" : "no", "\n";
+}
+
+// Rejected statements are logged too; the number and '.' lexing must still match the server.
+$errors = [
+    "underscore exponent" => "SELECT 1_e-- it's\n, 'SECRET_US' AS pw",
+    "double dot" => "SELECT 1.2.3e-- it's\n, 'SECRET_DD' AS pw",
+    "spaced dot" => "SELECT 1 .5e-- it's\n, 'SECRET_SD' AS pw",
+    "binary exponent" => "SELECT 0b1e--1, \$\$SECRET_BIN\$\$ AS pw",
+    "vertical delimiter" => "SELECT 1 \\G.5e-- 'a\nSECRET_VD' AS pw",
+];
+foreach ($errors as $name => $sql) {
+    $verbose = null;
+    try {
+        $c->select($sql);
+        echo $name, ": accepted\n";
+    } catch (ClickHouseException $e) {
+    }
+    $logs = $c->getLogQueries();
+    $logged = count($logs) === 1 ? $logs[0]["sql"] : "(missing)";
+    echo $name, ": ", $logged === $verbose ? "" : "verbose differs, ",
+        preg_match('/SECRET/', $logged . $verbose) ? "leaked" : "redacted", "\n";
 }
 ?>
 --EXPECT--
@@ -60,5 +82,13 @@ comment literal: SELECT 1 /* pw = '?' */ AS x
   leaked: no
 exponent: SELECT 1e-5 AS e, 0x1p-2 AS h, '?' AS pw
   leaked: no
+tuple element after dot: SELECT CAST(tuple(7), '?').1e-- tuple'?'
+ AS a, '?' AS pw
+  leaked: no
 hex and bin: SELECT x'?' AS h, b'?' AS b, '?' AS pw
   leaked: no
+underscore exponent: redacted
+double dot: redacted
+spaced dot: redacted
+binary exponent: redacted
+vertical delimiter: redacted
