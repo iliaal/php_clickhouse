@@ -2059,6 +2059,23 @@ static void applyPlaceholders(string &sql, HashTable *params_ht, std::vector<Typ
                     "value directly after '-' would form a SQL comment; separate "
                     "them with a space or parentheses in the SQL");
             }
+            /* Placeholder values are word characters, so after `$` and a run of
+             * word characters they extend a `$tag$` heredoc delimiter and can
+             * open or close a literal that swallows the SQL between them. */
+            size_t word_start = pos;
+            while (word_start > 0) {
+                unsigned char wc = (unsigned char)sql[word_start - 1];
+                if (!((wc >= '0' && wc <= '9') || (wc >= 'A' && wc <= 'Z') ||
+                      (wc >= 'a' && wc <= 'z') || wc == '_')) {
+                    break;
+                }
+                --word_start;
+            }
+            if (word_start > 0 && sql[word_start - 1] == '$') {
+                throw std::runtime_error(
+                    "Placeholder value for {" + name + "} is invalid: a value "
+                    "after '$' would become part of a $tag$ heredoc delimiter");
+            }
             sql.replace(pos, needle.size(), repl);
             pos = sql.find(needle, pos + repl.size());
         }

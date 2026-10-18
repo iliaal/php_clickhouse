@@ -34,6 +34,17 @@ echo "parenthesized: ", attempt($c, "SELECT owner FROM t_giu_docs WHERE id < 9-(
 echo "after plus: ", attempt($c, "SELECT owner FROM t_giu_docs WHERE id < 10+{skip} $where", ["skip" => -5]), "\n";
 echo "exponent: ", attempt($c, "SELECT owner FROM t_giu_docs WHERE id < 10-{skip} $where", ["skip" => "5e-1"]), "\n";
 
+function columns($c, $sql, $params) {
+    try {
+        return json_encode($c->select($sql, $params));
+    } catch (ClickHouseException $e) {
+        return "rejected: " . $e->getMessage();
+    }
+}
+echo "heredoc tag: ", columns($c, 'SELECT 1 AS a, ${t}$ AS b, 2 AS c, $end$ AS d', ["t" => "end"]), "\n";
+echo "heredoc tag suffix: ", columns($c, 'SELECT 1 AS a, $e{t}$ AS b, 2 AS c, $end$ AS d', ["t" => "nd"]), "\n";
+echo "heredoc control: ", columns($c, 'SELECT {t} AS a, $end$x$end$ AS b', ["t" => "7"]), "\n";
+
 $c->execute("SYSTEM FLUSH LOGS");
 $logged = function ($needle) use ($c, $marker) {
     $rows = $c->select(
@@ -56,5 +67,8 @@ spaced: ["alice"]
 parenthesized: ["alice"]
 after plus: ["alice"]
 exponent: ["alice"]
+heredoc tag: rejected: Placeholder value for {t} is invalid: a value after '$' would become part of a $tag$ heredoc delimiter
+heredoc tag suffix: rejected: Placeholder value for {t} is invalid: a value after '$' would become part of a $tag$ heredoc delimiter
+heredoc control: [{"a":7,"b":"x"}]
 logged spaced: yes
 logged comment: 0
