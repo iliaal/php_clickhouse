@@ -2,7 +2,9 @@
 /* In-test hostile native-protocol peer. Each accepted connection reads the
  * client hello, sends the scripted server hello, waits for the request to go
  * idle, sends the scripted response and half-closes. The peer keeps serving
- * reconnects until the test closes its stdin. */
+ * reconnects until wire_mock_stop() connects and sends the stop token. Stdin
+ * cannot be the stop signal: on Windows stream_select() reports a pipe as
+ * always readable, so the peer would block in fgets(STDIN) and never accept. */
 
 function wire_mock_code(): string
 {
@@ -36,19 +38,19 @@ function drain_idle($peer, $firstUsec, $idleUsec, $maxSec) {
 
 $deadline = microtime(true) + 30.0;
 while (microtime(true) < $deadline) {
-    $read = [$server, STDIN];
+    $read = [$server];
     $write = null;
     $except = null;
     if (@stream_select($read, $write, $except, 0, 200000) < 1) continue;
-    if (in_array(STDIN, $read, true)) {
-        $line = fgets(STDIN);
-        if ($line === false || feof(STDIN)) break;
-        continue;
-    }
     $peer = @stream_socket_accept($server, 1);
     if ($peer === false) continue;
     stream_set_blocking($peer, true);
-    if (drain_idle($peer, 2000000, 50000, 2.0) === "") {
+    $request = drain_idle($peer, 2000000, 50000, 2.0);
+    if ($request === "wire-mock-stop") {
+        fclose($peer);
+        break;
+    }
+    if ($request === "") {
         fclose($peer);
         continue;
     }
@@ -95,7 +97,12 @@ function wire_mock_start(string $helloHex, string $responseHex): array
 
 function wire_mock_stop(array $mock): string
 {
-    list($process, $pipes) = $mock;
+    list($process, $pipes, $port) = $mock;
+    $control = @stream_socket_client("tcp://127.0.0.1:$port", $errno, $error, 2);
+    if ($control !== false) {
+        fwrite($control, "wire-mock-stop");
+        fclose($control);
+    }
     fclose($pipes[0]);
     fclose($pipes[1]);
     $stderr = stream_get_contents($pipes[2]);
@@ -188,6 +195,9 @@ function wire_run(string $helloHex, string $responseHex, callable $op): array
             $result = ["ok", $op($client)];
         } catch (ClickHouseException $e) {
             $result = ["exception", $e->getMessage()];
+            /* The trace holds $client as the $op argument; keeping it alive
+             * leaves the peer waiting out its final drain. */
+            $e = null;
         }
         unset($client);
     } catch (ClickHouseException $e) {
