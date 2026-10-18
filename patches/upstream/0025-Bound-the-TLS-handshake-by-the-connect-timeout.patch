@@ -1,0 +1,150 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilia Alshanetsky <ilia@ilia.ws>
+Date: Sun, 18 Oct 2026 00:00:00 -0400
+Subject: [PATCH 25/25] Bound the TLS handshake by the connect timeout
+
+SSLSocket ran a blocking SSL_connect() whose reads are bounded only by
+SO_RCVTIMEO, i.e. the query receive timeout (infinite by default). A
+peer that accepts TCP but never answers the ClientHello blocked the
+constructor forever and endpoint failover never ran. Drive the
+handshake non-blocking with a poll loop against connection_connect_timeout
+and throw std::system_error(ETIMEDOUT) when it expires, so the endpoint
+rotation treats it as a connection failure.
+---
+diff --git a/clickhouse/base/socket.cpp b/clickhouse/base/socket.cpp
+index be64515..b11bafa 100644
+--- a/clickhouse/base/socket.cpp
++++ b/clickhouse/base/socket.cpp
+@@ -350,6 +350,34 @@ void Socket::Close() {
+     handle_ = INVALID_SOCKET;
+ }
+ 
++void Socket::SetNonBlocking(bool value) {
++    SetNonBlock(handle_, value);
++}
++
++void Socket::WaitFor(short events, std::chrono::milliseconds timeout, const char* timeout_message) {
++    pollfd fd;
++    fd.fd      = handle_;
++    fd.events  = events;
++    fd.revents = 0;
++
++    const ssize_t rval = Poll(&fd, 1, timeout.count() < 0 ? -1 : static_cast<int>(timeout.count()));
++    if (rval == -1) {
++        const int err = getSocketErrorCode();
++#if !defined(_win_)
++        // Callers loop until their own deadline, so an interrupted wait is just an early wakeup.
++        if (err == EINTR) return;
++#endif
++        throw std::system_error(err, getErrorCategory(), "fail to poll socket");
++    }
++    if (rval == 0) {
++#if defined(_win_)
++        throw std::system_error(WSAETIMEDOUT, getErrorCategory(), timeout_message);
++#else
++        throw std::system_error(ETIMEDOUT, getErrorCategory(), timeout_message);
++#endif
++    }
++}
++
+ void Socket::SetTcpKeepAlive(int idle, int intvl, int cnt) noexcept {
+     int val = 1;
+ 
+diff --git a/clickhouse/base/socket.h b/clickhouse/base/socket.h
+index df1cdcc..ab43a14 100644
+--- a/clickhouse/base/socket.h
++++ b/clickhouse/base/socket.h
+@@ -132,6 +132,12 @@ protected:
+     Socket& operator = (const Socket&) = delete;
+     void Close();
+ 
++    void SetNonBlocking(bool value);
++
++    /// Waits until one of `events` is ready on the socket; a negative timeout waits forever.
++    /// Throws std::system_error with a timed-out code when the timeout expires first.
++    void WaitFor(short events, std::chrono::milliseconds timeout, const char* timeout_message);
++
+     SOCKET handle_;
+ };
+ 
+diff --git a/clickhouse/base/sslsocket.cpp b/clickhouse/base/sslsocket.cpp
+index 15c7947..dc265eb 100644
+--- a/clickhouse/base/sslsocket.cpp
++++ b/clickhouse/base/sslsocket.cpp
+@@ -239,7 +239,7 @@ SSLSocket::SSLSocket(const NetworkAddress& addr, const SocketTimeoutParams& time
+         configureSSL(ssl_params.configuration, ssl);
+ 
+     SSL_set_connect_state(ssl);
+-    HANDLE_SSL_ERROR(ssl, SSL_connect(ssl));
++    Handshake(ssl, timeout_params.connect_timeout);
+     HANDLE_SSL_ERROR(ssl, SSL_set_mode(ssl, SSL_MODE_AUTO_RETRY));
+ 
+     if (const auto verify_result = SSL_get_verify_result(ssl); !ssl_params.skip_verification && verify_result != X509_V_OK) {
+@@ -268,6 +268,37 @@ SSLSocket::SSLSocket(const NetworkAddress& addr, const SocketTimeoutParams& time
+ //    }
+ }
+ 
++void SSLSocket::Handshake(SSL* ssl, std::chrono::milliseconds timeout) {
++    // A blocking SSL_connect() is bounded only by SO_RCVTIMEO, which is the query receive timeout
++    // (infinite by default), so run the handshake non-blocking against the connect timeout instead.
++    using Clock      = std::chrono::steady_clock;
++    const auto start = Clock::now();
++
++    SetNonBlocking(true);
++    ERR_clear_error();
++    for (;;) {
++        const int ret = SSL_connect(ssl);
++        if (ret > 0) break;
++
++        const int error = SSL_get_error(ssl, ret);
++        short events    = 0;
++        if (error == SSL_ERROR_WANT_READ)
++            events = POLLIN;
++        else if (error == SSL_ERROR_WANT_WRITE)
++            events = POLLOUT;
++        else
++            throwSSLError(ssl, error, LOCATION, "SSL_connect(ssl)");
++
++        auto remaining = timeout;
++        if (timeout.count() >= 0) {
++            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start);
++            remaining          = elapsed < timeout ? timeout - elapsed : std::chrono::milliseconds(0);
++        }
++        WaitFor(events, remaining, "TLS handshake timed out");
++    }
++    SetNonBlocking(false);
++}
++
+ void SSLSocket::validateParams(const SSLParams & ssl_params) {
+     // We need either SSL or SSL_CTX to properly validate configuration, so create a temporary one.
+     std::unique_ptr<SSL_CTX, decltype(&SSL_CTX_free)> ctx(SSL_CTX_new(TLS_client_method()), &SSL_CTX_free);
+diff --git a/clickhouse/base/sslsocket.h b/clickhouse/base/sslsocket.h
+index 945de86..c3b4f6a 100644
+--- a/clickhouse/base/sslsocket.h
++++ b/clickhouse/base/sslsocket.h
+@@ -62,6 +62,8 @@ public:
+ 
+     static void validateParams(const SSLParams & ssl_params);
+ private:
++    void Handshake(SSL* ssl, std::chrono::milliseconds timeout);
++
+     std::unique_ptr<SSL, void (*)(SSL *s)> ssl_;
+ };
+ 
+diff --git a/clickhouse/client.h b/clickhouse/client.h
+index 3879880..31fd8d6 100644
+--- a/clickhouse/client.h
++++ b/clickhouse/client.h
+@@ -115,7 +115,9 @@ struct ClientOptions {
+     // TCP options
+     DECLARE_FIELD(tcp_nodelay, bool, TcpNoDelay, true);
+ 
+-    /// Connection socket connect timeout. If the timeout is negative then the connect operation will never timeout.
++    /// Connection socket connect timeout. It bounds the TCP connect and, for TLS connections, the TLS handshake separately,
++    /// so establishing a TLS connection can take up to twice this timeout.
++    /// If the timeout is negative then the connect operation will never timeout.
+     DECLARE_FIELD(connection_connect_timeout, std::chrono::milliseconds, SetConnectionConnectTimeout, std::chrono::seconds(5));
+ 
+     /// Connection socket timeout. If the timeout is set to zero then the operation will never timeout.
+--
+2.34.1

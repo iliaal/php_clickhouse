@@ -286,7 +286,7 @@ foreach ($ch-&gt;select("SELECT id, ts, tag FROM events ORDER BY id",
 <table>
 <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
 <tbody>
-<tr><td><code>connect_timeout</code></td><td>int (sec)</td><td><code>5</code></td><td>TCP connect deadline</td></tr>
+<tr><td><code>connect_timeout</code></td><td>int (sec)</td><td><code>5</code></td><td>Deadline for the TCP connect and, with <code>ssl</code>, separately for the TLS handshake, so a TLS endpoint can take up to twice this value</td></tr>
 <tr><td><code>connect_timeout_ms</code></td><td>int (ms)</td><td>(none)</td><td>Sub-second connect deadline; overrides the seconds key when set</td></tr>
 <tr><td><code>receive_timeout</code></td><td>int (sec)</td><td><code>0</code></td><td>Read deadline (0 = no timeout)</td></tr>
 <tr><td><code>receive_timeout_ms</code></td><td>int (ms)</td><td>(none)</td><td>Sub-second read deadline; overrides the seconds key when set</td></tr>

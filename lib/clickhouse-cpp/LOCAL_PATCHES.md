@@ -451,3 +451,27 @@ differs from the declared original size throws `CompressionError`. Applies on
 top of patch 0015 (upstream `f0f2927`). Exercised by
 `tests/264_compressed_empty_frame.phpt`.
 Upstream: pending PR (fix/lz4-empty-frame on iliaal/clickhouse-cpp).
+## clickhouse/base/sslsocket.cpp: TLS handshake not bounded by the connect timeout
+
+`connection_connect_timeout` bounds only the TCP connect poll in
+`SocketConnect()`. `SSLSocket::SSLSocket` then ran a blocking
+`SSL_connect()`, whose reads are bounded only by `SO_RCVTIMEO` -- the
+query receive timeout, infinite by default. A peer that accepts TCP but
+never answers the ClientHello blocked the constructor forever, so
+endpoint failover never reached a healthy server.
+
+Patch: `0025-Bound-the-TLS-handshake-by-the-connect-timeout.patch`.
+`SSLSocket::Handshake()` switches the socket to non-blocking, loops
+`SSL_connect()` on `SSL_ERROR_WANT_READ`/`WANT_WRITE` with `poll()`
+against a deadline of `connection_connect_timeout` (negative waits
+forever, as for the TCP connect), and restores blocking mode afterwards.
+Expiry throws `std::system_error(ETIMEDOUT)` (`WSAETIMEDOUT` on Windows),
+which every rotation site treats as a connection failure. Adds
+`Socket::SetNonBlocking()` and `Socket::WaitFor()`, and documents the
+handshake bound on `connection_connect_timeout` in `client.h`. The deadline is per
+handshake, so a TLS endpoint can take up to twice the connect timeout
+(TCP connect plus handshake). Exercised by
+`tests/265_tls_handshake_tarpit_failover.phpt` and
+`tests/266_tls_handshake_tarpit_timeout.phpt`.
+
+Upstream: pending PR (fix/tls-handshake-timeout on iliaal/clickhouse-cpp).
