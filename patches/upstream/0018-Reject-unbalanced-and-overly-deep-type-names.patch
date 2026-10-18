@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Ilia Alshanetsky <ilia@ilia.ws>
 Date: Sun, 18 Oct 2026 00:00:00 -0400
-Subject: [PATCH 18/18] Reject unbalanced and overly deep type names
+Subject: [PATCH 18/28] Reject unbalanced and overly deep type names
 
 TypeParser::Parse() called top() and pop() on its element stack for every
 closing parenthesis and comma, so a type name with a surplus ')' or a
@@ -17,9 +17,10 @@ recursive paths to about 250 KiB of stack at -O2.
  clickhouse/types/type_parser.h   | 5 +++++
  2 files changed, 11 insertions(+)
 
+diff --git a/clickhouse/types/type_parser.cpp b/clickhouse/types/type_parser.cpp
 --- a/clickhouse/types/type_parser.cpp
 +++ b/clickhouse/types/type_parser.cpp
-@@ -194,16 +194,22 @@
+@@ -198,16 +198,22 @@
                  type_->value_string = std::string(token.value);
                  break;
              case Token::LPar:
@@ -42,6 +43,7 @@ recursive paths to about 250 KiB of stack at -O2.
                  type_ = open_elements_.top();
                  open_elements_.pop();
                  type_->elements.emplace_back(TypeAst());
+diff --git a/clickhouse/types/type_parser.h b/clickhouse/types/type_parser.h
 --- a/clickhouse/types/type_parser.h
 +++ b/clickhouse/types/type_parser.h
 @@ -71,6 +71,11 @@

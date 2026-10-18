@@ -328,6 +328,26 @@ cached. `ParseTypeName()` returns
 binding only reaches it through `CreateColumnByType()`.
 Upstream: pending PR (fix/type-ast-cache-bound on iliaal/clickhouse-cpp)
 
+## clickhouse/types/type_parser.cpp: unbalanced and deeply nested type names
+
+`TypeParser::Parse()` called `top()`/`pop()` on its element stack for every
+`)` and `,`, so a server- or caller-supplied type name such as `UInt8))`,
+`),`, or `)))` read from an empty `std::stack` (release SIGSEGV). The parser
+also had no nesting limit, while `CreateColumnFromAst()` and `TypeAst`
+destruction recurse once per level, so `Array(` repeated 100000 times (closed
+or not) exhausted the native stack.
+
+Patch: `0018-Reject-unbalanced-and-overly-deep-type-names.patch`. `Parse()`
+returns false for a `)` or `,` with no open parenthesis and for nesting deeper
+than `TypeParser::kMaxNestingDepth` (512; current servers reject column types
+nested deeper than 499 levels, and 512 levels keep the recursive paths to
+about 250 KiB of stack at -O2); `CreateColumnByType()` then returns null and the
+Data-block reader throws `unsupported column type`. Exercised by
+`tests/252_type_parser_unbalanced_close.phpt`,
+`tests/253_type_parser_depth_limit.phpt`, and
+`tests/254_external_type_parser_errors.phpt`.
+Upstream: pending PR (fix/type-parser-unbalanced-depth on iliaal/clickhouse-cpp).
+
 ## clickhouse/columns/factory.cpp: wrapper types over unsupported nested types
 
 `CreateColumnFromAst()` built `ColumnArray`, `ColumnNullable`, and the
@@ -339,7 +359,7 @@ or compromised server reaches this with one column type string in a Data or
 ProfileEvents block; `selectWithExternalData()` reaches it with a
 caller-supplied column type.
 
-Patch: `0018-Reject-wrapper-types-over-unsupported-nested-types.patch`.
+Patch: `0019-Reject-wrapper-types-over-unsupported-nested-types.patch`.
 Array and Nullable return `nullptr` when the nested column is null, matching
 Tuple and Map, so `ReadBlock()` throws `UnimplementedError("unsupported column
 type: ...")`. `LowCardinality(Nullable(T))` throws `UnimplementedError`, like
@@ -363,7 +383,7 @@ reports only its first element), so `Tuple(UInt8, FixedString(huge))` and
 FixedString reads went out of bounds (SIGSEGV). A plain top-level
 `FixedString(huge)` instead returned zero rows for a 4-row block.
 
-Patch: `0019-Reject-FixedString-loads-whose-byte-size-overflows.patch`.
+Patch: `0020-Reject-FixedString-loads-whose-byte-size-overflows.patch`.
 `ColumnFixedString::LoadBody` throws `ProtocolError` when the multiplication
 overflows; `ColumnTuple::LoadBody` and `ColumnNullable::LoadBody` throw
 `ProtocolError` when an element or the nested column holds a different number
@@ -377,16 +397,16 @@ Upstream: pending PR (fix/fixedstring-size-overflow on iliaal/clickhouse-cpp).
 
 In v2.6.2 `ColumnTuple::Clear()` runs `columns_.clear()`, so a cleared Tuple
 becomes `Tuple()` and a cleared `Map` (an `Array(Tuple(K, V))`) loses its key
-and value columns. Patch 0021 clears the nested column when every Array
+and value columns. Patch 0022 clears the nested column when every Array
 offset in a block is 0, which reaches this path for an all-empty `Map`,
 `Array(Map(...))`, or `Map` inside a `Tuple`: the binding then dereferenced the
 missing elements (SIGSEGV) or rejected the column as `Array(Tuple())`.
 
-Patch: `0020-Clear-Tuple-elements-in-place.patch`, the `ColumnTuple::Clear`
+Patch: `0021-Clear-Tuple-elements-in-place.patch`, the `ColumnTuple::Clear`
 hunk of upstream commit 44f54c5 ("Make composite Swap and Tuple Clear
 alias-coherent"), applied verbatim. It clears each element in place. Drop
 this backport once the vendored library includes 44f54c5; the Array offsets
-patch (0021) needs it until then.
+patch (0022) needs it until then.
 Exercised by the all-empty and mixed Map rows in
 `tests/260_column_load_valid_nested_shapes.phpt`.
 
@@ -401,7 +421,7 @@ compute `offsets[n] - offsets[n - 1]` with unsigned wraparound; for
 `Array(Nothing)`, whose `Slice()` keeps any length, a row reported a length
 near 2^64 and the binding died on a huge allocation hint (PHP fatal).
 
-Patch: `0021-Validate-Array-offsets-when-loading-from-the-wire.patch`.
+Patch: `0022-Validate-Array-offsets-when-loading-from-the-wire.patch`.
 `LoadBody` throws `ProtocolError` on a decreasing offset and when the nested
 column does not hold exactly as many values as the last offset; with no rows
 or only empty arrays it clears the stale nested values instead of returning
@@ -418,7 +438,7 @@ new enough to carry them. A server announcing a revision below 54401 left
 `version_patch` holding indeterminate heap bytes, which `getServerInfo()`
 returned; a reconnect to an older server kept the previous server's values.
 
-Patch: `0022-Zero-ServerInfo-fields-a-Hello-does-not-carry.patch`. Default-initializes
+Patch: `0023-Zero-ServerInfo-fields-a-Hello-does-not-carry.patch`. Default-initializes
 every numeric `ServerInfo` member and resets `server_info_` before parsing each
 Hello. Exercised by `tests/261_old_revision_hello_server_info.phpt`.
 Upstream: pending PR (fix/serverinfo-init on iliaal/clickhouse-cpp).
@@ -431,7 +451,7 @@ produced a `bool` with an invalid object representation, and loading it (for
 example in the binding's profile callback) is undefined behaviour. The obsolete
 `has_nested` byte in `ReceiveException()` used the same pattern.
 
-Patch: `0023-Read-ProfileInfo-flags-as-bytes-not-bool.patch`. Reads each flag into
+Patch: `0024-Read-ProfileInfo-flags-as-bytes-not-bool.patch`. Reads each flag into
 a `uint8_t` and stores `byte != 0`; `has_nested` is read as `uint8_t`. Exercised
 by `tests/262_profile_info_noncanonical_bool.phpt` and
 `tests/263_profile_info_noncanonical_bool_select.phpt`.
@@ -448,7 +468,7 @@ instead of reading the next frame. Separately, `Decompress()` ignored how many
 bytes the decompressor produced and exposed all `original` bytes, so a
 checksum-valid frame that decoded short returned a zero-filled tail as data.
 
-Patch: `0024-Validate-what-compressed-frames-decompress-to.patch`. Decompresses
+Patch: `0025-Validate-what-compressed-frames-decompress-to.patch`. Decompresses
 an empty frame into a one-byte stack target with zero capacity, so a non-empty
 payload still fails with `CompressionError`; `DoNext()` keeps reading frames
 until one yields data or the input ends; and LZ4/ZSTD output whose length
@@ -466,7 +486,7 @@ query receive timeout, infinite by default. A peer that accepts TCP but
 never answers the ClientHello blocked the constructor forever, so
 endpoint failover never reached a healthy server.
 
-Patch: `0025-Bound-the-TLS-handshake-by-the-connect-timeout.patch`.
+Patch: `0026-Bound-the-TLS-handshake-by-the-connect-timeout.patch`.
 `SSLSocket::Handshake()` switches the socket to non-blocking, loops
 `SSL_connect()` on `SSL_ERROR_WANT_READ`/`WANT_WRITE` with `poll()`
 against a deadline of `connection_connect_timeout` (negative waits
@@ -492,31 +512,12 @@ The comment above the disabled `X509_check_ip` block claimed IP addresses are
 not verified; OpenSSL 3.0+ `SSL_set1_host()` checks IP literals against the
 certificate's IP SANs.
 
-Patch: `0026-Name-the-CA-file-or-directory-when-loading-it-fails.patch`.
+Patch: `0027-Name-the-CA-file-or-directory-when-loading-it-fails.patch`.
 Falls back to `ERR_error_string_n()` (which formats errno), prefixes CA
 file/directory load failures with the path, clears the error queue before
 each CA load and after reporting, and corrects the comment. Exercised by
 `tests/233_ssl_ca_path_validation.phpt`.
 Upstream: pending PR (fix/ssl-ca-load-error on iliaal/clickhouse-cpp).
-## clickhouse/types/type_parser.cpp: unbalanced and deeply nested type names
-
-`TypeParser::Parse()` called `top()`/`pop()` on its element stack for every
-`)` and `,`, so a server- or caller-supplied type name such as `UInt8))`,
-`),`, or `)))` read from an empty `std::stack` (release SIGSEGV). The parser
-also had no nesting limit, while `CreateColumnFromAst()` and `TypeAst`
-destruction recurse once per level, so `Array(` repeated 100000 times (closed
-or not) exhausted the native stack.
-
-Patch: `0018-Reject-unbalanced-and-overly-deep-type-names.patch`. `Parse()`
-returns false for a `)` or `,` with no open parenthesis and for nesting deeper
-than `TypeParser::kMaxNestingDepth` (512; current servers reject column types
-nested deeper than 499 levels, and 512 levels keep the recursive paths to
-about 250 KiB of stack at -O2); `CreateColumnByType()` then returns null and the
-Data-block reader throws `unsupported column type`. Exercised by
-`tests/252_type_parser_unbalanced_close.phpt`,
-`tests/253_type_parser_depth_limit.phpt`, and
-`tests/254_external_type_parser_errors.phpt`.
-Upstream: pending PR (fix/type-parser-unbalanced-depth on iliaal/clickhouse-cpp).
 
 ## clickhouse/columns/factory.cpp: LowCardinality subtree copies
 
@@ -527,8 +528,9 @@ around a wide `Tuple` held one copy per level during the recursion, so a
 server-supplied type of tens of kilobytes drove peak memory to hundreds of
 megabytes (outside `memory_limit`) before the type was rejected.
 
-Patch: `0031-Avoid-copying-the-type-AST-at-each-LowCardinality-level.patch`.
+Patch: `0028-Avoid-copying-the-type-AST-at-each-LowCardinality-level.patch`.
 Binds the child by `const auto&`; no other `GetASTChildElement()` result in
 `factory.cpp` is copied. Exercised by
 `tests/272_lowcardinality_nested_ast_memory.phpt`.
 Upstream: pending PR (fix/lowcardinality-ast-copy on iliaal/clickhouse-cpp).
+
