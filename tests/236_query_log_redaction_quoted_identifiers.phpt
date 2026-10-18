@@ -67,6 +67,7 @@ $templates = [
     "spaced placeholder" => ["SELECT {n} AS a, 'SECRET_T4' AS pw", ["n" => 5]],
     "qualified column" => ["SELECT {t}.number AS a, 'SECRET_T5' AS pw FROM system.numbers AS n LIMIT 1", ["t" => "n"]],
     "colon key" => ["SELECT {a:b}.5e-- the tuple's field\n AS a, 'SECRET_C1' AS pw FROM (SELECT CAST(tuple(7), 'Tuple(`5e` UInt8)') AS t)", ["a:b" => "t"]],
+    "colon key after bad value" => ["SELECT {p} AS z, {a:b}.5e-- the tuple's field\n AS a, 'SECRET_K' AS pw", ["p" => "bad value", "a:b" => "t"]],
     "unsubstituted braces" => ["SELECT {z} .5e--1, \$\$SECRET_C2\$\$ AS pw", []],
     "qualified table" => ["SELECT count() AS n FROM {db}.{tbl} WHERE dummy = 0 AND 'SECRET_C5' != ''", ["db" => "system", "tbl" => "one"]],
     "qualified then sign" => ["SELECT {a}.{b}-1 AS x, 'SECRET_C8' AS pw", ["a" => 1, "b" => "e"]],
@@ -132,6 +133,8 @@ spaced placeholder: SELECT {n} AS a, '?' AS pw
 qualified column: SELECT {t}.number AS a, '?' AS pw FROM system.numbers AS n LIMIT 1
   leaked: no
 colon key: (no start event) SELECT ?
+  leaked: no
+colon key after bad value: (no start event) SELECT ?
   leaked: no
 unsubstituted braces: SELECT {z} ?
   leaked: no

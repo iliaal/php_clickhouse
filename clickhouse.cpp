@@ -1962,11 +1962,29 @@ static std::string validatePlaceholderToken(const char *val, size_t vlen,
     return std::string(val, vlen);
 }
 
+static bool isTypedSyntaxKey(const zend_string *key)
+{
+    return memchr(ZSTR_VAL(key), ':', ZSTR_LEN(key)) ||
+           memchr(ZSTR_VAL(key), '{', ZSTR_LEN(key)) ||
+           memchr(ZSTR_VAL(key), '}', ZSTR_LEN(key));
+}
+
 static void applyPlaceholders(string &sql, HashTable *params_ht, std::vector<TypedParam> &out_params)
 {
     zval *pzval;
     zend_string *zk;
     zend_ulong nk;
+
+    /* `{a:b}` reads as a typed placeholder, so query-log redaction could not
+     * tell a substituted key containing these from one left intact. Check
+     * every key before any value so this error, which makes the logged
+     * template redact from its first brace, cannot be preempted. */
+    ZEND_HASH_FOREACH_STR_KEY(params_ht, zk) {
+        if (zk && isTypedSyntaxKey(zk)) {
+            throw PlaceholderKeyError(
+                "Placeholder array keys must not contain ':', '{' or '}'");
+        }
+    } ZEND_HASH_FOREACH_END();
 
     ZEND_HASH_FOREACH_KEY_VAL(params_ht, nk, zk, pzval) {
         (void)nk;
@@ -1978,12 +1996,6 @@ static void applyPlaceholders(string &sql, HashTable *params_ht, std::vector<Typ
         }
         ZVAL_DEREF(pzval);
         std::string name(ZSTR_VAL(zk), ZSTR_LEN(zk));
-        /* `{a:b}` reads as a typed placeholder, so query-log redaction could
-         * not tell a substituted key containing these from one left intact. */
-        if (name.find_first_of(":{}") != std::string::npos) {
-            throw PlaceholderKeyError(
-                "Placeholder array keys must not contain ':', '{' or '}'");
-        }
 
         std::string typed_prefix = "{" + name + ":";
         size_t tpos = sql.find(typed_prefix);
