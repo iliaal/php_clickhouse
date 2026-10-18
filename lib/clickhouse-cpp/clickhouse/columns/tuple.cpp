@@ -142,7 +142,11 @@ void ColumnTuple::SaveBody(OutputStream* output) {
 }
 
 void ColumnTuple::Clear() {
-    columns_.clear();
+    // Clear each element column in place (do NOT drop the element handles): this preserves the
+    // tuple structure and the element objects' identity, so any As<>/Wrap views stay coherent.
+    for (auto & column : columns_) {
+        column->Clear();
+    }
 }
 
 void ColumnTuple::Swap(Column& other) {

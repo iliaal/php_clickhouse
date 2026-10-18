@@ -309,3 +309,21 @@ early. Exercised by
 `tests/259_wire_array_offsets_decreasing.phpt`.
 
 Upstream: pending PR (fix/array-offsets-monotonic on iliaal/clickhouse-cpp).
+
+## clickhouse/columns/tuple.cpp: `ColumnTuple::Clear` drops the element columns
+
+In v2.6.2 `ColumnTuple::Clear()` runs `columns_.clear()`, so a cleared Tuple
+becomes `Tuple()` and a cleared `Map` (an `Array(Tuple(K, V))`) loses its key
+and value columns. Patch 0021 clears the nested column when every Array
+offset in a block is 0, which reaches this path for an all-empty `Map`,
+`Array(Map(...))`, or `Map` inside a `Tuple`: the binding then dereferenced the
+missing elements (SIGSEGV) or rejected the column as `Array(Tuple())`.
+
+Patch: `0030-Clear-Tuple-elements-in-place.patch`, the `ColumnTuple::Clear`
+hunk of upstream commit 44f54c5 ("Make composite Swap and Tuple Clear
+alias-coherent"), applied verbatim. It clears each element in place. 0021
+depends on it; drop both together once the vendored library includes 44f54c5.
+Exercised by the all-empty and mixed Map rows in
+`tests/260_column_load_valid_nested_shapes.phpt`.
+
+Upstream: already on master (44f54c5), not in a release yet.
