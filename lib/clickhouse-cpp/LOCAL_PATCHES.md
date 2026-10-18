@@ -498,3 +498,37 @@ file/directory load failures with the path, clears the error queue before
 each CA load and after reporting, and corrects the comment. Exercised by
 `tests/233_ssl_ca_path_validation.phpt`.
 Upstream: pending PR (fix/ssl-ca-load-error on iliaal/clickhouse-cpp).
+## clickhouse/types/type_parser.cpp: unbalanced and deeply nested type names
+
+`TypeParser::Parse()` called `top()`/`pop()` on its element stack for every
+`)` and `,`, so a server- or caller-supplied type name such as `UInt8))`,
+`),`, or `)))` read from an empty `std::stack` (release SIGSEGV). The parser
+also had no nesting limit, while `CreateColumnFromAst()` and `TypeAst`
+destruction recurse once per level, so `Array(` repeated 100000 times (closed
+or not) exhausted the native stack.
+
+Patch: `0018-Reject-unbalanced-and-overly-deep-type-names.patch`. `Parse()`
+returns false for a `)` or `,` with no open parenthesis and for nesting deeper
+than `TypeParser::kMaxNestingDepth` (512; current servers reject column types
+nested deeper than 499 levels, and 512 levels keep the recursive paths to
+about 250 KiB of stack at -O2); `CreateColumnByType()` then returns null and the
+Data-block reader throws `unsupported column type`. Exercised by
+`tests/252_type_parser_unbalanced_close.phpt`,
+`tests/253_type_parser_depth_limit.phpt`, and
+`tests/254_external_type_parser_errors.phpt`.
+Upstream: pending PR (fix/type-parser-unbalanced-depth on iliaal/clickhouse-cpp).
+
+## clickhouse/columns/factory.cpp: LowCardinality subtree copies
+
+`CreateColumnFromAst()` bound the `LowCardinality` child as
+`const auto nested = GetASTChildElement(ast, 0)`, copying the whole subtree
+at every level. A type such as `LowCardinality(Nullable(` repeated 255 times
+around a wide `Tuple` held one copy per level during the recursion, so a
+server-supplied type of tens of kilobytes drove peak memory to hundreds of
+megabytes (outside `memory_limit`) before the type was rejected.
+
+Patch: `0031-Avoid-copying-the-type-AST-at-each-LowCardinality-level.patch`.
+Binds the child by `const auto&`; no other `GetASTChildElement()` result in
+`factory.cpp` is copied. Exercised by
+`tests/272_lowcardinality_nested_ast_memory.phpt`.
+Upstream: pending PR (fix/lowcardinality-ast-copy on iliaal/clickhouse-cpp).
