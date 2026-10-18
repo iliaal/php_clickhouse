@@ -296,19 +296,22 @@ by `tests/262_profile_info_noncanonical_bool.phpt` and
 `tests/263_profile_info_noncanonical_bool_select.phpt`.
 Upstream: pending PR (fix/profileinfo-bool on iliaal/clickhouse-cpp).
 
-## clickhouse/base/compressed.cpp: empty compressed frames
+## clickhouse/base/compressed.cpp: decompressed output not validated
 
 A compressed frame declaring an original size of 0 allocated `Buffer(0)`, whose
 `data()` is null, and passed that null destination to `LZ4_decompress_safe` /
 `ZSTD_decompress`. LZ4 applies offsets to the destination pointer before it
 checks the capacity, which is undefined behaviour. A well-formed empty frame
 also left the decompressed window empty, so `DoNext()` reported end of stream
-instead of reading the next frame.
+instead of reading the next frame. Separately, `Decompress()` ignored how many
+bytes the decompressor produced and exposed all `original` bytes, so a
+checksum-valid frame that decoded short returned a zero-filled tail as data.
 
-Patch: `0024-Skip-empty-compressed-frames-without-a-null-decompre.patch`.
-Decompresses an empty frame into a one-byte stack target with zero capacity, so
-a non-empty payload still fails with `CompressionError`, and `DoNext()` keeps
-reading frames until one yields data or the input ends. Applies on top of
-patch 0015 (upstream `f0f2927`). Exercised by
+Patch: `0024-Validate-what-compressed-frames-decompress-to.patch`. Decompresses
+an empty frame into a one-byte stack target with zero capacity, so a non-empty
+payload still fails with `CompressionError`; `DoNext()` keeps reading frames
+until one yields data or the input ends; and LZ4/ZSTD output whose length
+differs from the declared original size throws `CompressionError`. Applies on
+top of patch 0015 (upstream `f0f2927`). Exercised by
 `tests/264_compressed_empty_frame.phpt`.
 Upstream: pending PR (fix/lz4-empty-frame on iliaal/clickhouse-cpp).

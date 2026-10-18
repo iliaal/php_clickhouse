@@ -1,5 +1,5 @@
 --TEST--
-Compressed frames declaring an original size of 0 decode cleanly
+Compressed frames must decompress to exactly their declared original size
 --EXTENSIONS--
 clickhouse
 --SKIPIF--
@@ -104,12 +104,16 @@ $emptyWithPayload = "01006af409e7bea8626d9cbe04a233a8d506822000000000000000f0060
 $dataFrame = "ef9bb5a6cbee933fa46332429aaa790e822000000015000000f006010002ffffffff0001010263300555496e7438002a";
 $emptyLz4 = "12b83a602bd7de6df44915041a40db2b820a0000000000000000";
 $emptyZstd = "5f66888d3eecd757a15a751936df6f8690120000000000000028b52ffd2000010000";
+/* LZ4 frame declaring 21 bytes whose payload decodes to the first 20 bytes of
+ * the same block, leaving the UInt8 value missing. */
+$shortFrame = "ab3963dd96c3010ac80c99bf85c190d0821f00000015000000f005010002ffffffff0001010263300555496e743800";
 
 $cases = [
     "empty-with-payload" => $emptyWithPayload,
     "data" => "0100" . $dataFrame . "05",
     "empty-lz4-then-data" => "0100" . $emptyLz4 . $dataFrame . "05",
     "empty-zstd-then-data" => "0100" . $emptyZstd . $dataFrame . "05",
+    "short-output" => "0100" . $shortFrame . "05",
 ];
 foreach ($cases as $name => $reply) {
     $mock = startMock($mockFile, [$hello . $reply]);
@@ -130,4 +134,5 @@ empty-with-payload: ClickHouseException can't decompress LZ4-encoded data
 data: [{"c0":42}]
 empty-lz4-then-data: [{"c0":42}]
 empty-zstd-then-data: [{"c0":42}]
+short-output: ClickHouseException LZ4-encoded block decompressed to 20 bytes, expected 21
 done

@@ -105,16 +105,21 @@ bool CompressedInput::Decompress() {
 
     // Buffer(0).data() is null, and the decompressors do pointer arithmetic on
     // the destination even when its capacity is zero.
-    char empty_output = 0;
+    char empty_output  = 0;
     char* const output = original > 0 ? reinterpret_cast<char*>(data_.data()) : &empty_output;
 
     switch (method) {
     case static_cast<uint8_t>(CompressionMethodByte::LZ4): {
-        if (LZ4_decompress_safe((const char*)tmp.data() + HEADER_SIZE, output, static_cast<int>(compressed - HEADER_SIZE), original) < 0) {
+        const int res =
+            LZ4_decompress_safe((const char*)tmp.data() + HEADER_SIZE, output, static_cast<int>(compressed - HEADER_SIZE), original);
+        if (res < 0) {
             throw CompressionError("can't decompress LZ4-encoded data");
-        } else {
-            mem_.Reset(data_.data(), original);
         }
+        if (static_cast<uint32_t>(res) != original) {
+            throw CompressionError("LZ4-encoded block decompressed to " + std::to_string(res) + " bytes, expected " +
+                                   std::to_string(original));
+        }
+        mem_.Reset(data_.data(), original);
         return true;
     }
 
@@ -123,9 +128,12 @@ bool CompressedInput::Decompress() {
 
         if (ZSTD_isError(res)) {
             throw CompressionError("can't decompress ZSTD-encoded data, ZSTD error: " + std::string(ZSTD_getErrorName(res)));
-        } else {
-            mem_.Reset(data_.data(), original);
         }
+        if (res != original) {
+            throw CompressionError("ZSTD-encoded block decompressed to " + std::to_string(res) + " bytes, expected " +
+                                   std::to_string(original));
+        }
+        mem_.Reset(data_.data(), original);
         return true;
     }
 
