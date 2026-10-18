@@ -1,0 +1,250 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilia Alshanetsky <ilia@ilia.ws>
+Date: Sun, 18 Oct 2026 00:00:00 -0400
+Subject: [PATCH 30/30] Grow column bodies and protocol strings as data arrives
+
+ColumnVector, ColumnEnum and ColumnFixedString resized to the declared row
+count before reading, ColumnString reserved the declared row count and
+allocated each declared string length up front, and WireFormat::ReadString
+zero-filled up to 16 MiB per declared length, so a packet of about 40 bytes
+could commit gigabytes outside PHP memory_limit. Read these bodies with
+WireFormat::ReadPODArray, which starts at 1 MiB, reserves eightfold ahead
+and zero-fills only what it is about to read; ColumnString caps its initial
+row reservation and reads strings above 1 MiB into a dedicated block grown
+the same way. A single 80 MB column body copies 73 MiB while growing (about
++60 ms CPU); default 64K-row blocks cost nothing extra. LowCardinality now
+rejects a short index column instead of ignoring the load result.
+---
+ clickhouse/base/wire_format.h         | 44 ++++++++++++++++++++--
+ clickhouse/columns/enum.cpp           |  3 +-
+ clickhouse/columns/lowcardinality.cpp |  2 +-
+ clickhouse/columns/numeric.cpp        |  4 +-
+ clickhouse/columns/string.cpp         | 53 ++++++++++++++++++++++-----
+ 5 files changed, 88 insertions(+), 18 deletions(-)
+
+diff --git a/clickhouse/base/wire_format.h b/clickhouse/base/wire_format.h
+index be58d7a..1648dc9 100644
+--- a/clickhouse/base/wire_format.h
++++ b/clickhouse/base/wire_format.h
+@@ -1,7 +1,8 @@
+ #pragma once
+ 
+-#include <string>
++#include <algorithm>
+ #include <cstdint>
++#include <string>
+ 
+ namespace clickhouse {
+ 
+@@ -15,6 +16,20 @@ public:
+     static bool ReadString(InputStream& input, std::string* value);
+     static bool SkipString(InputStream& input);
+     static bool ReadBytes(InputStream& input, void* buf, size_t len);
++
++    /// Replaces the contents of `container` with `count` elements read from `input`.
++    /// The container grows with the data instead of being sized to `count` up front, so
++    /// a count declared by the peer is never allocated before its bytes are read.
++    template <typename Container>
++    static bool ReadPODArray(InputStream& input, Container* container, size_t count);
++
++    /// Capacity to grow to once `loaded` of `count` elements are held: eight times `loaded`
++    /// and at least `first`, capped at `count`, without overflowing `Size`.
++    template <typename Size>
++    static constexpr Size NextReadCapacity(Size loaded, Size count, Size first) {
++        return loaded > count / 8 ? count : std::min(count, std::max(first, static_cast<Size>(loaded * 8)));
++    }
++
+     static bool ReadUInt64(InputStream& input, uint64_t* value);
+     static bool ReadVarint64(InputStream& output, uint64_t* value);
+ 
+@@ -43,8 +58,7 @@ inline bool WireFormat::ReadString(InputStream& input, std::string* value) {
+         if (len > 0x00FFFFFFULL) {
+             return false;
+         }
+-        value->resize((size_t)len);
+-        return ReadAll(input, value->data(), (size_t)len);
++        return ReadPODArray(input, value, (size_t)len);
+     }
+ 
+     return false;
+@@ -54,6 +68,30 @@ inline bool WireFormat::ReadBytes(InputStream& input, void* buf, size_t len) {
+     return ReadAll(input, buf, len);
+ }
+ 
++template <typename Container>
++inline bool WireFormat::ReadPODArray(InputStream& input, Container* container, size_t count) {
++    using T                      = typename Container::value_type;
++    constexpr size_t first_chunk = std::max<size_t>(1, (1 << 20) / sizeof(T));
++
++    container->clear();
++    size_t loaded = 0;
++    while (loaded < count) {
++        // Reserving far ahead keeps reallocation copies small; resizing only by what is
++        // about to be read keeps the zero-filled part proportional to the data received.
++        if (container->capacity() <= loaded) {
++            container->reserve(NextReadCapacity(loaded, count, first_chunk));
++        }
++        const size_t chunk = std::min({count - loaded, container->capacity() - loaded, std::max(loaded, first_chunk)});
++        container->resize(loaded + chunk);
++        if (!ReadAll(input, container->data() + loaded, chunk * sizeof(T))) {
++            return false;
++        }
++        loaded += chunk;
++    }
++
++    return true;
++}
++
+ inline bool WireFormat::ReadUInt64(InputStream& input, uint64_t* value) {
+     return ReadVarint64(input, value);
+ }
+diff --git a/clickhouse/columns/enum.cpp b/clickhouse/columns/enum.cpp
+index 43fab89..bccf3b2 100644
+--- a/clickhouse/columns/enum.cpp
++++ b/clickhouse/columns/enum.cpp
+@@ -82,8 +82,7 @@ void ColumnEnum<T>::Append(ColumnRef column) {
+ 
+ template <typename T>
+ bool ColumnEnum<T>::LoadBody(InputStream* input, size_t rows) {
+-    data_.resize(rows);
+-    return WireFormat::ReadBytes(*input, data_.data(), data_.size() * sizeof(T));
++    return WireFormat::ReadPODArray(*input, &data_, rows);
+ }
+ 
+ template <typename T>
+diff --git a/clickhouse/columns/lowcardinality.cpp b/clickhouse/columns/lowcardinality.cpp
+index 0722ea8..664fc50 100644
+--- a/clickhouse/columns/lowcardinality.cpp
++++ b/clickhouse/columns/lowcardinality.cpp
+@@ -340,7 +340,7 @@ auto Load(ColumnRef new_dictionary_column, InputStream& input, size_t rows) {
+     if (number_of_rows != rows)
+         throw AssertionError("LowCardinality column must be read in full.");
+ 
+-    new_index_column->LoadBody(&input, number_of_rows);
++    if (!new_index_column->LoadBody(&input, number_of_rows)) throw ProtocolError("Failed to read index column.");
+ 
+     if (auto nullable = new_dictionary_column->As<ColumnNullable>()) {
+         nullable->Append(true);
+diff --git a/clickhouse/columns/numeric.cpp b/clickhouse/columns/numeric.cpp
+index 4819f37..4a52622 100644
+--- a/clickhouse/columns/numeric.cpp
++++ b/clickhouse/columns/numeric.cpp
+@@ -72,9 +72,7 @@ void ColumnVector<T>::Append(ColumnRef column) {
+ 
+ template <typename T>
+ bool ColumnVector<T>::LoadBody(InputStream* input, size_t rows) {
+-    data_.resize(rows);
+-
+-    return WireFormat::ReadBytes(*input, data_.data(), data_.size() * sizeof(T));
++    return WireFormat::ReadPODArray(*input, &data_, rows);
+ }
+ 
+ template <typename T>
+diff --git a/clickhouse/columns/string.cpp b/clickhouse/columns/string.cpp
+index de79ddf..b56ffa0 100644
+--- a/clickhouse/columns/string.cpp
++++ b/clickhouse/columns/string.cpp
+@@ -7,6 +7,18 @@ namespace {
+ 
+ constexpr size_t DEFAULT_BLOCK_SIZE = 4096;
+ 
++// Upper bound on what LoadBody allocates ahead of the data, since row counts and
++// string lengths come from the peer.
++constexpr size_t MAX_PREALLOCATED_BYTES = 1 << 20;
++
++// Grows `items` eightfold rather than twofold so that loading many rows copies little.
++void AppendItem(std::vector<std::string_view>& items, size_t rows, std::string_view item) {
++    if (items.size() == items.capacity()) {
++        items.reserve(clickhouse::WireFormat::NextReadCapacity(items.size(), rows, size_t(1)));
++    }
++    items.emplace_back(item);
++}
++
+ template <typename Container>
+ size_t ComputeTotalSize(const Container & strings, size_t begin = 0, size_t len = -1) {
+     size_t result = 0;
+@@ -83,12 +95,7 @@ bool ColumnFixedString::LoadBody(InputStream * input, size_t rows) {
+         throw ProtocolError("FixedString(" + std::to_string(string_size_) + ") column with " + std::to_string(rows) +
+                             " rows exceeds the addressable size");
+     }
+-    data_.resize(bytes);
+-    if (!WireFormat::ReadBytes(*input, &data_[0], data_.size())) {
+-        return false;
+-    }
+-
+-    return true;
++    return WireFormat::ReadPODArray(*input, &data_, bytes);
+ }
+ 
+ void ColumnFixedString::SaveBody(OutputStream* output) {
+@@ -135,6 +142,16 @@ struct ColumnString::Block
+         data_(new CharT[capacity])
+     {}
+ 
++    // Moves the data, so it must not be called once a string_view points into the block.
++    void Grow(size_t new_capacity) {
++        std::unique_ptr<CharT[]> new_data(new CharT[new_capacity]);
++        if (size > 0) {
++            memcpy(new_data.get(), data_.get(), size);
++        }
++        data_    = std::move(new_data);
++        capacity = new_capacity;
++    }
++
+     inline auto GetAvailable() const {
+         return capacity - size;
+     }
+@@ -164,7 +181,7 @@ struct ColumnString::Block
+     }
+ 
+     size_t size;
+-    const size_t capacity;
++    size_t capacity;
+     std::unique_ptr<CharT[]> data_;
+ };
+ 
+@@ -275,7 +292,7 @@ bool ColumnString::LoadBody(InputStream* input, size_t rows) {
+     decltype(items_) new_items;
+     decltype(blocks_) new_blocks;
+ 
+-    new_items.reserve(rows);
++    new_items.reserve(std::min(rows, MAX_PREALLOCATED_BYTES / sizeof(std::string_view)));
+ 
+     // Suboptimzal if the first row string is >DEFAULT_BLOCK_SIZE, but that must be a very rare case.
+     Block * block = &new_blocks.emplace_back(DEFAULT_BLOCK_SIZE);
+@@ -285,13 +302,31 @@ bool ColumnString::LoadBody(InputStream* input, size_t rows) {
+         if (!WireFormat::ReadUInt64(*input, &len))
+             return false;
+ 
++        if (len > MAX_PREALLOCATED_BYTES) {
++            if (len > SIZE_MAX) return false;
++
++            // A block of its own, grown as the bytes arrive.
++            block = &new_blocks.emplace_back(MAX_PREALLOCATED_BYTES);
++            while (block->size < len) {
++                if (block->GetAvailable() == 0)
++                    block->Grow(WireFormat::NextReadCapacity(block->capacity, static_cast<size_t>(len), size_t(0)));
++
++                const size_t chunk = std::min<size_t>(static_cast<size_t>(len) - block->size, block->GetAvailable());
++                if (!WireFormat::ReadBytes(*input, block->GetCurrentWritePos(), chunk)) return false;
++                block->size += chunk;
++            }
++
++            AppendItem(new_items, rows, std::string_view(block->data_.get(), block->size));
++            continue;
++        }
++
+         if (len > block->GetAvailable())
+             block = &new_blocks.emplace_back(std::max<size_t>(DEFAULT_BLOCK_SIZE, len));
+ 
+         if (!WireFormat::ReadBytes(*input, block->GetCurrentWritePos(), len))
+             return false;
+ 
+-        new_items.emplace_back(block->ConsumeTailAsStringViewUnsafe(len));
++        AppendItem(new_items, rows, block->ConsumeTailAsStringViewUnsafe(len));
+     }
+ 
+     items_.swap(new_items);
+-- 
+2.55.0
+
