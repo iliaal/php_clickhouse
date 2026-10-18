@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilia Alshanetsky <ilia@ilia.ws>
+Date: Sun, 18 Oct 2026 00:00:00 -0400
+Subject: [PATCH] Reject FixedString loads whose byte size overflows
+
+ColumnFixedString::LoadBody sized its buffer as string_size_ * rows with no
+overflow check, so a server-declared FixedString(4611686018427387905) with 4
+rows wrapped to a 4-byte buffer: Size() then reported 0 rows while At()
+returned views of the full declared width past the end of the buffer.
+ColumnTuple::LoadBody and ColumnNullable::LoadBody did not notice, because
+they never compare the loaded child sizes with the requested row count and
+ColumnTuple::Size() reports only its first element.
+
+LoadBody now throws a ProtocolError when the multiplication overflows, and
+Tuple and Nullable throw when an element or the nested column holds a
+different number of rows than was loaded.
+---
+ clickhouse/columns/nullable.cpp | 3 +++
+ clickhouse/columns/string.cpp   | 7 ++++++-
+ clickhouse/columns/tuple.cpp    | 4 ++++
+ 3 files changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/clickhouse/columns/nullable.cpp b/clickhouse/columns/nullable.cpp
+index 23940c1..f65fd4f 100644
+--- a/clickhouse/columns/nullable.cpp
++++ b/clickhouse/columns/nullable.cpp
+@@ -66,6 +66,9 @@ bool ColumnNullable::LoadBody(InputStream* input, size_t rows) {
+     if (!nested_->LoadBody(input, rows)) {
+         return false;
+     }
++    if (nested_->Size() != rows) {
++        throw ProtocolError("Nullable nested column loaded " + std::to_string(nested_->Size()) + " rows, expected " + std::to_string(rows));
++    }
+     return true;
+ }
+ 
+diff --git a/clickhouse/columns/string.cpp b/clickhouse/columns/string.cpp
+index cb1b593..ddcb3b1 100644
+--- a/clickhouse/columns/string.cpp
++++ b/clickhouse/columns/string.cpp
+@@ -77,7 +77,12 @@ void ColumnFixedString::Append(ColumnRef column) {
+ }
+ 
+ bool ColumnFixedString::LoadBody(InputStream * input, size_t rows) {
+-    data_.resize(string_size_ * rows);
++    const size_t bytes = string_size_ * rows;
++    if (string_size_ != 0 && bytes / string_size_ != rows) {
++        throw ProtocolError("FixedString(" + std::to_string(string_size_) + ") column with " + std::to_string(rows) +
++                            " rows exceeds the addressable size");
++    }
++    data_.resize(bytes);
+     if (!WireFormat::ReadBytes(*input, &data_[0], data_.size())) {
+         return false;
+     }
+diff --git a/clickhouse/columns/tuple.cpp b/clickhouse/columns/tuple.cpp
+index 72d206b..75f01ce 100644
+--- a/clickhouse/columns/tuple.cpp
++++ b/clickhouse/columns/tuple.cpp
+@@ -120,6 +120,10 @@ bool ColumnTuple::LoadBody(InputStream* input, size_t rows) {
+         if (!(*ci)->LoadBody(input, rows)) {
+             return false;
+         }
++        if ((*ci)->Size() != rows) {
++            throw ProtocolError("Tuple element " + std::to_string(ci - columns_.begin()) + " loaded " + std::to_string((*ci)->Size()) +
++                                " rows, expected " + std::to_string(rows));
++        }
+     }
+ 
+     return true;
+-- 
+2.34.1

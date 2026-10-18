@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilia Alshanetsky <ilia@ilia.ws>
+Date: Sun, 18 Oct 2026 00:00:00 -0400
+Subject: [PATCH] Validate Array offsets when loading from the wire
+
+The ColumnArray constructor rejects decreasing offsets and a nested column
+whose size differs from the last offset, but ColumnArray::LoadBody checked
+neither. With decreasing offsets from the server, GetSize() and GetAsColumn()
+computed offsets[n] - offsets[n - 1] with unsigned wraparound; for
+Array(Nothing), whose Slice() keeps any length, a row then reported a length
+near 2^64.
+
+LoadBody now throws a ProtocolError on a decreasing offset and when the
+nested column does not hold exactly as many values as the last offset.
+---
+ clickhouse/columns/array.cpp | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/clickhouse/columns/array.cpp b/clickhouse/columns/array.cpp
+index 77f8f7f..7724488 100644
+--- a/clickhouse/columns/array.cpp
++++ b/clickhouse/columns/array.cpp
+@@ -106,13 +106,25 @@ bool ColumnArray::LoadBody(InputStream* input, size_t rows) {
+     if (!offsets_->LoadBody(input, rows)) {
+         return false;
+     }
+-    const auto nested_rows = (*offsets_)[rows - 1];
++    std::uint64_t nested_rows = 0;
++    for (size_t i = 0; i < rows; ++i) {
++        const auto offset = (*offsets_)[i];
++        if (offset < nested_rows) {
++            throw ProtocolError("Array offsets must be non-decreasing: offset " + std::to_string(offset) + " at row " + std::to_string(i) +
++                                " follows " + std::to_string(nested_rows));
++        }
++        nested_rows = offset;
++    }
+     if (nested_rows == 0) {
+         return true;
+     }
+     if (!data_->LoadBody(input, nested_rows)) {
+         return false;
+     }
++    if (data_->Size() != nested_rows) {
++        throw ProtocolError("Array nested column loaded " + std::to_string(data_->Size()) + " values, offsets expect " +
++                            std::to_string(nested_rows));
++    }
+     return true;
+ }
+ 
+-- 
+2.34.1
