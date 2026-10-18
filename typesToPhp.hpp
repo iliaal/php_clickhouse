@@ -58,6 +58,10 @@ struct ConvertDepthScopeGuard {
 
 clickhouse::ColumnRef createColumn(clickhouse::TypeRef type);
 
+/* Reject caller-supplied type names whose length or nesting would exhaust the
+ * library's recursive type factory. */
+void validateCallerTypeName(const std::string &type_name, const std::string &context);
+
 clickhouse::ColumnRef insertColumn(clickhouse::TypeRef type, zval *value_zval);
 
 void convertToZval(zval *arr, const clickhouse::ColumnRef& columnRef, int row,

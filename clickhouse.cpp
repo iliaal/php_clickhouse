@@ -2508,6 +2508,8 @@ static Block buildExternalTableBlock(zval *entry, std::string &name_out)
             validateIdentifier(ZSTR_VAL(k), ZSTR_LEN(k),
                                "external column name", /*allow_dot=*/false);
             std::string type_name(Z_STRVAL_P(type_zv), Z_STRLEN_P(type_zv));
+            validateCallerTypeName(type_name, "external table '" + name_out +
+                "' column '" + std::string(ZSTR_VAL(k), ZSTR_LEN(k)) + "'");
             ColumnRef templ = CreateColumnByType(type_name);
             if (!templ) {
                 throw std::runtime_error("external table '" + name_out +

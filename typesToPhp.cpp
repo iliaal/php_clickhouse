@@ -173,6 +173,78 @@ ConvertDepthScopeGuard::ConvertDepthScopeGuard() : saved_depth(convert_depth) {
 ConvertDepthScopeGuard::~ConvertDepthScopeGuard() {
     convert_depth = saved_depth;
 }
+
+/* The library type factory recurses once per parenthesis level. A
+ * parameterized leaf such as LowCardinality(Nullable(FixedString(N))) adds at
+ * most two levels beyond MAX_CONVERT_DEPTH, so twice that limit admits every
+ * convertible type and stays far below ClickHouse's max_parser_depth (1000).
+ * The length cap is four times ClickHouse's default max_query_size. */
+static const size_t MAX_CALLER_TYPE_DEPTH = 2 * MAX_CONVERT_DEPTH;
+static const size_t MAX_CALLER_TYPE_LENGTH = 1024u * 1024u;
+
+void validateCallerTypeName(const std::string &type_name, const std::string &context)
+{
+    if (type_name.size() > MAX_CALLER_TYPE_LENGTH) {
+        throw std::runtime_error(
+            context + " type name exceeds " + std::to_string(MAX_CALLER_TYPE_LENGTH) + " bytes");
+    }
+    /* Quote handling mirrors clickhouse::TypeParser::NextToken so parentheses
+     * inside enum labels and quoted identifiers are not counted. */
+    const char *cur = type_name.data();
+    const char *end = cur + type_name.size();
+    size_t depth = 0;
+    while (cur < end) {
+        const char c = *cur;
+        if (c == '(') {
+            if (++depth > MAX_CALLER_TYPE_DEPTH) {
+                throw std::runtime_error(
+                    context + " type name nesting exceeds " +
+                    std::to_string(MAX_CALLER_TYPE_DEPTH) + " levels");
+            }
+            ++cur;
+        } else if (c == ')') {
+            if (depth > 0) {
+                --depth;
+            }
+            ++cur;
+        } else if (c == '\'') {
+            /* The library never matches a closing quote in the final byte;
+             * an unmatched quote swallows the rest of the input. */
+            const char *q = cur + 1;
+            while (q < end - 1 && *q != '\'') {
+                ++q;
+            }
+            if (q >= end - 1) {
+                return;
+            }
+            cur = q + 1;
+        } else if (c == '"' || c == '`') {
+            const char *q = cur + 1;
+            bool closed = false;
+            while (q < end) {
+                if (*q == '\\' && q + 1 < end && q[1] == c) {
+                    q += 2;
+                } else if (*q == c) {
+                    if (q + 1 < end && q[1] == c) {
+                        q += 2;
+                    } else {
+                        closed = true;
+                        break;
+                    }
+                } else {
+                    ++q;
+                }
+            }
+            if (!closed) {
+                return;
+            }
+            cur = q + 1;
+        } else {
+            ++cur;
+        }
+    }
+}
+
 static int64_t strict_zval_i64(zval *z, const char *type_label)
 {
     ZVAL_DEREF(z);
