@@ -268,3 +268,40 @@ failures now throw `ProtocolError`; exception callbacks and throws are gated on
 complete decoding, including handshake exceptions; and `RetryGuard()` honors
 `send_retries` with an immediate failure at zero retries. Exercised by
 `tests/217_packet_decode_and_ping_retry.phpt`.
+
+## clickhouse/types/type_parser.cpp, columns/factory.cpp, columns/string.cpp: zero, oversized, and malformed FixedString sizes
+
+A server-supplied `FixedString(0)` type built a `ColumnFixedString` with
+`string_size_ == 0`; `Size()` divides by it, so the zero-row header block
+already raised SIGFPE in `Block::AppendColumn()`. A malformed width such as
+`FixedString(-)` made `std::stol` throw out of `TypeParser::Parse()`, and
+`ParseTypeName()`, which inserted the cache entry before parsing and erased it
+only when `Parse()` returned false, kept the half-built AST (width 0), so the
+next identical type crashed the same way.
+
+Patch: `0016-Reject-zero-and-malformed-FixedString-sizes.patch`. Number tokens
+parse with `std::from_chars` and fail the parse when invalid or out of range,
+so the existing erase-on-failure path runs; `ParseTypeName()` also parses into
+a local and caches only on success, so a parser exception cannot leave an
+entry behind. The factory rejects `FixedString` sizes outside 1..0xFFFFFF (the
+server's `DataTypeFixedString` `MAX_FIXEDSTRING_SIZE`) with `ValidationError`,
+and the `ColumnFixedString` constructor rejects size 0. Exercised by
+`tests/249_fixedstring_zero_width_rejected.phpt` and
+`tests/250_fixedstring_malformed_width_not_cached.phpt`.
+Upstream: pending PR (fix/fixedstring-zero-width on iliaal/clickhouse-cpp)
+
+## clickhouse/types/type_parser.{h,cpp}: bounded parsed type AST cache
+
+`ParseTypeName()` kept every distinct type name it parsed in a process-wide
+`std::map` with no eviction, so a peer could grow client memory by sending
+many distinct type names, one zero-row block each.
+
+Patch: `0017-Bound-the-parsed-type-AST-cache.patch` (applies on top of 0016).
+The cache holds at most `kTypeAstCacheMaxEntries` (4096) entries and
+`kTypeAstCacheMaxBytes` (256 KiB) of type-name text; an insert that would
+exceed either limit clears the cache first (the old map is destroyed after the
+mutex is released), and a longer name is parsed on every call without being
+cached. `ParseTypeName()` returns
+`std::shared_ptr<const TypeAst>` so an AST still in use survives a clear; the
+binding only reaches it through `CreateColumnByType()`.
+Upstream: pending PR (fix/type-ast-cache-bound on iliaal/clickhouse-cpp)
