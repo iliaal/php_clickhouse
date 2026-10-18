@@ -405,3 +405,49 @@ Exercised by the all-empty and mixed Map rows in
 `tests/260_column_load_valid_nested_shapes.phpt`.
 
 Upstream: already on master (44f54c5), not in a release yet.
+## clickhouse/client.{h,cpp}: `ServerInfo` fields a Hello omits stay uninitialized
+
+`ServerInfo` had no default member initializers, and `ReceiveHello()` fills
+`timezone`, `display_name`, and `version_patch` only when the server revision is
+new enough to carry them. A server announcing a revision below 54401 left
+`version_patch` holding indeterminate heap bytes, which `getServerInfo()`
+returned; a reconnect to an older server kept the previous server's values.
+
+Patch: `0022-Zero-ServerInfo-fields-a-Hello-does-not-carry.patch`. Default-initializes
+every numeric `ServerInfo` member and resets `server_info_` before parsing each
+Hello. Exercised by `tests/261_old_revision_hello_server_info.phpt`.
+Upstream: pending PR (fix/serverinfo-init on iliaal/clickhouse-cpp).
+
+## clickhouse/client.cpp: ProfileInfo flags read straight into `bool`
+
+`ReceivePacket()` read the `applied_limit` and `calculated_rows_before_limit`
+wire bytes directly into `bool` members of `Profile`. A byte other than 0 or 1
+produced a `bool` with an invalid object representation, and loading it (for
+example in the binding's profile callback) is undefined behaviour. The obsolete
+`has_nested` byte in `ReceiveException()` used the same pattern.
+
+Patch: `0023-Read-ProfileInfo-flags-as-bytes-not-bool.patch`. Reads each flag into
+a `uint8_t` and stores `byte != 0`; `has_nested` is read as `uint8_t`. Exercised
+by `tests/262_profile_info_noncanonical_bool.phpt` and
+`tests/263_profile_info_noncanonical_bool_select.phpt`.
+Upstream: pending PR (fix/profileinfo-bool on iliaal/clickhouse-cpp).
+
+## clickhouse/base/compressed.cpp: decompressed output not validated
+
+A compressed frame declaring an original size of 0 allocated `Buffer(0)`, whose
+`data()` is null, and passed that null destination to `LZ4_decompress_safe` /
+`ZSTD_decompress`. LZ4 applies offsets to the destination pointer before it
+checks the capacity, which is undefined behaviour. A well-formed empty frame
+also left the decompressed window empty, so `DoNext()` reported end of stream
+instead of reading the next frame. Separately, `Decompress()` ignored how many
+bytes the decompressor produced and exposed all `original` bytes, so a
+checksum-valid frame that decoded short returned a zero-filled tail as data.
+
+Patch: `0024-Validate-what-compressed-frames-decompress-to.patch`. Decompresses
+an empty frame into a one-byte stack target with zero capacity, so a non-empty
+payload still fails with `CompressionError`; `DoNext()` keeps reading frames
+until one yields data or the input ends; and LZ4/ZSTD output whose length
+differs from the declared original size throws `CompressionError`. Applies on
+top of patch 0015 (upstream `f0f2927`). Exercised by
+`tests/264_compressed_empty_frame.phpt`.
+Upstream: pending PR (fix/lz4-empty-frame on iliaal/clickhouse-cpp).
