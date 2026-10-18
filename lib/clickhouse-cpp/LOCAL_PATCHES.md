@@ -534,3 +534,54 @@ Binds the child by `const auto&`; no other `GetASTChildElement()` result in
 `tests/272_lowcardinality_nested_ast_memory.phpt`.
 Upstream: pending PR (fix/lowcardinality-ast-copy on iliaal/clickhouse-cpp).
 
+
+## clickhouse/base/compressed.cpp: declared compressed-frame sizes
+
+`CompressedInput::Decompress()` allocated `Buffer(compressed)` (capped at
+1 GiB) before reading the payload and zero-filled `Buffer(original)` (any
+`uint32_t`) before decompressing it. A malicious or compromised server with
+compression enabled could make a frame of a few bytes commit up to 1 GiB or
+4 GiB of native memory, outside PHP `memory_limit`.
+
+Patch: `0029-Bound-decompressed-sizes-and-read-compressed-frames-as-they-arrive.patch`,
+on top of 0015 and 0025. Rejects `original` above 1 GiB, the
+`DBMS_MAX_DECOMPRESSED_SIZE` ClickHouse itself applies
+(`src/Compression/CompressionInfo.h`); reads the compressed payload in steps
+starting at 4 MiB, reserving eightfold ahead and zero-filling only what is
+being read; and keeps the decompression buffer uninitialized and reused
+across the frames of one packet, so only the bytes the decoder writes are
+committed. 0025's check that a frame decompresses to exactly `original` bytes
+is what keeps stale bytes of the reused buffer from being returned. Exercised
+by `tests/268_declared_compressed_sizes.phpt` and
+`tests/269_large_results_load.phpt`.
+
+Upstream: pending PR (fix/compressed-frame-allocations on iliaal/clickhouse-cpp, stacked on fix/lz4-empty-frame)
+
+## clickhouse/columns/{numeric,enum,string,lowcardinality}.cpp, base/wire_format.h: declared column and string sizes
+
+`ColumnVector::LoadBody`, `ColumnEnum::LoadBody`, and
+`ColumnFixedString::LoadBody` resized to the server-declared row count (times
+the FixedString width) before reading, which zero-fills the whole declared
+size; `ColumnString::LoadBody` reserved the declared row count and allocated
+each declared string length up front; `WireFormat::ReadString` zero-filled up
+to 16 MiB per declared length (exception text, column names and types). A
+malicious or compromised server could commit gigabytes from a packet of about
+40 bytes, outside PHP `memory_limit`.
+
+Patch: `0030-Grow-column-bodies-and-protocol-strings-as-data-arrives.patch`,
+on top of 0020. Adds `WireFormat::ReadPODArray`, which starts at 1 MiB,
+reserves eightfold ahead (overflow-safe through `NextReadCapacity`), and
+zero-fills only what it is about to read, so committed memory tracks the
+bytes received. It is used for those column bodies and for `ReadString`.
+`ColumnString` caps its initial row reservation at 1 MiB of items, grows it
+eightfold, and reads strings above 1 MiB into a dedicated block grown the
+same way. The growth copies are not small in the worst case: an 80 MB single
+column body copies 73 MiB (1 + 8 + 64 MiB) while growing, about +60 ms of CPU
+on the release build; default 64K-row blocks fit the first step and cost
+nothing extra. `ColumnLowCardinality` now rejects a short index column
+instead of ignoring `LoadBody`'s result, which with incremental loading would
+deliver fewer rows than declared. Exercised by
+`tests/267_declared_column_sizes.phpt`, `tests/269_large_results_load.phpt`,
+and `tests/270_declared_protocol_strings.phpt`.
+
+Upstream: pending PR (fix/declared-size-allocations on iliaal/clickhouse-cpp)
