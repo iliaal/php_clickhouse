@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilia Alshanetsky <ilia@ilia.ws>
+Date: Sun, 18 Oct 2026 00:00:00 -0400
+Subject: [PATCH 32/32] Reject block sizes that do not fit in size_t
+
+Client::Impl::ReadBlock() reads the block's column and row counts as
+uint64_t and passes the row count to Column::Load(), which takes a
+size_t. On 32-bit, a server that declares 2^41 rows has the count
+truncated to 0, and the client returns an empty block instead of an
+error. Counts that do not survive the conversion now throw
+ProtocolError.
+---
+ clickhouse/client.cpp | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/clickhouse/client.cpp b/clickhouse/client.cpp
+--- a/clickhouse/client.cpp
++++ b/clickhouse/client.cpp
+@@ -924,6 +924,10 @@
+     if (!WireFormat::ReadUInt64(input, &num_rows)) {
+         return false;
+     }
++    if (static_cast<size_t>(num_columns) != num_columns || static_cast<size_t>(num_rows) != num_rows) {
++        throw ProtocolError("block declares " + std::to_string(num_columns) + " columns and " + std::to_string(num_rows) +
++                            " rows, more than size_t can hold");
++    }
+ 
+     CreateColumnByTypeSettings create_column_settings;
+     create_column_settings.low_cardinality_as_wrapped_column = options_.backward_compatibility_lowcardinality_as_wrapped_column;

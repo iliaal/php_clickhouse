@@ -610,3 +610,18 @@ Patch: `0031-Reject-LowCardinality-indexes-outside-the-dictionary.patch`.
 `LoadBody()` check that the upstream PR also adds is already applied here by
 patch 0030. Exercised by `tests/273_lowcardinality_index_bounds.phpt`.
 Upstream: https://github.com/ClickHouse/clickhouse-cpp/pull/593
+
+## clickhouse/client.cpp: block column and row counts narrowed to `size_t`
+
+`Client::Impl::ReadBlock()` reads a block's column and row counts as
+`uint64_t` and passes the row count to `Column::Load(InputStream*, size_t)`.
+On 32-bit builds, a server that declared 2^41 rows had the count truncated to
+0, so the client loaded nothing and returned an empty result instead of an
+error.
+
+Patch: `0032-Reject-block-sizes-that-do-not-fit-in-size_t.patch`.
+`ReadBlock()` throws `ProtocolError` when either count does not survive the
+conversion to `size_t`. 64-bit builds cannot reach the check. Exercised on
+32-bit by the `plain-rows` case of
+`tests/258_wire_fixedstring_width_overflow.phpt`.
+Upstream: https://github.com/ClickHouse/clickhouse-cpp/pull/591

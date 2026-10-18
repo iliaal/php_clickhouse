@@ -91,6 +91,9 @@ function lcBody($keyCount, $keys, $indexes) {
 
 $widthBound = "FixedString size must be between 1 and 16777215";
 $rowTotal = "exceeds the addressable size";
+/* A 32-bit size_t cannot hold 2^41 rows, so the block header is rejected
+ * before the FixedString row total is computed. */
+$rowCount = PHP_INT_SIZE === 4 ? "more than size_t can hold" : $rowTotal;
 
 $cases = [
     "tuple" => [
@@ -112,7 +115,7 @@ $cases = [
     /* One past the width bound: rejected before a 16 MiB dictionary item is built. */
     "lowcardinality-16m" => [response("LowCardinality(FixedString(16777216))", lcBody(1, "A", "\x00"), "\x01"), $widthBound],
     /* 8388608 * 2^41 wraps to 0 bytes within the width bound. */
-    "plain-rows" => [response("FixedString(8388608)", "", "\x80\x80\x80\x80\x80\x40"), $rowTotal],
+    "plain-rows" => [response("FixedString(8388608)", "", "\x80\x80\x80\x80\x80\x40"), $rowCount],
     "control-plain" => [response("FixedString(1)", "ABCD"), null],
     "control-tuple" => [response("Tuple(UInt8, FixedString(1))", "\x01\x02\x03\x04ABCD"), null],
     "control-nullable" => [response("Nullable(FixedString(1))", "\x00\x01\x00\x00ABCD"), null],
