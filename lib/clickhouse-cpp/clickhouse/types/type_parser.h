@@ -71,6 +71,10 @@ class TypeParser {
     };
 
 public:
+    // Matches the server's default max_parser_depth; the column factory and
+    // TypeAst destruction recurse once per level.
+    static constexpr size_t kMaxNestingDepth = 1000;
+
     explicit TypeParser(const StringView& name);
     ~TypeParser();
 

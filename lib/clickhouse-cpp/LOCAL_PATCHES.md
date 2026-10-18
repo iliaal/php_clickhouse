@@ -268,3 +268,22 @@ failures now throw `ProtocolError`; exception callbacks and throws are gated on
 complete decoding, including handshake exceptions; and `RetryGuard()` honors
 `send_retries` with an immediate failure at zero retries. Exercised by
 `tests/217_packet_decode_and_ping_retry.phpt`.
+
+## clickhouse/types/type_parser.cpp: unbalanced and deeply nested type names
+
+`TypeParser::Parse()` called `top()`/`pop()` on its element stack for every
+`)` and `,`, so a server- or caller-supplied type name such as `UInt8))`,
+`),`, or `)))` read from an empty `std::stack` (release SIGSEGV). The parser
+also had no nesting limit, while `CreateColumnFromAst()` and `TypeAst`
+destruction recurse once per level, so `Array(` repeated 100000 times (closed
+or not) exhausted the native stack.
+
+Patch: `0018-Reject-unbalanced-and-overly-deep-type-names.patch`. `Parse()`
+returns false for a `)` or `,` with no open parenthesis and for nesting deeper
+than `TypeParser::kMaxNestingDepth` (1000, the server's default
+`max_parser_depth`); `CreateColumnByType()` then returns null and the Data-block
+reader throws `unsupported column type`. Exercised by
+`tests/252_type_parser_unbalanced_close.phpt`,
+`tests/253_type_parser_depth_limit.phpt`, and
+`tests/254_external_type_parser_errors.phpt`.
+Upstream: pending PR (fix/type-parser-unbalanced-depth on iliaal/clickhouse-cpp).
