@@ -1,0 +1,104 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilia Alshanetsky <ilia@ilia.ws>
+Date: Sun, 18 Oct 2026 00:00:00 -0400
+Subject: [PATCH 16/17] Reject zero, oversized, and malformed FixedString sizes
+
+A server-supplied FixedString(0) creates a ColumnFixedString with a
+zero width, and ColumnFixedString::Size() divides by it as soon as
+Block::AppendColumn() sees the zero-row header block.
+
+A malformed width such as FixedString(-) makes std::stol throw out of
+TypeParser::Parse(). ParseTypeName() inserts the cache entry before
+parsing and erases it only when Parse() returns false, so the throw
+leaves a half-built AST cached and the next query with the same type
+hits the same division.
+
+Number tokens now parse with std::from_chars, and invalid or
+out-of-range values fail the parse instead of throwing, which lets the
+existing erase path run. ParseTypeName() also parses into a local and
+caches only on success, so an exception from the parser can no longer
+leave an entry behind.
+
+The factory rejects sizes outside 1..0xFFFFFF, the server's own
+DataTypeFixedString limit (MAX_FIXEDSTRING_SIZE), and the
+ColumnFixedString constructor rejects 0. The server never accepts
+FixedString(0), so the tests that built one now use FixedString(1).
+---
+ clickhouse/columns/factory.cpp   | 11 +++++++++--
+ clickhouse/columns/string.cpp    | 1 +
+ clickhouse/types/type_parser.cpp | 17 ++++++++++-------
+ 3 files changed, 20 insertions(+), 9 deletions(-)
+
+--- a/clickhouse/columns/factory.cpp
++++ b/clickhouse/columns/factory.cpp
+@@ -91,8 +91,15 @@
+ 
+     case Type::String:
+         return std::make_shared<ColumnString>();
+-    case Type::FixedString:
+-        return std::make_shared<ColumnFixedString>(GetASTChildElement(ast, 0).value);
++    case Type::FixedString: {
++        // Same bounds as the server's DataTypeFixedString (MAX_FIXEDSTRING_SIZE).
++        constexpr int64_t kMaxFixedStringSize = 0xFFFFFF;
++        const auto size                       = GetASTChildElement(ast, 0).value;
++        if (size <= 0 || size > kMaxFixedStringSize)
++            throw ValidationError("FixedString size must be between 1 and " + std::to_string(kMaxFixedStringSize) + ", got " +
++                                  std::to_string(size));
++        return std::make_shared<ColumnFixedString>(static_cast<size_t>(size));
++    }
+ 
+     case Type::DateTime:
+         if (ast.elements.empty()) {
+--- a/clickhouse/columns/string.cpp
++++ b/clickhouse/columns/string.cpp
+@@ -28,6 +28,7 @@
+     : Column(Type::CreateString(n))
+     , string_size_(n)
+ {
++    if (n == 0) throw ValidationError("FixedString size must be positive");
+ }
+ 
+ void ColumnFixedString::Reserve(size_t new_cap) {
+--- a/clickhouse/types/type_parser.cpp
++++ b/clickhouse/types/type_parser.cpp
+@@ -15,6 +15,7 @@
+ #include <strings.h>
+ #endif
+ 
++#include <charconv>
+ 
+ namespace clickhouse {
+ 
+@@ -185,10 +186,13 @@
+                 type_->name = token.value.to_string();
+                 type_->code = GetTypeCode(type_->name);
+                 break;
+-            case Token::Number:
++            case Token::Number: {
+                 type_->meta = TypeAst::Number;
+-                type_->value = std::stol(token.value.to_string());
++                const char* last     = token.value.data() + token.value.size();
++                const auto [ptr, ec] = std::from_chars(token.value.data(), last, type_->value);
++                if (ec != std::errc() || ptr != last) return false;
+                 break;
++            }
+             case Token::String:
+                 type_->meta = TypeAst::String;
+                 type_->value_string = std::string(token.value);
+@@ -346,12 +350,11 @@
+         return &it->second;
+     }
+ 
+-    auto& ast = ast_cache[type_name];
+-    if (TypeParser(type_name).Parse(&ast)) {
+-        return &ast;
++    TypeAst ast;
++    if (!TypeParser(type_name).Parse(&ast)) {
++        return nullptr;
+     }
+-    ast_cache.erase(type_name);
+-    return nullptr;
++    return &ast_cache.emplace(type_name, std::move(ast)).first->second;
+ }
+ 
+ }
