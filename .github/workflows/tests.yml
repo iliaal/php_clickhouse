@@ -214,7 +214,10 @@ jobs:
           set -o pipefail
           php run-tests.php -j1 --show-diff -g FAIL,BORK,LEAK,XLEAK,SKIP tests/ \
             | tee "$RUNNER_TEMP/phpt.out"
+          # 232 needs #[\SensitiveParameter], which PHP 8.2 introduced.
+          version_skips=$(php -r 'echo PHP_VERSION_ID < 80200 ? "tests/232_construct_sensitive_parameter.phpt" : "";')
           scripts/assert-phpt-summary.sh "$RUNNER_TEMP/phpt.out" \
+            $version_skips \
             tests/027.phpt tests/064.phpt tests/070.phpt tests/188.phpt \
             tests/207_reentrant_ssl_ca_files.phpt \
             tests/209_windows_x86_config_bounds.phpt \
@@ -406,7 +409,10 @@ jobs:
           set -o pipefail
           /tmp/php-zts/bin/php run-tests.php -j1 --show-diff -g FAIL,BORK,LEAK,XLEAK,SKIP tests/ \
             | tee "$RUNNER_TEMP/phpt-zts.out"
+          # 232 needs #[\SensitiveParameter], which PHP 8.2 introduced.
+          version_skips=$(/tmp/php-zts/bin/php -r 'echo PHP_VERSION_ID < 80200 ? "tests/232_construct_sensitive_parameter.phpt" : "";')
           scripts/assert-phpt-summary.sh "$RUNNER_TEMP/phpt-zts.out" \
+            $version_skips \
             tests/027.phpt tests/064.phpt tests/070.phpt tests/188.phpt \
             tests/207_reentrant_ssl_ca_files.phpt \
             tests/209_windows_x86_config_bounds.phpt \
@@ -595,7 +601,10 @@ jobs:
           set -o pipefail
           /tmp/php-asan/bin/php run-tests.php -j1 --show-diff --asan -g FAIL,BORK,LEAK,XLEAK,SKIP tests/ \
             | tee "$RUNNER_TEMP/phpt-asan.out"
+          # 232 needs #[\SensitiveParameter], which PHP 8.2 introduced.
+          version_skips=$(/tmp/php-asan/bin/php -r 'echo PHP_VERSION_ID < 80200 ? "tests/232_construct_sensitive_parameter.phpt" : "";')
           scripts/assert-phpt-summary.sh "$RUNNER_TEMP/phpt-asan.out" \
+            $version_skips \
             tests/027.phpt tests/064.phpt tests/070.phpt tests/188.phpt \
             tests/207_reentrant_ssl_ca_files.phpt \
             tests/209_windows_x86_config_bounds.phpt \
