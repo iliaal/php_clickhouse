@@ -771,15 +771,20 @@ DecodedPacket Client::Impl::ReceivePacket(uint64_t* server_packet) {
 
     case ServerCodes::ProfileInfo: {
         Profile ret{};
+        uint8_t applied_limit = 0;
+        uint8_t calculated_rows_before_limit = 0;
 
         if (!WireFormat::ReadUInt64(*input_, &ret.rows) ||
             !WireFormat::ReadUInt64(*input_, &ret.blocks) ||
             !WireFormat::ReadUInt64(*input_, &ret.bytes) ||
-            !WireFormat::ReadFixed(*input_, &ret.applied_limit) ||
+            !WireFormat::ReadFixed(*input_, &applied_limit) ||
             !WireFormat::ReadUInt64(*input_, &ret.rows_before_limit) ||
-            !WireFormat::ReadFixed(*input_, &ret.calculated_rows_before_limit)) {
+            !WireFormat::ReadFixed(*input_, &calculated_rows_before_limit)) {
             throw ProtocolError{"can't read profile info packet from input stream"};
         }
+
+        ret.applied_limit = applied_limit != 0;
+        ret.calculated_rows_before_limit = calculated_rows_before_limit != 0;
 
         if (events_) {
             events_->OnProfile(ret);
@@ -988,7 +993,7 @@ bool Client::Impl::ReceiveData(Block & block) {
 
 bool Client::Impl::ReceiveException(bool rethrow, ServerError * error) {
     std::shared_ptr<Exception> e(new Exception);
-    bool has_nested = false; // obsolete: https://github.com/ClickHouse/ClickHouse/blob/ef11941cf5a/src/IO/ReadHelpers.cpp#L2017
+    uint8_t has_nested = 0; // obsolete: https://github.com/ClickHouse/ClickHouse/blob/ef11941cf5a/src/IO/ReadHelpers.cpp#L2017
 
     const bool exception_received =
         WireFormat::ReadFixed(*input_, &e->code)
