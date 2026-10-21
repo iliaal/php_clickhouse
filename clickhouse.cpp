@@ -3697,6 +3697,8 @@ struct InsertStreamParser {
 
         for (size_t i = 0; i < len; ++i) {
             char c = data[i];
+            /* Only an immediately following LF belongs to the previous CR. */
+            if (c != '\n') prev_was_cr = false;
 
             if (pending_backslash) {
                 pending_backslash = false;

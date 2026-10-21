@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `insertFromStream()` no longer merges rows when a CR-terminated row is
+  followed by an empty-first-column CSV or TSV row ending in LF.
+
 ## [0.13.0] - 2026-10-18
 
 ### Upgrading from 0.12
