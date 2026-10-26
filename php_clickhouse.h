@@ -26,7 +26,7 @@
 extern zend_module_entry clickhouse_module_entry;
 #define phpext_clickhouse_ptr &clickhouse_module_entry
 
-#define PHP_CLICKHOUSE_VERSION "0.13.1"
+#define PHP_CLICKHOUSE_VERSION "0.13.2"
 
 #define SC_FETCH_ONE 1
 #define SC_FETCH_KEY_PAIR 2
