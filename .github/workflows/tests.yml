@@ -605,12 +605,6 @@ jobs:
           ./configure --enable-clickhouse --with-php-config=/tmp/php-asan/bin/php-config
           make -j$(nproc)
 
-      - name: DIAG 270 memory breakdown (temporary)
-        continue-on-error: true
-        env:
-          LD_LIBRARY_PATH: ${{ steps.clang_rt.outputs.dir }}
-        run: diag270/run.sh
-
       - name: Run tests under ASAN
         env:
           LD_LIBRARY_PATH: ${{ steps.clang_rt.outputs.dir }}
