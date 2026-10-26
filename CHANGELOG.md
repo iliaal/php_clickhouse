@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-10-26
+
 ### Fixed
 
 - `insertFromStream()` no longer merges rows when a CR-terminated row is
@@ -1138,7 +1140,8 @@ own way.
   emits a clear "unsupported" warning. Full Windows build of the
   vendored zstd + absl + lz4 + cityhash is a separate project.
 
-[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.13.0...HEAD
+[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.13.1...HEAD
+[0.13.1]: https://github.com/iliaal/php_clickhouse/releases/tag/0.13.1
 [0.13.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.13.0
 [0.12.1]: https://github.com/iliaal/php_clickhouse/releases/tag/0.12.1
 [0.12.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.12.0
