@@ -2,13 +2,28 @@ name: Release Linux & macOS binaries
 
 # Triggered when a GitHub Release is published. Builds .so binaries for
 # Linux glibc 2.35 (x86_64 + arm64) and macOS 12+ arm64 at PHP 8.4 + 8.5 (NTS
-# binaries; supported Unix ZTS installs build from source), uploads each as a release asset
-# via php/pie-ext-binary-builder using PIE's pre-packaged-binary naming
-# convention. PIE's `pie install iliaal/php_clickhouse` then resolves
-# the prebuilt asset matching the host arch/os/libc/PHP-version instead
-# of building clickhouse-cpp from source (~3-5 min compile).
+# binaries; supported Unix ZTS installs build from source), gates them, and
+# uploads each as a release asset using PIE's pre-packaged-binary naming
+# convention. Assets upload only after every build and gate passes. PIE's
+# `pie install iliaal/php_clickhouse` then resolves the prebuilt asset
+# matching the host arch/os/libc/PHP-version instead of building
+# clickhouse-cpp from source (~3-5 min compile).
 #
 # Coverage matrix: 3 lanes x 2 PHP = 6 prebuilt assets per release.
+#
+# Each lane compiles against the oldest patch release of its minor, built
+# from the checksum-pinned php.net tarball. Patch releases add ZEND_API
+# functions and call them from inline header code (8.4.27 and 8.5.12 route
+# smart_str_alloc() through smart_str_ferealloc()), so a module built
+# against newer headers imports symbols an older patch does not export and
+# dies with "undefined symbol" on first use. 8.4.1 is the oldest 8.4: 8.4.0
+# was never released. Source builds are unaffected; they compile against
+# the PHP they load into. The Linux gate checks every import against the
+# oldest patch image and runs selectToStream() (the module's smart_str
+# path) against a ClickHouse server on the oldest and a pinned newest patch
+# image; macOS loads the module on the oldest-patch build PHP and on
+# setup-php's current patch and rejects imports only the newer one exports.
+# Move newest-image to each new patch release.
 #
 # macOS Intel (macos-13) is intentionally absent: GitHub's Intel runner
 # pool is too contended to ship reliably, and macOS 26 drops Intel
@@ -26,14 +41,14 @@ on:
   release:
     types: [published]
   # Manual trigger. Two uses:
-  #   - blank release_tag  -> build every lane (build-only validation step
-  #     below), no upload. The /release-ext Step 9.5 pre-tag gate.
-  #   - release_tag set    -> build that tag's source and upload to it (backfill,
-  #     e.g. when this workflow was added after the tag existed).
+  #   - blank release_tag  -> build and gate every lane, no upload. The
+  #     /release-ext Step 9.5 pre-tag gate.
+  #   - release_tag set    -> build that tag's source, gate it, and upload to
+  #     it (backfill, e.g. when this workflow was added after the tag existed).
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Existing tag to build + upload to. Blank = build-only validation (no upload).'
+        description: 'Existing tag to build + upload to. Blank = build-and-gate validation (no upload).'
         required: false
         default: ''
 
@@ -49,7 +64,7 @@ jobs:
     runs-on: ${{ matrix.platform.os }}
     timeout-minutes: 60
     permissions:
-      contents: write # Uploads built archives to the selected release.
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -73,6 +88,23 @@ jobs:
         php:
           - '8.4'
           - '8.5'
+        # php-src: the oldest patch release of the minor, which the binaries
+        # are built against. Hashes are the php.net-published tar.xz
+        # SHA-256s. oldest-image/newest-image: official images the Linux gate
+        # loads each binary on, pinned by multi-arch index digest; the ECR
+        # copy of the Docker official image serves the same digests as
+        # Docker Hub.
+        include:
+          - php: '8.4'
+            php-src: '8.4.1'
+            php-src-sha256: 94c8a4fd419d45748951fa6d73bd55f6bdf0adaefb8814880a67baa66027311f
+            oldest-image: public.ecr.aws/docker/library/php:8.4.1-cli@sha256:246d2ca7e9cf21c4e7c354ce87e87bf1ad6d41b2061c77668845e04a8f8889d4
+            newest-image: public.ecr.aws/docker/library/php:8.4.27-cli@sha256:debadc2e36b857657846e2e952cbaf52702e55482dd3c2c43806f68d8c534a70
+          - php: '8.5'
+            php-src: '8.5.0'
+            php-src-sha256: 39cb6e4acd679b574d3d3276f148213e935fc25f90403eb84fb1b836a806ef1e
+            oldest-image: public.ecr.aws/docker/library/php:8.5.0-cli@sha256:fb551f94cba4698612c90158aa7d4fe8e1a5355f9c444d0f90929d366fc75b36
+            newest-image: public.ecr.aws/docker/library/php:8.5.12-cli@sha256:635a4b998025ab269194639a5549c6fdcd9b4f88ec8cd761b092de8653d40663
     env:
       MACOSX_DEPLOYMENT_TARGET: ${{ matrix.platform.macos_target }}
     steps:
@@ -82,110 +114,282 @@ jobs:
           ref: ${{ github.event.release.tag_name || inputs.release_tag }}
           persist-credentials: false
 
-      - name: Setup PHP
-        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
-        with:
-          php-version: ${{ matrix.php }}
-          coverage: none
-
-      # Checked out ahead of the build so the pre-upload gate below can use the
-      # current checker even when the released tag predates it.
+      # Checked out from the workflow's own commit so the gates below are the
+      # current ones even when the released tag predates them.
       - name: Checkout verification tools
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           ref: ${{ github.sha }}
           path: .release-tools
-          sparse-checkout: scripts/check-release-binary.sh
+          sparse-checkout: |
+            scripts/check-release-binary.sh
+            scripts/prebuilt-abi-smoke.sh
+            scripts/prebuilt-abi-smoke.php
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
-      # pie-ext-binary-builder fuses build + upload into one action, so by the
-      # time its artifact can be inspected it is already attached to the
-      # release. Build an equivalent binary on the same runner first and gate
-      # on that. Costs one extra compile per release lane; the alternative is
-      # publishing a binary whose runtime ceiling was never checked.
-      - name: Pre-upload binary compatibility gate
-        if: github.event_name == 'release' || inputs.release_tag != ''
+      # macOS only: the current-patch PHP the macOS gate loads the module on.
+      # The Linux gate uses the pinned images instead.
+      - name: Setup PHP
+        if: runner.os == 'macOS'
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+
+      # Kept off PATH: phpize and php-config are called by absolute path.
+      - name: Build PHP ${{ matrix.php-src }} headers and binary
+        env:
+          PHP_SRC: ${{ matrix.php-src }}
+          PHP_SRC_SHA256: ${{ matrix.php-src-sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tarball="$RUNNER_TEMP/php-$PHP_SRC.tar.xz"
+          curl -fsSL --retry 3 -o "$tarball" "https://www.php.net/distributions/php-$PHP_SRC.tar.xz"
+          echo "$PHP_SRC_SHA256  $tarball" | shasum -a 256 -c -
+          mkdir "$RUNNER_TEMP/php-src"
+          tar -xJf "$tarball" -C "$RUNNER_TEMP/php-src" --strip-components=1
+          cd "$RUNNER_TEMP/php-src"
+          # The extension needs only always-enabled extensions (json, standard).
+          ./configure --prefix="$RUNNER_TEMP/php" --disable-all --enable-cli \
+            --disable-cgi --disable-phpdbg --without-pear >"$RUNNER_TEMP/php-configure.log"
+          make -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)" >"$RUNNER_TEMP/php-make.log" 2>&1 \
+            || { tail -50 "$RUNNER_TEMP/php-make.log"; exit 1; }
+          make install >/dev/null
+
+      - name: Verify build PHP
+        env:
+          PHP_SRC: ${{ matrix.php-src }}
+          PHP_MINOR: ${{ matrix.php }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_php="$RUNNER_TEMP/php/bin"
+          test "$("$build_php/php-config" --version)" = "$PHP_SRC"
+          test "$("$build_php/php" -n -r 'echo PHP_VERSION;')" = "$PHP_SRC"
+          test "$("$build_php/php" -n -r 'echo PHP_MAJOR_VERSION, ".", PHP_MINOR_VERSION;')" = "$PHP_MINOR"
+          test "$("$build_php/php" -n -r 'echo (int) PHP_ZTS, (int) PHP_DEBUG;')" = "00"
+          echo "build PHP $PHP_SRC at $build_php/php"
+
+      - name: Build extension
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/php/bin/phpize"
+          ./configure --enable-clickhouse --with-php-config="$RUNNER_TEMP/php/bin/php-config"
+          make -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
+
+      - name: Package binary
+        id: package
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+          PHP_MINOR: ${{ matrix.php }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "$RELEASE_TAG" ]]; then
+            version=$RELEASE_TAG
+          else
+            version=$(sed -n 's/^#define PHP_CLICKHOUSE_VERSION "\([^"]*\)"/\1/p' php_clickhouse.h)
+          fi
+          test -n "$version"
+          # php/pie-ext-binary-builder's naming for NTS non-debug builds:
+          # php_<ext>-<tag>_php<X.Y>-<arch>-<os>-<libc>.zip
+          case "$(uname -m)" in
+            x86_64) arch=x86_64 ;;
+            aarch64|arm64) arch=arm64 ;;
+            *) echo "::error::unsupported architecture $(uname -m)"; exit 1 ;;
+          esac
+          case "$(uname -s)" in
+            Linux) os=linux; libc=glibc ;;
+            Darwin) os=darwin; libc=bsdlibc ;;
+            *) echo "::error::unsupported OS $(uname -s)"; exit 1 ;;
+          esac
+          name="php_clickhouse-${version}_php${PHP_MINOR}-${arch}-${os}-${libc}.zip"
+          mkdir -p "$RUNNER_TEMP/dist"
+          zip -j "$RUNNER_TEMP/dist/$name" modules/clickhouse.so
+          mkdir "$RUNNER_TEMP/packaged"
+          unzip -q "$RUNNER_TEMP/dist/$name" -d "$RUNNER_TEMP/packaged"
+          test -f "$RUNNER_TEMP/packaged/clickhouse.so"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - name: Binary compatibility gate
         env:
           COMPAT_MAXIMUM: ${{ matrix.platform.compat_maximum }}
           COMPAT_MODE: ${{ matrix.platform.compat_mode }}
         run: |
-          set -euo pipefail
-          gate_dir="$RUNNER_TEMP/precheck"
-          rm -rf "$gate_dir"
-          mkdir -p "$gate_dir"
-          tar -cf - --exclude=.git --exclude=.release-tools . | tar -xf - -C "$gate_dir"
-          cd "$gate_dir"
-          phpize
-          ./configure --enable-clickhouse
-          if command -v nproc >/dev/null 2>&1; then
-            jobs=$(nproc)
-          else
-            jobs=$(sysctl -n hw.ncpu)
-          fi
-          make -j"$jobs"
-          "$GITHUB_WORKSPACE/.release-tools/scripts/check-release-binary.sh" \
+          .release-tools/scripts/check-release-binary.sh \
             "$COMPAT_MODE" \
             "$COMPAT_MAXIMUM" \
-            "$gate_dir/modules/clickhouse.so"
+            "$RUNNER_TEMP/packaged/clickhouse.so"
 
-      - name: Build and upload prebuilt binary
-        id: prebuilt
-        if: github.event_name == 'release' || inputs.release_tag != ''
-        uses: php/pie-ext-binary-builder@5298761950f63c7e9565ed7004e922b346e4386c # 0.0.3
-        with:
-          release-tag: ${{ github.event.release.tag_name || inputs.release_tag }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          configure-flags: '--enable-clickhouse'
-
-      # Blank-tag dispatch: compile on the real runner without uploading, so the
-      # Step 9.5 pre-tag gate ("build jobs green") is meaningful for this lane too.
-      - name: Build-only validation (blank-tag dispatch)
-        if: github.event_name == 'workflow_dispatch' && inputs.release_tag == ''
-        run: |
-          phpize
-          ./configure --enable-clickhouse
-          if command -v nproc >/dev/null 2>&1; then
-            jobs=$(nproc)
-          else
-            jobs=$(sysctl -n hw.ncpu)
-          fi
-          make -j"$jobs"
-          php -n -d extension="$PWD/modules/clickhouse.so" -r '
-            if (!extension_loaded("clickhouse") || !class_exists("ClickHouse")) {
-              exit(1);
-            }
-          '
-
-      # Second pass, this time against the artifact that was actually published.
-      # The pre-upload gate is what prevents a bad binary shipping; this proves
-      # the shipped bytes match.
-      - name: Verify release binary compatibility
+      # Same server image as tests.yml. The module's smart_str appends run
+      # only on selectToStream(), so the smoke needs a live server.
+      - name: Start ClickHouse (Linux)
+        if: runner.os == 'Linux'
         env:
-          COMPAT_MAXIMUM: ${{ matrix.platform.compat_maximum }}
-          COMPAT_MODE: ${{ matrix.platform.compat_mode }}
-          PACKAGE_PATH: ${{ steps.prebuilt.outputs.package-path }}
-          UPLOADED: ${{ (github.event_name == 'release' || inputs.release_tag != '') && '1' || '' }}
+          CLICKHOUSE_IMAGE: clickhouse/clickhouse-server@sha256:fdc22372465a336fa47e9deab61fad8277b9e2f2473234a1294b33b53f01d377
         run: |
           set -euo pipefail
-          binary="$PWD/modules/clickhouse.so"
-          if [[ -n "$PACKAGE_PATH" ]]; then
-            archive_dir="$RUNNER_TEMP/release-binary"
-            mkdir -p "$archive_dir"
-            unzip -q "$PACKAGE_PATH" clickhouse.so -d "$archive_dir"
-            binary="$archive_dir/clickhouse.so"
-          elif [[ -n "$UPLOADED" ]]; then
-            # An upload ran but produced no package path: the action's output
-            # name changed. Falling back to a local build here would silently
-            # inspect something other than the published artifact.
-            echo "prebuilt step produced no package-path; refusing to verify a local build" >&2
+          docker run -d --name clickhouse --ulimit nofile=262144:262144 \
+            -e CLICKHOUSE_USER=test -e CLICKHOUSE_PASSWORD=test \
+            -p 127.0.0.1:9000:9000 "$CLICKHOUSE_IMAGE"
+          for i in $(seq 1 60); do
+            if docker exec clickhouse clickhouse-client --user test --password test -q 'SELECT 1' >/dev/null 2>&1; then
+              echo "ClickHouse ready after $i attempts"
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs clickhouse 2>&1 | tail -50
+          echo "::error::ClickHouse did not accept queries on the native port"
+          exit 1
+
+      - name: Gate on the oldest and newest patch (Linux)
+        if: runner.os == 'Linux'
+        env:
+          OLDEST_IMAGE: ${{ matrix.oldest-image }}
+          NEWEST_IMAGE: ${{ matrix.newest-image }}
+          CLICKHOUSE_HOST: 127.0.0.1
+          CLICKHOUSE_PORT: 9000
+          CLICKHOUSE_USER: test
+          CLICKHOUSE_PASSWD: test
+        run: |
+          .release-tools/scripts/prebuilt-abi-smoke.sh \
+            "$RUNNER_TEMP/packaged/clickhouse.so" "$OLDEST_IMAGE" "$NEWEST_IMAGE"
+
+      # No ClickHouse server on the macOS runner, so selectToStream() cannot
+      # run here. Instead, reject any import that setup-php's current patch
+      # exports and the oldest patch does not: that is the symbol class a
+      # newer-header build picks up. Both PHPs must also load the module.
+      - name: Gate on the oldest and newest patch (macOS)
+        if: runner.os == 'macOS'
+        env:
+          PHP_SRC: ${{ matrix.php-src }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          module="$RUNNER_TEMP/packaged/clickhouse.so"
+          oldest_php="$RUNNER_TEMP/php/bin/php"
+          newest_php=$(command -v php)
+          test "$newest_php" != "$oldest_php"
+          work=$(mktemp -d)
+
+          exports() {
+            {
+              nm -gU "$1"
+              otool -L "$1" | awk 'NR > 1 && $1 ~ /libphp/ { print $1 }' | while read -r lib; do
+                nm -gU "$lib"
+              done
+            } | awk 'NF >= 3 { print $NF }' | sort -u
+          }
+          nm -u "$module" | sort -u > "$work/imported"
+          exports "$oldest_php" > "$work/oldest"
+          exports "$newest_php" > "$work/newest"
+          for f in imported oldest newest; do
+            if [[ ! -s "$work/$f" ]]; then
+              echo "::error::no symbols read for $f; refusing to pass the import check"
+              exit 1
+            fi
+          done
+          for f in oldest newest; do
+            if [[ -z "$(comm -12 "$work/imported" "$work/$f")" ]]; then
+              echo "::error::no module import is exported by the $f PHP; refusing to pass the import check"
+              exit 1
+            fi
+          done
+          newer_only=$(comm -23 "$work/newest" "$work/oldest" | comm -12 "$work/imported" -)
+          if [[ -n "$newer_only" ]]; then
+            echo "::error::clickhouse.so imports symbols that PHP $PHP_SRC does not export:"
+            printf '%s\n' "$newer_only"
             exit 1
           fi
-          checker="scripts/check-release-binary.sh"
-          if [[ -x .release-tools/scripts/check-release-binary.sh ]]; then
-            checker=".release-tools/scripts/check-release-binary.sh"
+          echo "import check OK: $(wc -l < "$work/imported") imports, none exported only by $("$newest_php" -n -r 'echo PHP_VERSION;')"
+
+          status=0
+          for php_bin in "$oldest_php" "$newest_php"; do
+            want=$("$php_bin" -n -r 'echo PHP_VERSION;')
+            echo "== load on $php_bin (PHP $want)"
+            set +e
+            out=$("$php_bin" -n -d extension="$module" -r '
+              if (!extension_loaded("clickhouse") || !class_exists("ClickHouse")) {
+                exit(1);
+              }
+              printf("ok php=%s clickhouse=%s\n", PHP_VERSION, phpversion("clickhouse"));
+            ' 2>&1)
+            rc=$?
+            set -e
+            printf '%s\n' "$out"
+            if [[ $rc -ne 0 ]]; then
+              echo "::error::load on PHP $want exited with status $rc"
+              status=1
+            elif grep -qiE 'symbol not found|undefined symbol|warning' <<< "$out"; then
+              echo "::error::load on PHP $want reported a problem"
+              status=1
+            elif ! grep -qF "ok php=$want " <<< "$out"; then
+              echo "::error::load on PHP $want did not report PHP $want"
+              status=1
+            fi
+          done
+          exit "$status"
+
+      - name: Store gated binary
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: prebuilt-${{ matrix.platform.os }}-php${{ matrix.php }}
+          path: ${{ runner.temp }}/dist/${{ steps.package.outputs.name }}
+          if-no-files-found: error
+          retention-days: 7
+
+  upload:
+    name: Upload release assets
+    needs: build
+    if: github.event_name == 'release' || inputs.release_tag != ''
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    permissions:
+      contents: write # Uploads binary assets to the selected release.
+    steps:
+      - name: Fetch gated binaries
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: prebuilt-*
+          path: dist
+          merge-multiple: true
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          assets=(dist/*.zip)
+          if [[ ${#assets[@]} -eq 0 ]]; then
+            echo "::error::no gated binaries to upload"
+            exit 1
           fi
-          "$checker" \
-            "$COMPAT_MODE" \
-            "$COMPAT_MAXIMUM" \
-            "$binary"
+          printf '%s\n' "${assets[@]}"
+          gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+
+      # Proves the published bytes are the gated ones.
+      - name: Verify uploaded assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          mkdir published
+          for asset in dist/*.zip; do
+            name=$(basename "$asset")
+            gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --pattern "$name" --dir published
+            want=$(sha256sum "$asset" | cut -d' ' -f1)
+            got=$(sha256sum "published/$name" | cut -d' ' -f1)
+            if [[ "$want" != "$got" ]]; then
+              echo "::error::$name on the release does not match the gated binary"
+              exit 1
+            fi
+            echo "$name $got"
+          done
