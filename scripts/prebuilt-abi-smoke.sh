@@ -2,7 +2,7 @@
 # Usage: prebuilt-abi-smoke.sh MODULE.so OLDEST_IMAGE NEWEST_IMAGE
 #
 # Gates a prebuilt Linux module against the oldest and newest patch release
-# of its PHP minor. Each image is an official php:X.Y.Z-cli image reference;
+# of its PHP minor. Each image is a digest-pinned official php:X.Y.Z-cli image;
 # the X.Y.Z in its tag is the PHP_VERSION the image must report.
 #
 # 1. Every undefined (non-weak) dynamic symbol of the module must be exported
@@ -21,8 +21,6 @@ if [[ $# -ne 3 ]]; then
 fi
 
 module=$(realpath "$1")
-oldest=$2
-newest=$3
 smoke_php=$(realpath "$(dirname "$0")/prebuilt-abi-smoke.php")
 
 image_version() {
@@ -30,6 +28,35 @@ image_version() {
 	ref=${ref##*:}
 	printf '%s\n' "${ref%%-*}"
 }
+
+# Pulls a digest-pinned image, falling back to other mirrors of the Docker
+# official images for the same digest when a registry refuses the pull (ECR
+# and Docker Hub both enforce data limits on shared runner IPs). Prints the
+# reference that was pulled.
+pull_image() {
+	local ref=$1 candidate
+	local path=${ref#public.ecr.aws/docker/library/}
+	if [[ "$ref" != *@sha256:* ]]; then
+		echo "::error::$ref is not pinned by digest" >&2
+		return 1
+	fi
+	local -a candidates=("$ref")
+	if [[ "$path" != "$ref" ]]; then
+		candidates+=("mirror.gcr.io/library/$path" "docker.io/library/$path")
+	fi
+	for candidate in "${candidates[@]}"; do
+		if docker pull -q "$candidate" >&2; then
+			printf '%s\n' "$candidate"
+			return 0
+		fi
+		echo "pull of $candidate failed; trying the next mirror" >&2
+	done
+	echo "::error::could not pull $ref from any mirror" >&2
+	return 1
+}
+
+oldest=$(pull_image "$2")
+newest=$(pull_image "$3")
 
 work=$(mktemp -d)
 cid=""
