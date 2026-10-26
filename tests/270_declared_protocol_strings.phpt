@@ -13,11 +13,11 @@ elseif (!is_readable("/proc/self/status") || !is_readable("/proc/self/maps")) pr
  * 16 MiB. Each response declares the cap but carries three bytes. Before the
  * fix the client zero-filled the declared length before reading it.
  *
- * The first connect, select, and exception in a process fault in several MiB
- * of extension and runtime code, and that file-backed RSS varies by kernel
- * and page cache (10-13 MiB on GitHub's ASan runners). Each client therefore
- * first runs the same truncated response with a declared length of 4 and only
- * measures the second connection. */
+ * The first connect, select, and exception in a process fault in extension
+ * and runtime code. That file-backed RSS depends on the kernel and page cache
+ * and pushed an unwarmed measurement to 10-13 MiB on GitHub's ASan runners.
+ * Each client therefore first runs the same truncated response with a declared
+ * length of 4 and measures only the second query. */
 const BOUND_KB = 8192;
 
 $mockCode = <<<'PHP'
