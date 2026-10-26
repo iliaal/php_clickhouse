@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The 0.13.1 prebuilt Linux and macOS binaries failed on PHP 8.4 releases
+  before 8.4.27 and 8.5 releases before 8.5.12: `selectToStream()` ended the
+  PHP process with an undefined-symbol error (`smart_str_ferealloc`).
+  Prebuilt binaries now compile against the oldest patch release of each
+  PHP minor. Source builds were unaffected.
+
 ## [0.13.1] - 2026-10-26
 
 ### Fixed
