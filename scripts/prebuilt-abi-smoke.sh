@@ -29,12 +29,12 @@ image_version() {
 	printf '%s\n' "${ref%%-*}"
 }
 
-# Pulls a digest-pinned image, falling back to other mirrors of the Docker
-# official images for the same digest when a registry refuses the pull (ECR
-# and Docker Hub both enforce data limits on shared runner IPs). Prints the
-# reference that was pulled.
+# Pulls a digest-pinned image, trying the ghcr.io/iliaal/php copy first and
+# falling back to other mirrors of the Docker official images for the same
+# digest when a registry refuses the pull (ECR and Docker Hub both enforce
+# data limits on shared runner IPs). Prints the reference that was pulled.
 pull_image() {
-	local ref=$1 candidate
+	local ref=$1 candidate attempt
 	local path=${ref#public.ecr.aws/docker/library/}
 	if [[ "$ref" != *@sha256:* ]]; then
 		echo "::error::$ref is not pinned by digest" >&2
@@ -42,13 +42,20 @@ pull_image() {
 	fi
 	local -a candidates=("$ref")
 	if [[ "$path" != "$ref" ]]; then
-		candidates+=("mirror.gcr.io/library/$path" "docker.io/library/$path")
+		candidates=("ghcr.io/iliaal/$path" "$ref"
+			"mirror.gcr.io/library/$path" "docker.io/library/$path")
 	fi
 	for candidate in "${candidates[@]}"; do
-		if docker pull -q "$candidate" >&2; then
-			printf '%s\n' "$candidate"
-			return 0
-		fi
+		for attempt in 1 2 3; do
+			if docker pull -q "$candidate" >&2; then
+				echo "pulled $candidate" >&2
+				printf '%s\n' "$candidate"
+				return 0
+			fi
+			if [[ $attempt -lt 3 ]]; then
+				sleep $((attempt * 5))
+			fi
+		done
 		echo "pull of $candidate failed; trying the next mirror" >&2
 	done
 	echo "::error::could not pull $ref from any mirror" >&2

@@ -93,8 +93,8 @@ jobs:
         # SHA-256s. oldest-image/newest-image: official images the Linux gate
         # loads each binary on, pinned by multi-arch index digest; the ECR
         # copy of the Docker official image serves the same digests as
-        # Docker Hub, and the gate falls back to mirror.gcr.io and Docker
-        # Hub for the same digest when ECR refuses the pull.
+        # Docker Hub. The gate pulls the same digest from ghcr.io/iliaal/php
+        # first and falls back to ECR, mirror.gcr.io, and Docker Hub.
         include:
           - php: '8.4'
             php-src: '8.4.1'
