@@ -299,13 +299,17 @@ jobs:
               exit 1
             fi
           done
-          newer_only=$(comm -23 "$work/newest" "$work/oldest" | comm -12 "$work/imported" -)
+          newest_version=$("$newest_php" -n -r 'echo PHP_VERSION;')
+          comm -23 "$work/newest" "$work/oldest" > "$work/newest-only"
+          echo "$(wc -l < "$work/newest-only" | tr -d ' ') symbols exported by PHP $newest_version and not by PHP $PHP_SRC, e.g.:"
+          grep -E '^_(smart_str|zend|php)_' "$work/newest-only" | head -5 || true
+          newer_only=$(comm -12 "$work/imported" "$work/newest-only")
           if [[ -n "$newer_only" ]]; then
             echo "::error::clickhouse.so imports symbols that PHP $PHP_SRC does not export:"
             printf '%s\n' "$newer_only"
             exit 1
           fi
-          echo "import check OK: $(wc -l < "$work/imported") imports, none exported only by $("$newest_php" -n -r 'echo PHP_VERSION;')"
+          echo "import check OK: $(wc -l < "$work/imported" | tr -d ' ') imports, none exported only by PHP $newest_version"
 
           status=0
           for php_bin in "$oldest_php" "$newest_php"; do
