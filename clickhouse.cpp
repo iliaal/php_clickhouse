@@ -611,9 +611,8 @@ const zend_function_entry clickhouse_functions[] =
 /* }}} */
 
 /* {{{ PHP_RINIT_FUNCTION
- * ZTS: the TSRM cache is thread-local. MINIT fills it only for the thread
- * that loaded the module; request threads (FrankenPHP, php-fpm ZTS) need
- * their own update before EG()/CG() are touched. */
+ * ZTS: MINIT fills the thread-local TSRM cache only on the loading thread, so
+ * threaded SAPIs (FrankenPHP, mod_php worker/event, embed) refresh it here. */
 PHP_RINIT_FUNCTION(clickhouse)
 {
 #if defined(COMPILE_DL_CLICKHOUSE) && defined(ZTS)
