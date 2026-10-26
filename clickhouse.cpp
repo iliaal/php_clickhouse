@@ -610,6 +610,18 @@ const zend_function_entry clickhouse_functions[] =
 };
 /* }}} */
 
+/* {{{ PHP_RINIT_FUNCTION
+ * ZTS: MINIT fills the thread-local TSRM cache only on the loading thread, so
+ * threaded SAPIs (FrankenPHP, mod_php worker/event, embed) refresh it here. */
+PHP_RINIT_FUNCTION(clickhouse)
+{
+#if defined(COMPILE_DL_CLICKHOUSE) && defined(ZTS)
+    ZEND_TSRMLS_CACHE_UPDATE();
+#endif
+    return SUCCESS;
+}
+/* }}} */
+
 /* {{{ PHP_MINIT_FUNCTION
  */
 PHP_MINIT_FUNCTION(clickhouse)
@@ -707,7 +719,7 @@ zend_module_entry clickhouse_module_entry =
     clickhouse_functions,
     PHP_MINIT(clickhouse),
     NULL,
-    NULL,
+    PHP_RINIT(clickhouse),
     NULL,
     PHP_MINFO(clickhouse),
     PHP_CLICKHOUSE_VERSION,

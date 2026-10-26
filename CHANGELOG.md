@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `insertFromStream()` no longer merges rows when a CR-terminated row is
   followed by an empty-first-column CSV or TSV row ending in LF.
+- ZTS: `new ClickHouse()` on a request thread other than the loading thread
+  segfaulted (FrankenPHP, mod_php worker/event). Reported and fixed by x64vps.
 
 ## [0.13.0] - 2026-10-18
 
