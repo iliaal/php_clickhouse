@@ -16,13 +16,12 @@
   +----------------------------------------------------------------------+
 */
 
-#include <assert.h>
-
 #ifdef HAVE_CONFIG_H
 # include "config.h"
 #endif
 
-#include "php.h"
+#include "php_clickhouse.h"
+#include <assert.h>
 #include <stdlib.h>
 
 /* PHP 7.4's formatter caps string precision at 500 bytes. Native diagnostics

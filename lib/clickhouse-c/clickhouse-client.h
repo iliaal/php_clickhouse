@@ -687,16 +687,16 @@ chc__data_sink_write(void *ud, const void *data, size_t len, chc_err *err)
  * block — the terminator the server uses to detect end-of-INSERT and
  * end-of-query-text. */
 static int
-chc__client_write_data(chc_client *c, const chc_block_builder *bb,
+chc__client_write_data(chc_client *c, chc_io *io, const chc_block_builder *bb,
                         const char *table_name, size_t table_name_len, chc_err *err)
 {
     int rc;
     chc__data_sink buffered;
-    buffered.destination = c->io;
+    buffered.destination = io;
     buffered.used = 0;
     chc_io buffered_io = {.ud = &buffered, .write = chc__data_sink_write};
     chc_io *sink = CHC_PHP_COMPAT && c->compression == CHC_COMP_NONE
-        ? &buffered_io : c->io;
+        ? &buffered_io : io;
     if ((rc = chc__write_varuint(sink, CHC__CLIENT_DATA, err))) return rc;
     if (c->server.revision >= CHC__REV_TEMPORARY_TABLES &&
         (rc = chc__write_string(sink, table_name, table_name_len, err))) return rc;
@@ -716,7 +716,7 @@ chc__client_write_data(chc_client *c, const chc_block_builder *bb,
     chc__mem_sink_init(&ms, &sink_io, c->al);
     rc = chc__client_write_block_body(c, &sink_io, bb, err);
     if (rc != CHC_OK) { chc__mem_sink_free(&ms); return rc; }
-    rc = chc__comp_emit_chunks_sized(c->io, c->codec, c->compression,
+    rc = chc__comp_emit_chunks_sized(io, c->codec, c->compression,
                                      ms.buf, ms.len, c->max_compression_chunk_size,
                                      c->al, err);
     chc__mem_sink_free(&ms);
@@ -726,7 +726,7 @@ chc__client_write_data(chc_client *c, const chc_block_builder *bb,
 int
 chc_client_send_data(chc_client *c, const chc_block_builder *bb, chc_err *err)
 {
-    return chc__client_write_data(c, bb, "", 0, err);
+    return chc__client_write_data(c, c->io, bb, "", 0, err);
 }
 
 int
@@ -737,11 +737,11 @@ chc_client_send_data_named(chc_client *c, const chc_block_builder *bb,
         return chc__err_set(err, CHC_ERR_USAGE, "invalid named Data arguments");
     if (table_name_len && c->server.revision < CHC__REV_TEMPORARY_TABLES)
         return chc__err_set(err, CHC_ERR_USAGE, "server does not support external tables");
-    return chc__client_write_data(c, bb, table_name, table_name_len, err);
+    return chc__client_write_data(c, c->io, bb, table_name, table_name_len, err);
 }
 
-int
-chc_client_send_query_ex(chc_client *c, const char *sql, size_t sql_len,
+static int
+chc__client_write_query(chc_client *c, chc_io *sink, const char *sql, size_t sql_len,
                          const chc_query_opts *opts, chc_err *err)
 {
     chc_query_opts def = {0};
@@ -750,8 +750,8 @@ chc_client_send_query_ex(chc_client *c, const char *sql, size_t sql_len,
         return chc__err_set(err, CHC_ERR_USAGE, "server does not support string query settings");
 
     int rc;
-    if ((rc = chc__write_varuint(c->io, CHC__CLIENT_QUERY, err))) return rc;
-    if ((rc = chc__write_string (c->io, opts->query_id, opts->query_id_len, err))) return rc;
+    if ((rc = chc__write_varuint(sink, CHC__CLIENT_QUERY, err))) return rc;
+    if ((rc = chc__write_string (sink, opts->query_id, opts->query_id_len, err))) return rc;
 
     /* ClientInfo. Body layout per the Native Protocol spec (Query packet).
      * We send the minimum the server tolerates (initial fields blank,
@@ -761,34 +761,34 @@ chc_client_send_query_ex(chc_client *c, const char *sql, size_t sql_len,
     uint8_t iface_type = 1;       /* TCP */
     uint8_t no_otel = 0;
     if (c->server.revision >= CHC__REV_CLIENT_INFO) {
-    if ((rc = chc__write_bytes (c->io, &query_kind, 1, err))) return rc;
-    if ((rc = chc__write_string(c->io, "", 0, err))) return rc;  /* initial_user */
-    if ((rc = chc__write_string(c->io, "", 0, err))) return rc;  /* initial_query_id */
-    if ((rc = chc__write_string(c->io, "[::ffff:127.0.0.1]:0", 20, err))) return rc;
+    if ((rc = chc__write_bytes (sink, &query_kind, 1, err))) return rc;
+    if ((rc = chc__write_string(sink, "", 0, err))) return rc;  /* initial_user */
+    if ((rc = chc__write_string(sink, "", 0, err))) return rc;  /* initial_query_id */
+    if ((rc = chc__write_string(sink, "[::ffff:127.0.0.1]:0", 20, err))) return rc;
     if (c->server.revision >= CHC__REV_INITIAL_QUERY_TIME &&
-        (rc = chc__write_bytes (c->io, z8, 8, err))) return rc;
-    if ((rc = chc__write_bytes (c->io, &iface_type, 1, err))) return rc;
-    if ((rc = chc__write_string(c->io, "", 0, err))) return rc;  /* os_user */
-    if ((rc = chc__write_string(c->io, "", 0, err))) return rc;  /* client_hostname */
-    if ((rc = chc__write_string(c->io,
+        (rc = chc__write_bytes (sink, z8, 8, err))) return rc;
+    if ((rc = chc__write_bytes (sink, &iface_type, 1, err))) return rc;
+    if ((rc = chc__write_string(sink, "", 0, err))) return rc;  /* os_user */
+    if ((rc = chc__write_string(sink, "", 0, err))) return rc;  /* client_hostname */
+    if ((rc = chc__write_string(sink,
         c->client_name ? c->client_name : "clickhouse-c client",
         c->client_name ? c->client_name_len : 19, err))) return rc;
-    if ((rc = chc__write_varuint(c->io, c->client_version_major, err))) return rc;
-    if ((rc = chc__write_varuint(c->io, c->client_version_minor, err))) return rc;
-    if ((rc = chc__write_varuint(c->io, c->protocol_revision, err))) return rc;
+    if ((rc = chc__write_varuint(sink, c->client_version_major, err))) return rc;
+    if ((rc = chc__write_varuint(sink, c->client_version_minor, err))) return rc;
+    if ((rc = chc__write_varuint(sink, c->protocol_revision, err))) return rc;
     if (c->server.revision >= CHC__REV_QUOTA_KEY &&
-        (rc = chc__write_string(c->io, "", 0, err))) return rc;
+        (rc = chc__write_string(sink, "", 0, err))) return rc;
     if (c->server.revision >= CHC__REV_DISTRIBUTED_DEPTH &&
-        (rc = chc__write_varuint(c->io, 0, err))) return rc;
+        (rc = chc__write_varuint(sink, 0, err))) return rc;
     if (c->server.revision >= CHC__REV_VERSION_PATCH &&
-        (rc = chc__write_varuint(c->io, c->client_version_patch, err))) return rc;
+        (rc = chc__write_varuint(sink, c->client_version_patch, err))) return rc;
     if (c->server.revision >= CHC__REV_OPENTELEMETRY &&
-        (rc = chc__write_bytes (c->io, &no_otel, 1, err))) return rc;
+        (rc = chc__write_bytes (sink, &no_otel, 1, err))) return rc;
     /* Parallel replicas: collaborate_with_initiator, count, number */
     if (c->server.revision >= CHC__REV_PARALLEL_REPLICAS) {
-        if ((rc = chc__write_varuint(c->io, 0, err))) return rc;
-        if ((rc = chc__write_varuint(c->io, 0, err))) return rc;
-        if ((rc = chc__write_varuint(c->io, 0, err))) return rc;
+        if ((rc = chc__write_varuint(sink, 0, err))) return rc;
+        if ((rc = chc__write_varuint(sink, 0, err))) return rc;
+        if ((rc = chc__write_varuint(sink, 0, err))) return rc;
     }
     }
 
@@ -799,22 +799,22 @@ chc_client_send_query_ex(chc_client *c, const char *sql, size_t sql_len,
         size_t nlen = s->strings_have_lengths ? s->name_len : (s->name ? strlen(s->name) : 0);
         size_t vlen = s->strings_have_lengths ? s->value_len : (s->value ? strlen(s->value) : 0);
         uint64_t flags = (s->important ? 1u : 0u) | (s->custom ? 2u : 0u);
-        if ((rc = chc__write_string (c->io, s->name,  nlen, err))) return rc;
-        if ((rc = chc__write_varuint(c->io, flags, err))) return rc;
-        if ((rc = chc__write_string (c->io, s->value, vlen, err))) return rc;
+        if ((rc = chc__write_string (sink, s->name,  nlen, err))) return rc;
+        if ((rc = chc__write_varuint(sink, flags, err))) return rc;
+        if ((rc = chc__write_string (sink, s->value, vlen, err))) return rc;
     }
-    if ((rc = chc__write_string(c->io, "", 0, err))) return rc;
+    if ((rc = chc__write_string(sink, "", 0, err))) return rc;
 
     if (c->server.revision >= CHC__REV_INTERSERVER_SECRET &&
-        (rc = chc__write_string(c->io, "", 0, err))) return rc;
+        (rc = chc__write_string(sink, "", 0, err))) return rc;
 
     /* Stages::Complete = 2. */
-    if ((rc = chc__write_varuint(c->io, 2, err))) return rc;
+    if ((rc = chc__write_varuint(sink, 2, err))) return rc;
     /* Compression state: 1 if enabled, 0 otherwise. */
-    if ((rc = chc__write_varuint(c->io,
+    if ((rc = chc__write_varuint(sink,
         c->compression != CHC_COMP_NONE ? 1u : 0u, err))) return rc;
     /* Query text. */
-    if ((rc = chc__write_string(c->io, sql, sql_len, err))) return rc;
+    if ((rc = chc__write_string(sink, sql, sql_len, err))) return rc;
 
     /* Parameters: same shape as settings; flags always CUSTOM (bit 1). */
     if (c->server.revision >= CHC__REV_PARAMETERS) {
@@ -822,15 +822,29 @@ chc_client_send_query_ex(chc_client *c, const char *sql, size_t sql_len,
         const chc_query_param *p = &opts->params[i];
         size_t nlen = p->strings_have_lengths ? p->name_len : (p->name ? strlen(p->name) : 0);
         size_t vlen = p->strings_have_lengths ? p->value_len : (p->value ? strlen(p->value) : 0);
-        if ((rc = chc__write_string (c->io, p->name,  nlen, err))) return rc;
-        if ((rc = chc__write_varuint(c->io, 2u, err))) return rc;
-        if ((rc = chc__write_string (c->io, p->value, vlen, err))) return rc;
+        if ((rc = chc__write_string (sink, p->name,  nlen, err))) return rc;
+        if ((rc = chc__write_varuint(sink, 2u, err))) return rc;
+        if ((rc = chc__write_string (sink, p->value, vlen, err))) return rc;
     }
-    if ((rc = chc__write_string(c->io, "", 0, err))) return rc;
+    if ((rc = chc__write_string(sink, "", 0, err))) return rc;
     }
 
     /* Finalize: send an empty Data block as the query-text terminator. */
-    return opts->defer_data_terminator ? CHC_OK : chc__client_write_data(c, NULL, "", 0, err);
+    return opts->defer_data_terminator ? CHC_OK : chc__client_write_data(c, sink, NULL, "", 0, err);
+}
+
+int
+chc_client_send_query_ex(chc_client *c, const char *sql, size_t sql_len,
+                         const chc_query_opts *opts, chc_err *err)
+{
+    if (!CHC_PHP_COMPAT) return chc__client_write_query(c, c->io, sql, sql_len, opts, err);
+
+    /* The Query and automatic Data terminator share the former C++ client's
+     * flush boundary. The stack buffer never remains attached to the client. */
+    chc__data_sink buffered = {.destination = c->io, .used = 0};
+    chc_io sink = {.ud = &buffered, .write = chc__data_sink_write};
+    int rc = chc__client_write_query(c, &sink, sql, sql_len, opts, err);
+    return rc == CHC_OK ? chc__data_sink_flush(&buffered, err) : rc;
 }
 
 int

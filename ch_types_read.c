@@ -19,13 +19,12 @@
 #include "config.h"
 #endif
 
-#include <inttypes.h>
-#include <string.h>
-
 #include "ch_types.h"
 #include "ch_wide.h"
 #include "ext/json/php_json.h"
 #include "main/snprintf.h"
+#include <inttypes.h>
+#include <string.h>
 
 #ifdef PHP_WIN32
 #include <winsock2.h>

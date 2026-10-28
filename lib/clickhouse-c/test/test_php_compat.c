@@ -448,6 +448,68 @@ test_data_coalescing(void)
     chc_type_destroy(type, &al);
 }
 
+static void
+test_query_coalescing(void)
+{
+    current_test = "query_coalescing";
+    chc_alloc al = chc_alloc_stdlib();
+    chc_err err = {0};
+    char sql[16384];
+    memset(sql, ' ', sizeof sql);
+    memcpy(sql, "SELECT 1", 8);
+    const char query_id[] = {'q', '\0', 'i'};
+    const size_t lengths[] = {8, 8192, sizeof sql};
+    for (size_t i = 0; i < sizeof lengths / sizeof *lengths; ++i) {
+        for (int deferred = 0; deferred <= 1; ++deferred) {
+            counting_sink output = {
+                .fail_at = SIZE_MAX, .direct = sql, .direct_len = lengths[i],
+            };
+            chc_io io = {.ud = &output, .write = write_counted};
+            chc_client client = {.al = &al, .io = &io, .server = {.revision = 732}};
+            chc_query_opts opts = {
+                .query_id = query_id, .query_id_len = sizeof query_id,
+                .defer_data_terminator = deferred != 0,
+            };
+            test_mem_sink expected = {0};
+            chc_io raw = {.ud = &expected, .write = test_mem_sink_write};
+            CHECK(chc__write_varuint(&raw, 1, &err) == CHC_OK);
+            CHECK(chc__write_string(&raw, query_id, sizeof query_id, &err) == CHC_OK);
+            CHECK(chc__write_string(&raw, "", 0, &err) == CHC_OK);
+            CHECK(chc__write_varuint(&raw, 2, &err) == CHC_OK);
+            CHECK(chc__write_varuint(&raw, 0, &err) == CHC_OK);
+            CHECK(chc__write_string(&raw, sql, lengths[i], &err) == CHC_OK);
+            if (!deferred) {
+                const uint8_t terminator[] = {2, 0, 0};
+                CHECK(chc__write_bytes(&raw, terminator, sizeof terminator, &err) == CHC_OK);
+            }
+            CHECK(chc_client_send_query_ex(&client, sql, lengths[i], &opts, &err) == CHC_OK);
+            CHECK(client.io == &io);
+            CHECK(output.bytes.len == expected.len);
+            if (output.bytes.len == expected.len)
+                CHECK(memcmp(output.bytes.data, expected.data, expected.len) == 0);
+            CHECK(output.calls == (i == 0 ? 1 : (deferred ? 2 : 3)));
+            CHECK(output.saw_direct == (i != 0));
+            size_t writes = output.calls;
+            for (size_t fail_at = 1; fail_at <= writes; ++fail_at) {
+                output.calls = 0;
+                output.bytes.len = 0;
+                output.fail_at = fail_at;
+                CHECK(chc_client_send_query_ex(&client, sql, lengths[i], &opts, &err) == CHC_ERR_IO);
+                CHECK(strcmp(err.msg, "sink write failed") == 0);
+                CHECK(output.calls == fail_at);
+                CHECK(client.io == &io);
+                output.fail_at = SIZE_MAX;
+                size_t before = output.bytes.len;
+                CHECK(chc_client_send_ping(&client, &err) == CHC_OK);
+                CHECK(output.bytes.len == before + 1);
+                CHECK(output.bytes.data[before] == 4);
+            }
+            test_mem_sink_free(&output.bytes);
+            test_mem_sink_free(&expected);
+        }
+    }
+}
+
 int main(void)
 {
     test_hello(732);
@@ -458,6 +520,7 @@ int main(void)
     test_type_spelling_growth();
     test_empty_type_arguments();
     test_data_coalescing();
+    test_query_coalescing();
     if (fail_count) return 1;
     fprintf(stderr, "all PHP compatibility unit tests passed\n");
     return 0;

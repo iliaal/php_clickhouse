@@ -40,7 +40,7 @@ static zend_object_handlers clickhouse_object_handlers;
 static zend_object *clickhouse_create_object(zend_class_entry *ce)
 {
 	clickhouse_object *obj = zend_object_alloc(sizeof(*obj), ce);
-	memset(obj, 0, XtOffsetOf(clickhouse_object, std));
+	memset(obj, 0, offsetof(clickhouse_object, std));
 	zend_hash_init(&obj->settings, 0, NULL, ZVAL_PTR_DTOR, 0);
 	zend_hash_init(&obj->query_log, 0, NULL, ZVAL_PTR_DTOR, 0);
 	ZVAL_UNDEF(&obj->progress_callback);
@@ -170,7 +170,7 @@ PHP_MINIT_FUNCTION(clickhouse)
 	clickhouse_mark_not_serializable(clickhouse_ce);
 	clickhouse_ce->create_object = clickhouse_create_object;
 	memcpy(&clickhouse_object_handlers, zend_get_std_object_handlers(), sizeof(clickhouse_object_handlers));
-	clickhouse_object_handlers.offset = XtOffsetOf(clickhouse_object, std);
+	clickhouse_object_handlers.offset = offsetof(clickhouse_object, std);
 	clickhouse_object_handlers.free_obj = clickhouse_free_obj;
 	clickhouse_object_handlers.get_gc = clickhouse_get_gc;
 	clickhouse_object_handlers.clone_obj = NULL;

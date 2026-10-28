@@ -28,6 +28,11 @@ jobs:
         run: ./scripts/test-phpt-summary.sh
       - name: Test C adapter compatibility contracts
         run: bash lib/clickhouse-c/test.sh php_compat
+      - name: Test transport socket options
+        run: |
+          cc -std=c11 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
+            scripts/test-transport-socket-options.c -Wl,--gc-sections -o "$RUNNER_TEMP/clickhouse-socket-options"
+          "$RUNNER_TEMP/clickhouse-socket-options"
       - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
         with:
           php-version: '8.4'
@@ -318,7 +323,8 @@ jobs:
 
   linux-32bit:
     name: PHP 8.2 - Linux i386
-    runs-on: ubuntu-latest
+    # Ubuntu 26.04's Docker blocks i386 socketcall: actions/runner-images#14790.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     needs: validate
     services:
@@ -585,6 +591,11 @@ jobs:
           php-version: '8.4'
           tools: phpize, php-config
           coverage: none
+      - name: Test transport socket options
+        run: |
+          cc -std=c11 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
+            scripts/test-transport-socket-options.c -Wl,-dead_strip -o "$RUNNER_TEMP/clickhouse-socket-options"
+          "$RUNNER_TEMP/clickhouse-socket-options"
       - name: Build and load extension
         run: |
           phpize

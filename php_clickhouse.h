@@ -23,6 +23,34 @@
 #ifndef PHP_CLICKHOUSE_H
 #define PHP_CLICKHOUSE_H
 
+#if defined(_MSC_VER) && !defined(__clang__) && !defined(__cplusplus)
+# include "main/php_version.h"
+# if PHP_VERSION_ID >= 80400 && PHP_VERSION_ID < 80500
+/* MSVC's C headers lack max_align_t. Match PHP 8.4's Windows fallback ABI. */
+typedef union {
+	char c;
+	short s;
+	int i;
+	long l;
+	long long ll;
+	float f;
+	double d;
+	long double ld;
+	void *p;
+	void (*fun)(void);
+} ch_php_max_align_t;
+#  define max_align_t ch_php_max_align_t
+#  define CH_PHP84_MSVC_ALIGN_COMPAT
+# endif
+#endif
+
+#include "php.h"
+
+#ifdef CH_PHP84_MSVC_ALIGN_COMPAT
+# undef max_align_t
+# undef CH_PHP84_MSVC_ALIGN_COMPAT
+#endif
+
 extern zend_module_entry clickhouse_module_entry;
 #define phpext_clickhouse_ptr &clickhouse_module_entry
 

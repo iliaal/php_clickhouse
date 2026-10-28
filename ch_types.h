@@ -1,9 +1,8 @@
 #ifndef PHP_CLICKHOUSE_TYPES_H
 #define PHP_CLICKHOUSE_TYPES_H
 
-#include "php.h"
-#include "Zend/zend_exceptions.h"
 #include "php_clickhouse.h"
+#include "Zend/zend_exceptions.h"
 #include "ch_protocol.h"
 
 extern zend_class_entry *clickhouse_exception_ce;

@@ -47,12 +47,12 @@ static zend_object_handlers clickhouse_statement_object_handlers;
 
 static inline clickhouse_iter_object *clickhouse_iter_from_obj(zend_object *obj)
 {
-	return (clickhouse_iter_object *)((char *)obj - XtOffsetOf(clickhouse_iter_object, std));
+	return (clickhouse_iter_object *)((char *)obj - offsetof(clickhouse_iter_object, std));
 }
 
 static inline clickhouse_statement_object *clickhouse_statement_from_obj(zend_object *obj)
 {
-	return (clickhouse_statement_object *)((char *)obj - XtOffsetOf(clickhouse_statement_object, std));
+	return (clickhouse_statement_object *)((char *)obj - offsetof(clickhouse_statement_object, std));
 }
 
 #define Z_CLICKHOUSE_ITER_P(zv) clickhouse_iter_from_obj(Z_OBJ_P(zv))
@@ -61,7 +61,7 @@ static inline clickhouse_statement_object *clickhouse_statement_from_obj(zend_ob
 static zend_object *clickhouse_iter_create_object(zend_class_entry *ce)
 {
 	clickhouse_iter_object *iter = zend_object_alloc(sizeof(*iter), ce);
-	memset(iter, 0, XtOffsetOf(clickhouse_iter_object, std));
+	memset(iter, 0, offsetof(clickhouse_iter_object, std));
 	zend_object_std_init(&iter->std, ce);
 	object_properties_init(&iter->std, ce);
 	iter->std.handlers = &clickhouse_iter_object_handlers;
@@ -128,12 +128,12 @@ int ch_results_minit(INIT_FUNC_ARGS)
 	(void)type;
 	(void)module_number;
 	memcpy(&clickhouse_iter_object_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
-	clickhouse_iter_object_handlers.offset = XtOffsetOf(clickhouse_iter_object, std);
+	clickhouse_iter_object_handlers.offset = offsetof(clickhouse_iter_object, std);
 	clickhouse_iter_object_handlers.free_obj = clickhouse_iter_free_obj;
 	clickhouse_iter_object_handlers.clone_obj = NULL;
 	clickhouse_iter_ce->create_object = clickhouse_iter_create_object;
 	memcpy(&clickhouse_statement_object_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
-	clickhouse_statement_object_handlers.offset = XtOffsetOf(clickhouse_statement_object, std);
+	clickhouse_statement_object_handlers.offset = offsetof(clickhouse_statement_object, std);
 	clickhouse_statement_object_handlers.free_obj = clickhouse_statement_free_obj;
 	clickhouse_statement_object_handlers.get_gc = clickhouse_statement_get_gc;
 	clickhouse_statement_object_handlers.clone_obj = NULL;

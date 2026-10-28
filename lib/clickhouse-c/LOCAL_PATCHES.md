@@ -1,13 +1,13 @@
-# Local compatibility patch
+# Local patches
 
 This directory contains ClickHouse/clickhouse-c commit
 `084498e63a8e814d8f8ab9a32b923d7d6c3c7d9f`, including its license,
 documentation, examples, and tests. The migration retains the revision examined
 in the original analysis. No newer upstream implementation is mixed into it.
 
-Apply `patches/clickhouse-c/0001-php-compatibility.patch` with `git apply` from
-a checkout of that commit to reproduce the local changes. Paths in the patch
-are relative to this directory. Reapply or explicitly retire the patch when
+Import the complete upstream tree, then apply `patches/clickhouse-c/*.patch`
+with `git apply` in filename order to reproduce the local changes. Patch paths
+are relative to this directory. Reapply or explicitly retire each patch when
 updating upstream.
 
 ## 0001-php-compatibility.patch
@@ -75,11 +75,12 @@ The patch adds the protocol behavior required by the existing PHP API:
 - In PHP compatibility mode, ClientInfo uses the same owned identity bytes as
   Hello. `CHC_ZSTD_COMPRESSION_LEVEL=1` restores the previous encoder level;
   without an override, the upstream ZSTD default remains available.
-- Uncompressed PHP Data packets coalesce small writes in an 8 KiB stack buffer,
-  matching the previous output buffer. Large payloads can write directly to the
-  transport. A successful send flushes all bytes before returning; errors retain
-  no pending buffer across calls. Compression framing and chunk limits are
-  unchanged.
+- PHP Query and uncompressed Data packets coalesce small writes in an 8 KiB
+  stack buffer, matching the previous output buffer. Large payloads can write
+  directly to the transport. A Query and its automatic Data terminator share one
+  flush boundary. A successful send flushes all bytes before returning; errors
+  retain no pending buffer across calls. Compression framing and chunk limits
+  are unchanged.
 - PHP compatibility mode rejects Totals and Extremes packets with the previous
   native errors before reading their bodies. Generic upstream clients retain
   support for both packet types.
@@ -97,3 +98,15 @@ at revision 54459, using uncompressed, LZ4, and ZSTD connections and both capped
 and uncapped chunks. `test/test_php_live.c` repeats the compatible operations
 with `CHC_PHP_COMPAT=1` against a separate disposable server. The standard
 `bash test.sh` runner includes these tests.
+
+## 0002-omit-upstream-workflows.patch
+
+This patch omits upstream's `docs_sync.yml`, `docs_verify.yml`, and `test.yml`
+workflow copies under `.github/workflows/`. They belong to the standalone C
+client repository and are not executed from this vendored subdirectory. The
+extension's active workflows remain under the repository-root
+`.github/workflows/`; its full-repository workflow scan remains unchanged.
+
+The patch retains the complete omitted files. Reversing the patches in reverse
+filename order restores the complete pinned upstream tree, including these
+workflow definitions, for the existing vendor-integrity check.

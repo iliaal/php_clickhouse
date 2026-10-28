@@ -15,6 +15,10 @@
   | Author: Ilia Alshanetsky <ilia@ilia.ws>                              |
   +----------------------------------------------------------------------+
 */
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+/* Strict POSIX mode hides Darwin keepalive tuning and SO_NOSIGPIPE. */
+#define _DARWIN_C_SOURCE 1
+#endif
 #ifndef _WIN32
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L

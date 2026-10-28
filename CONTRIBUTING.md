@@ -106,7 +106,10 @@ and unexpected skips.
    from the chosen commit. Update the manifest's revision.
 2. Reapply or explicitly retire every patch documented in
    `lib/clickhouse-c/LOCAL_PATCHES.md`. Keep the patch files under
-   `patches/clickhouse-c/` reproducible against the pinned source.
+   `patches/clickhouse-c/` reproducible against the pinned source and apply them
+   in filename order. The patch set omits upstream-only workflow copies after
+   import; the extension's active workflows remain in the repository-root
+   `.github/workflows/` directory.
 3. Check the PHP compatibility options in `ch_protocol.c`, the transport
    contract in `ch_backend.h`, and the source lists in `config.m4` and
    `config.w32`. Preserve legacy-server revision gates, deferred external

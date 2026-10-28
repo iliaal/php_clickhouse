@@ -1,12 +1,12 @@
 #ifndef PHP_CLICKHOUSE_C_INTERNAL_H
 #define PHP_CLICKHOUSE_C_INTERNAL_H
 
+#include "php_clickhouse.h"
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
-#include "php.h"
 #include "Zend/zend_exceptions.h"
 #include "Zend/zend_smart_str.h"
-#include "php_clickhouse.h"
 #include "php7_wrapper.h"
 #include "ch_backend.h"
 #include "ch_types.h"
@@ -98,7 +98,7 @@ typedef ch_block_action (*ch_on_block)(clickhouse_object *obj,
 
 static inline clickhouse_object *clickhouse_from_obj(zend_object *obj)
 {
-	return (clickhouse_object *)((char *)obj - XtOffsetOf(clickhouse_object, std));
+	return (clickhouse_object *)((char *)obj - offsetof(clickhouse_object, std));
 }
 
 #define Z_CLICKHOUSE_P(zv) clickhouse_from_obj(Z_OBJ_P(zv))
