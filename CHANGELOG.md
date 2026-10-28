@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Source builds use C11, with no C++ compiler, Abseil, or direct C++ runtime dependency.
+- The PHP API, configuration, conversion rules, and buffered `selectStream()` behavior remain unchanged.
+
+### For contributors
+
+- Replaced clickhouse-cpp with ClickHouse/clickhouse-c at
+  `084498e63a8e814d8f8ab9a32b923d7d6c3c7d9f`.
+- Retained older-server protocol gates instead of adopting the C client's default ClickHouse 23.3 minimum.
+- Retained LZ4 1.9.2 and ZSTD 1.5.5 C sources and their license notices under
+  `lib/compression/`.
+
 ## [0.13.2] - 2026-10-26
 
 ### Fixed

@@ -5,13 +5,9 @@ PHP_ARG_ENABLE(clickhouse-openssl, whether to enable OpenSSL/TLS support in php_
 [  --enable-clickhouse-openssl Enable TLS/SSL support (requires OpenSSL)], no, no)
 
 if test "$PHP_CLICKHOUSE" != "no"; then
-  PHP_REQUIRE_CXX()
   PHP_SUBST(CLICKHOUSE_SHARED_LIBADD)
-  PHP_ADD_LIBRARY(stdc++, 1, CLICKHOUSE_SHARED_LIBADD)
-  CXXFLAGS="$CXXFLAGS -fvisibility=hidden -Wall -Wno-unused-function -Wno-deprecated -Wno-deprecated-declarations -std=c++17 -DZSTD_DISABLE_ASM"
-  CFLAGS="$CFLAGS -fvisibility=hidden -DZSTD_DISABLE_ASM"
+  CFLAGS="$CFLAGS -std=c11 -D_GNU_SOURCE -fvisibility=hidden -Wall -DZSTD_DISABLE_ASM"
 
-  CLICKHOUSE_SSL_SRC=""
   if test "$PHP_CLICKHOUSE_OPENSSL" != "no"; then
     AC_CHECK_HEADER([openssl/ssl.h], [], [
       AC_MSG_ERROR([--enable-clickhouse-openssl was requested but openssl/ssl.h was not found. Install the OpenSSL development package (e.g. libssl-dev / openssl-devel) or drop the flag.])
@@ -21,8 +17,6 @@ if test "$PHP_CLICKHOUSE" != "no"; then
         PHP_ADD_LIBRARY(ssl, 1, CLICKHOUSE_SHARED_LIBADD)
         PHP_ADD_LIBRARY(crypto, 1, CLICKHOUSE_SHARED_LIBADD)
         AC_DEFINE([WITH_OPENSSL], [1], [Build php_clickhouse with TLS/SSL support])
-        CXXFLAGS="$CXXFLAGS -DWITH_OPENSSL"
-        CLICKHOUSE_SSL_SRC="lib/clickhouse-cpp/clickhouse/base/sslsocket.cpp"
       ], [
         AC_MSG_ERROR([--enable-clickhouse-openssl requires libcrypto, which was not found. Install the OpenSSL development package.])
       ])
@@ -40,102 +34,56 @@ if test "$PHP_CLICKHOUSE" != "no"; then
       ;;
   esac
 
-  clickhouse_source_file="clickhouse.cpp \
-        metadata.cpp \
-        query_log.cpp \
-        typesToPhp.cpp \
-        $CLICKHOUSE_SSL_SRC \
-        lib/clickhouse-cpp/clickhouse/base/compressed.cpp \
-        lib/clickhouse-cpp/clickhouse/base/endpoints_iterator.cpp \
-        lib/clickhouse-cpp/clickhouse/base/input.cpp \
-        lib/clickhouse-cpp/clickhouse/base/output.cpp \
-        lib/clickhouse-cpp/clickhouse/base/platform.cpp \
-        lib/clickhouse-cpp/clickhouse/base/socket.cpp \
-        lib/clickhouse-cpp/clickhouse/base/wire_format.cpp \
-        lib/clickhouse-cpp/clickhouse/columns/array.cpp \
-        lib/clickhouse-cpp/clickhouse/columns/bool.cpp \
-        lib/clickhouse-cpp/clickhouse/columns/column.cpp \
-        lib/clickhouse-cpp/clickhouse/columns/date.cpp \
-        lib/clickhouse-cpp/clickhouse/columns/decimal.cpp \
-        lib/clickhouse-cpp/clickhouse/columns/enum.cpp \
-        lib/clickhouse-cpp/clickhouse/columns/factory.cpp \
-        lib/clickhouse-cpp/clickhouse/columns/geo.cpp \
-        lib/clickhouse-cpp/clickhouse/columns/ip4.cpp \
-        lib/clickhouse-cpp/clickhouse/columns/ip6.cpp \
-        lib/clickhouse-cpp/clickhouse/columns/itemview.cpp \
-        lib/clickhouse-cpp/clickhouse/columns/json.cpp \
-        lib/clickhouse-cpp/clickhouse/columns/lowcardinality.cpp \
-        lib/clickhouse-cpp/clickhouse/columns/map.cpp \
-        lib/clickhouse-cpp/clickhouse/columns/nullable.cpp \
-        lib/clickhouse-cpp/clickhouse/columns/numeric.cpp \
-        lib/clickhouse-cpp/clickhouse/columns/string.cpp \
-        lib/clickhouse-cpp/clickhouse/columns/time.cpp \
-        lib/clickhouse-cpp/clickhouse/columns/tuple.cpp \
-        lib/clickhouse-cpp/clickhouse/columns/uuid.cpp \
-        lib/clickhouse-cpp/clickhouse/types/type_parser.cpp \
-        lib/clickhouse-cpp/clickhouse/types/types.cpp \
-        lib/clickhouse-cpp/clickhouse/block.cpp \
-        lib/clickhouse-cpp/clickhouse/client.cpp \
-        lib/clickhouse-cpp/clickhouse/query.cpp \
-        lib/clickhouse-cpp/contrib/absl/absl/numeric/int128.cc \
-        lib/clickhouse-cpp/contrib/cityhash/cityhash/city.cc \
-        lib/clickhouse-cpp/contrib/lz4/lz4/lz4.c \
-        lib/clickhouse-cpp/contrib/lz4/lz4/lz4hc.c \
-        lib/clickhouse-cpp/contrib/zstd/zstd/common/debug.c \
-        lib/clickhouse-cpp/contrib/zstd/zstd/common/entropy_common.c \
-        lib/clickhouse-cpp/contrib/zstd/zstd/common/error_private.c \
-        lib/clickhouse-cpp/contrib/zstd/zstd/common/fse_decompress.c \
-        lib/clickhouse-cpp/contrib/zstd/zstd/common/pool.c \
-        lib/clickhouse-cpp/contrib/zstd/zstd/common/threading.c \
-        lib/clickhouse-cpp/contrib/zstd/zstd/common/xxhash.c \
-        lib/clickhouse-cpp/contrib/zstd/zstd/common/zstd_common.c \
-        lib/clickhouse-cpp/contrib/zstd/zstd/compress/fse_compress.c \
-        lib/clickhouse-cpp/contrib/zstd/zstd/compress/hist.c \
-        lib/clickhouse-cpp/contrib/zstd/zstd/compress/huf_compress.c \
-        lib/clickhouse-cpp/contrib/zstd/zstd/compress/zstd_compress.c \
-        lib/clickhouse-cpp/contrib/zstd/zstd/compress/zstd_compress_literals.c \
-        lib/clickhouse-cpp/contrib/zstd/zstd/compress/zstd_compress_sequences.c \
-        lib/clickhouse-cpp/contrib/zstd/zstd/compress/zstd_compress_superblock.c \
-        lib/clickhouse-cpp/contrib/zstd/zstd/compress/zstd_double_fast.c \
-        lib/clickhouse-cpp/contrib/zstd/zstd/compress/zstd_fast.c \
-        lib/clickhouse-cpp/contrib/zstd/zstd/compress/zstd_lazy.c \
-        lib/clickhouse-cpp/contrib/zstd/zstd/compress/zstd_ldm.c \
-        lib/clickhouse-cpp/contrib/zstd/zstd/compress/zstd_opt.c \
-        lib/clickhouse-cpp/contrib/zstd/zstd/compress/zstdmt_compress.c \
-        lib/clickhouse-cpp/contrib/zstd/zstd/decompress/huf_decompress.c \
-        lib/clickhouse-cpp/contrib/zstd/zstd/decompress/zstd_ddict.c \
-        lib/clickhouse-cpp/contrib/zstd/zstd/decompress/zstd_decompress.c \
-        lib/clickhouse-cpp/contrib/zstd/zstd/decompress/zstd_decompress_block.c"
+  clickhouse_source_file="clickhouse.c \
+        ch_backend.c \
+        ch_protocol.c \
+        ch_query.c \
+        ch_insert.c \
+        ch_results.c \
+        ch_types_read.c \
+        ch_types_write.c \
+        ch_wide.c \
+        metadata.c \
+        query_log.c \
+        lib/compression/lz4/lz4.c \
+        lib/compression/lz4/lz4hc.c \
+        lib/compression/zstd/common/debug.c \
+        lib/compression/zstd/common/entropy_common.c \
+        lib/compression/zstd/common/error_private.c \
+        lib/compression/zstd/common/fse_decompress.c \
+        lib/compression/zstd/common/pool.c \
+        lib/compression/zstd/common/threading.c \
+        lib/compression/zstd/common/xxhash.c \
+        lib/compression/zstd/common/zstd_common.c \
+        lib/compression/zstd/compress/fse_compress.c \
+        lib/compression/zstd/compress/hist.c \
+        lib/compression/zstd/compress/huf_compress.c \
+        lib/compression/zstd/compress/zstd_compress.c \
+        lib/compression/zstd/compress/zstd_compress_literals.c \
+        lib/compression/zstd/compress/zstd_compress_sequences.c \
+        lib/compression/zstd/compress/zstd_compress_superblock.c \
+        lib/compression/zstd/compress/zstd_double_fast.c \
+        lib/compression/zstd/compress/zstd_fast.c \
+        lib/compression/zstd/compress/zstd_lazy.c \
+        lib/compression/zstd/compress/zstd_ldm.c \
+        lib/compression/zstd/compress/zstd_opt.c \
+        lib/compression/zstd/compress/zstdmt_compress.c \
+        lib/compression/zstd/decompress/huf_decompress.c \
+        lib/compression/zstd/decompress/zstd_ddict.c \
+        lib/compression/zstd/decompress/zstd_decompress.c \
+        lib/compression/zstd/decompress/zstd_decompress_block.c"
 
   PHP_NEW_EXTENSION(clickhouse, $clickhouse_source_file, $ext_shared,,-DZEND_ENABLE_STATIC_TSRMLS_CACHE=1)
+  PHP_ADD_MAKEFILE_FRAGMENT
 
-  PHP_ADD_INCLUDE($ext_srcdir/lib/clickhouse-cpp)
-  PHP_ADD_INCLUDE($ext_srcdir/lib/clickhouse-cpp/contrib)
-  PHP_ADD_INCLUDE($ext_srcdir/lib/clickhouse-cpp/contrib/absl)
-  PHP_ADD_INCLUDE($ext_srcdir/lib/clickhouse-cpp/contrib/cityhash)
-  PHP_ADD_INCLUDE($ext_srcdir/lib/clickhouse-cpp/contrib/cityhash/cityhash)
-  PHP_ADD_INCLUDE($ext_srcdir/lib/clickhouse-cpp/contrib/lz4)
-  PHP_ADD_INCLUDE($ext_srcdir/lib/clickhouse-cpp/contrib/lz4/lz4)
-  PHP_ADD_INCLUDE($ext_srcdir/lib/clickhouse-cpp/contrib/zstd/zstd)
-  PHP_ADD_INCLUDE($ext_srcdir/lib/clickhouse-cpp/contrib/zstd/zstd/common)
+  PHP_ADD_INCLUDE($ext_srcdir/lib/clickhouse-c)
+  PHP_ADD_INCLUDE($ext_srcdir/lib/compression/lz4)
+  PHP_ADD_INCLUDE($ext_srcdir/lib/compression/zstd)
+  PHP_ADD_INCLUDE($ext_srcdir/lib/compression/zstd/common)
 
   PHP_ADD_EXTENSION_DEP(clickhouse, json)
-  PHP_ADD_BUILD_DIR($ext_builddir/lib/clickhouse-cpp)
-  PHP_ADD_BUILD_DIR($ext_builddir/lib/clickhouse-cpp/clickhouse)
-  PHP_ADD_BUILD_DIR($ext_builddir/lib/clickhouse-cpp/clickhouse/base)
-  PHP_ADD_BUILD_DIR($ext_builddir/lib/clickhouse-cpp/clickhouse/types)
-  PHP_ADD_BUILD_DIR($ext_builddir/lib/clickhouse-cpp/clickhouse/columns)
-  PHP_ADD_BUILD_DIR($ext_builddir/lib/clickhouse-cpp/contrib)
-  PHP_ADD_BUILD_DIR($ext_builddir/lib/clickhouse-cpp/contrib/cityhash)
-  PHP_ADD_BUILD_DIR($ext_builddir/lib/clickhouse-cpp/contrib/cityhash/cityhash)
-  PHP_ADD_BUILD_DIR($ext_builddir/lib/clickhouse-cpp/contrib/lz4)
-  PHP_ADD_BUILD_DIR($ext_builddir/lib/clickhouse-cpp/contrib/lz4/lz4)
-  PHP_ADD_BUILD_DIR($ext_builddir/lib/clickhouse-cpp/contrib/absl)
-  PHP_ADD_BUILD_DIR($ext_builddir/lib/clickhouse-cpp/contrib/absl/absl)
-  PHP_ADD_BUILD_DIR($ext_builddir/lib/clickhouse-cpp/contrib/absl/absl/numeric)
-  PHP_ADD_BUILD_DIR($ext_builddir/lib/clickhouse-cpp/contrib/zstd)
-  PHP_ADD_BUILD_DIR($ext_builddir/lib/clickhouse-cpp/contrib/zstd/zstd)
-  PHP_ADD_BUILD_DIR($ext_builddir/lib/clickhouse-cpp/contrib/zstd/zstd/common)
-  PHP_ADD_BUILD_DIR($ext_builddir/lib/clickhouse-cpp/contrib/zstd/zstd/compress)
-  PHP_ADD_BUILD_DIR($ext_builddir/lib/clickhouse-cpp/contrib/zstd/zstd/decompress)
+  PHP_ADD_BUILD_DIR($ext_builddir/lib/compression/lz4)
+  PHP_ADD_BUILD_DIR($ext_builddir/lib/compression/zstd/common)
+  PHP_ADD_BUILD_DIR($ext_builddir/lib/compression/zstd/compress)
+  PHP_ADD_BUILD_DIR($ext_builddir/lib/compression/zstd/decompress)
 fi

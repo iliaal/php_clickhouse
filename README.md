@@ -7,7 +7,7 @@
 
 ![php_clickhouse: native binary protocol vs HTTP](images/php_clickhouse-hero.jpg)
 
-Native PHP extension for [ClickHouse](https://clickhouse.com/), built on the official [ClickHouse/clickhouse-cpp](https://github.com/ClickHouse/clickhouse-cpp) v2.6.2 client. Speaks the native binary TCP protocol with LZ4 / ZSTD compression and optional TLS, picking up where [SeasX/SeasClick](https://github.com/SeasX/SeasClick) left off in 2020. 1.5-4x faster than a pure-PHP HTTP client depending on workload shape, with modern types (Date32, Time64, Decimal128, LowCardinality, Map, JSON), multi-endpoint failover, and structured exceptions.
+Native PHP extension for [ClickHouse](https://clickhouse.com/), built in C on the official [ClickHouse/clickhouse-c](https://github.com/ClickHouse/clickhouse-c) client. Speaks the native binary TCP protocol with LZ4 / ZSTD compression and optional TLS, picking up where [SeasX/SeasClick](https://github.com/SeasX/SeasClick) left off in 2020. 1.6–4.1x faster than a pure-PHP HTTP client in the measured workloads below, with modern types (Date32, Time64, Decimal128, LowCardinality, Map, JSON), multi-endpoint failover, and structured exceptions.
 
 ## 📖 Documentation
 
@@ -18,7 +18,7 @@ The full guide lives at [iliaal.github.io/php_clickhouse](https://iliaal.github.
 [SeasX/SeasClick](https://github.com/SeasX/SeasClick) was the standard native PHP ClickHouse extension until it stopped accepting PRs in 2020; several PRs there have been pending for years. This fork:
 
 - Renames the extension to `php_clickhouse` (module `clickhouse`, classes `ClickHouse` / `ClickHouseException`)
-- Upgrades the vendored client from artpaul-fork v1.x to the official ClickHouse/clickhouse-cpp v2.6.2
+- Uses the official ClickHouse/clickhouse-c protocol implementation with C transport, TLS, and PHP bindings
 - Adds Date32 / Time / Time64 / DateTime64 / Int128 / UInt128 / Decimal128 / LowCardinality / Map / JSON column types, multi-endpoint failover, ZSTD compression, query_id propagation, and TLS
 - Ships an updated test suite, CI, PIE-based packaging, and benchmarks
 
@@ -53,16 +53,20 @@ phpize
 make && sudo make install
 ```
 
-Add `extension=clickhouse.so` to your `php.ini`. The build needs a C++17-capable compiler (GCC 8+, Clang 7+, MSVC 2019+); LZ4, ZSTD, abseil-int128, and CityHash are vendored under `lib/clickhouse-cpp/contrib/`.
+Add `extension=clickhouse.so` to your `php.ini`. Source builds need a C11 compiler: GCC or Clang on Unix, or the C11-capable MSVC toolset matching your Windows PHP build. The extension does not require a C++ compiler, Abseil, or a C++ runtime. LZ4 1.9.2 and ZSTD 1.5.5 are vendored under `lib/compression/`; the C client includes the native protocol's CityHash implementation.
+
+TLS builds link directly to OpenSSL's `libssl` and `libcrypto`. You do not need to enable PHP's OpenSSL extension.
+
+The bundled C client is pinned to [`084498e63a8e814d8f8ab9a32b923d7d6c3c7d9f`](https://github.com/ClickHouse/clickhouse-c/tree/084498e63a8e814d8f8ab9a32b923d7d6c3c7d9f), with [documented compatibility patches](lib/clickhouse-c/LOCAL_PATCHES.md). The PHP adapter retains the previous client's protocol revision gates instead of imposing the C library's default ClickHouse 23.3 minimum. Individual types and SQL features still require a server that supports them.
 
 ### Platforms
 
 | Platform | Status | Notes |
 |----------|--------|-------|
-| Linux NTS | primary | PHP 7.4 through 8.5, CI matrix |
-| Linux ZTS | supported | PHP 7.4 through 8.5, full CI matrix; PIE source builds |
+| Linux NTS | primary | PHP 7.4 through 8.6, CI matrix |
+| Linux ZTS | supported | PHP 7.4 through 8.6, full CI matrix; PIE source builds |
 | Windows (NTS, TS) | supported | PHP 8.3 through 8.5, x86 / x64 release matrix with offline load tests; pre-built `.dll` assets |
-| macOS arm64 NTS | build-verified | PHP 8.4 and 8.5 release lane; pre-built binaries, no ClickHouse runtime test |
+| macOS arm64 NTS | release build lane | PHP 8.4 and 8.5; no ClickHouse runtime test |
 
 Per-Client state lives on the `zend_object` itself (custom `create_object` / `free_obj` handlers), so ZTS works without locking. There is no module-global state to thread-isolate.
 
@@ -134,27 +138,29 @@ foreach ($ch->select("SELECT id, ts, tag FROM events ORDER BY id",
 
 Shape flags (`FETCH_ONE` / `FETCH_KEY_PAIR` / `FETCH_COLUMN`) are ignored on `selectStatement` / `selectStream` / `selectStreamCallback`; only value flags apply there. See the [documentation site](https://iliaal.github.io/php_clickhouse/) for full signatures and streaming formats.
 
+`selectStream()` receives and buffers the native result before returning its iterator, then converts rows to PHP values as you iterate. Use `selectStreamCallback()` to process rows without retaining the whole result.
+
 TLS (`"ssl" => true`, built with `--enable-clickhouse-openssl`) verifies the server certificate by default. CA files given in `ssl_ca_files` are added to the system trust store, not used instead of it; set `"ssl_use_default_ca" => false` as well to trust only your own CA.
 
 The `passwd` key also accepts the `password` alias. Returning `false` from a `selectStreamCallback()` callback stops the stream cleanly.
 
 ## 📊 Benchmarks
 
-PHP 8.4.23 / ClickHouse 26.6.2.81 / localhost loopback / `Memory` table (no disk).
+PHP 8.4.22-dev NTS release build / ClickHouse 26.9.13.15 / localhost loopback / `Memory` table (no disk).
 
-Compared against [smi2/phpClickHouse](https://github.com/smi2/phpClickHouse), the most popular pure-PHP HTTP client. Each cell is the median of four runs and measures one bulk insert plus `selectCount` queries. Setup, reset, and warm-up are untimed; client order rotates between runs.
+Compared against [smi2/phpClickHouse](https://github.com/smi2/phpClickHouse), the most popular pure-PHP HTTP client. Each cell is the median of eight runs and measures one bulk insert plus `selectCount` queries, in seconds. Setup, reset, and warm-up are untimed; client order rotates between runs.
 
 This is native binary TCP on port 9000 against JSON over HTTP on port 8123, so it measures the protocol as much as the library. HTTP compression is left at the client's default (off) while two of the extension columns are compressed; a gzip-enabled HTTP column is tracked in [`bench/README.md`](bench/README.md).
 
 | dataCount × selectCount × limit | phpClickHouse (HTTP) | php_clickhouse (uncompressed) | php_clickhouse (LZ4) | php_clickhouse (ZSTD) |
 |---|---:|---:|---:|---:|
-| 10000 × 1 × 5000 | 0.088 | 0.060 | 0.060 | 0.058 |
-| 10000 × 100 × 5000 | 1.092 | 0.332 | 0.300 | 0.294 |
-| 10000 × 100 × 10000 | 1.920 | 0.471 | 0.464 | 0.454 |
-| 1000 × 200 × 500 | 0.681 | 0.327 | 0.324 | 0.366 |
-| 1000 × 500 × 1000 | 2.245 | 0.880 | 0.894 | 0.876 |
+| 10000 × 1 × 5000 | 0.147 | 0.076 | 0.090 | 0.037 |
+| 10000 × 100 × 5000 | 4.637 | 1.313 | 1.322 | 1.287 |
+| 10000 × 100 × 10000 | 8.344 | 2.154 | 2.153 | 2.057 |
+| 1000 × 200 × 500 | 2.270 | 1.036 | 1.094 | 1.153 |
+| 1000 × 500 × 1000 | 7.712 | 3.025 | 3.219 | 3.180 |
 
-To reproduce the controlled comparison, see [`bench/`](bench/).
+The server's default asynchronous inserts add batching delays to short workloads. Recreating tables can change their queue assignment and the observed delay; retain table identities when comparing two extension builds. See [`bench/`](bench/) and set `BENCH_REPETITIONS=8` to reproduce this sample count.
 
 ## 🔗 Native PHP extensions
 
@@ -178,9 +184,11 @@ The launch post covers the fork rationale and benchmark methodology: [php_clickh
 
 The PHP-side wrapper is licensed under [PHP-3.01](LICENSE).
 
-The vendored client library at `lib/clickhouse-cpp/` is [ClickHouse/clickhouse-cpp](https://github.com/ClickHouse/clickhouse-cpp), licensed under the [Apache License 2.0](lib/clickhouse-cpp/LICENSE).
+The vendored client library at `lib/clickhouse-c/` is [ClickHouse/clickhouse-c](https://github.com/ClickHouse/clickhouse-c), licensed under the [Apache License 2.0](lib/clickhouse-c/LICENSE).
 
-The vendored compression libraries (`lib/clickhouse-cpp/contrib/lz4/`, `contrib/zstd/`, `contrib/cityhash/`) carry BSD-style licenses; abseil int128 (`contrib/absl/`) is Apache 2.0. See each subdirectory for the exact text.
+The vendored [LZ4](lib/compression/lz4/LICENSE) and [ZSTD](lib/compression/zstd/LICENSE) compression sources retain their BSD license notices. Their versions and source provenance are recorded in [lib/compression/UPSTREAM.md](lib/compression/UPSTREAM.md).
+
+The C client's CityHash implementation retains the [Google MIT license notice](lib/CITYHASH_LICENSE).
 
 ## Credits
 

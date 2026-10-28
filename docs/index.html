@@ -129,10 +129,10 @@ h2:hover .anchor, h3:hover .anchor { opacity: 1; }
 <main>
 
 <h1 id="intro">php_clickhouse</h1>
-<p class="tagline">Native PHP extension for ClickHouse, built on the official clickhouse-cpp v2.6.2 client.</p>
+<p class="tagline">Native PHP extension for ClickHouse, implemented in C around the official clickhouse-c protocol client.</p>
 <p class="lede">Speaks the native binary TCP protocol with LZ4 / ZSTD compression and optional TLS. This guide covers how to read and write every supported data type, configure the client, stream CSV/TSV, and use the full method surface. For install and benchmarks, see the <a href="https://github.com/iliaal/php_clickhouse">README</a>.</p>
 <p>
-  <span class="pill">PHP 7.4 – 8.5</span>
+  <span class="pill">PHP 7.4 – 8.6</span>
   <span class="pill">native TCP protocol</span>
   <span class="pill">LZ4 / ZSTD</span>
   <span class="pill">TLS</span>
@@ -386,7 +386,7 @@ $ch-&gt;insertFromStream(string $table, array $columns, mixed $stream,
 
 // Lazy read. selectStream() buffers raw result blocks for the iterator's
 // lifetime so it stays re-iterable (Countable, rewind); it does NOT reduce
-// peak memory for a huge result. For a genuinely streaming read holding one
+// peak memory for a huge result. For block-by-block reads that convert one
 // row at a time, use selectStreamCallback(). $fetch_mode is the trailing arg.
 $iter = $ch-&gt;selectStream(string $sql, array $params = [],
                           string $query_id = "", array $settings = [],
@@ -484,7 +484,7 @@ $ch-&gt;select("SELECT payload FROM events", [], ClickHouse::JSON_AS_ARRAY);
 $ch-&gt;select("SELECT payload FROM events", [], ClickHouse::JSON_AS_OBJECT);</code></pre>
 
 <h2 id="streaming">CSV / TSV streaming <a class="anchor" href="#streaming">#</a></h2>
-<p>Two methods move rows directly between a ClickHouse table and a PHP stream resource, formatting or parsing the bytes in C++ so neither path builds a full PHP result array. Both accept these formats: <code>TabSeparated</code> (alias <code>TSV</code>), <code>TabSeparatedWithNames</code> (alias <code>TSVWithNames</code>), <code>CSV</code>, and <code>CSVWithNames</code>.</p>
+<p>Two methods move rows directly between a ClickHouse table and a PHP stream resource, formatting or parsing the bytes in C so neither path builds a full PHP result array. Both accept these formats: <code>TabSeparated</code> (alias <code>TSV</code>), <code>TabSeparatedWithNames</code> (alias <code>TSVWithNames</code>), <code>CSV</code>, and <code>CSVWithNames</code>.</p>
 
 <h3>Reading: <code>selectToStream()</code></h3>
 <p>Writes query rows to a stream as TSV/CSV, block-by-block, and returns the number of rows written. Dates and datetimes emit ISO strings; <code>Decimal</code> / <code>Int128</code> / <code>UInt128</code> / <code>UUID</code> / <code>IPv4</code> / <code>IPv6</code> emit their string forms. <code>NULL</code> becomes <code>\N</code> in TSV and an unquoted <code>\N</code> in CSV (a real string equal to <code>"\N"</code> is quoted so it can't be misread as NULL).</p>
@@ -582,7 +582,7 @@ foreach ($ch-&gt;getLogQueries() as $q) {
 
 <hr>
 <footer>
-<p>php_clickhouse is built on the official <a href="https://github.com/ClickHouse/clickhouse-cpp">ClickHouse/clickhouse-cpp</a> v2.6.2 client. PHP wrapper licensed under <a href="http://www.php.net/license/3_01.txt">PHP-3.01</a>. By Ilia Alshanetsky.</p>
+<p>php_clickhouse uses the official <a href="https://github.com/ClickHouse/clickhouse-c/tree/084498e63a8e814d8f8ab9a32b923d7d6c3c7d9f">ClickHouse/clickhouse-c</a> protocol client, licensed under Apache 2.0. PHP bindings licensed under <a href="https://www.php.net/license/3_01.txt">PHP-3.01</a>. By Ilia Alshanetsky.</p>
 <p><a href="https://github.com/iliaal/php_clickhouse">GitHub</a> • <a href="https://github.com/iliaal/php_clickhouse#-install">Install</a> • <a href="https://ilia.ws">Blog</a></p>
 </footer>
 

@@ -26,6 +26,7 @@ insert followed by the stated number of selects.
 Set `BENCH_REPETITIONS` to change the sample count. Multiples of four
 preserve equal client-order exposure. `BENCH_SMOKE=1` runs a small
 two-sample connectivity and runner check.
+The published C-backend results use `BENCH_REPETITIONS=8`.
 
 The composer dependencies need `ext-curl`, `ext-mbstring`, `ext-phar`,
 `ext-tokenizer`. Use a stock distro PHP for the benchmark run if your
@@ -52,5 +53,11 @@ on an otherwise idle host and replace the table with the emitted Markdown.
   handshake that the extension's persistent connection does not. That is
   the client's own behaviour, but it is where much of the fixed per-query
   gap lives.
-- Only the median of the four samples is published; run-to-run spread is
-  not shown, and differences smaller than a few percent are inside noise.
+- Only medians are published; run-to-run spread is not shown.
+- ClickHouse 26.9 enables asynchronous inserts by default. Its adaptive
+  batching delay depends on queue history, and table UUIDs affect queue
+  assignment. This runner recreates its tables between invocations, so
+  comparing short-workload medians from separate runs can measure different
+  queue delays. For backend A/B measurements, create the tables once, retain
+  their UUIDs across both builds, and keep the existing per-sample truncation,
+  warm-up, workload, and checks unchanged.

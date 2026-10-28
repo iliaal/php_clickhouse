@@ -4,14 +4,15 @@
 
 - PHP 7.4 or later (8.x recommended; debug builds are useful for
   development: `--enable-debug`). Matches `composer.json` and the CI matrix.
-- C++17-capable compiler: GCC 8+, Clang 7+
+- C11-capable compiler: GCC or Clang on Unix; the MSVC toolset matching your PHP build on Windows
 - `phpize` and `php-config` (from `php-dev` / `php8.x-dev`)
 - GNU Make
 
-The vendored `lib/clickhouse-cpp/` includes its own copies of LZ4,
-ZSTD, abseil's int128, and CityHash. No external libraries are
-required to build the default extension. Building with TLS support
-needs OpenSSL development headers (`libssl-dev` on Debian/Ubuntu).
+The protocol client lives in `lib/clickhouse-c/`; LZ4 and ZSTD live in
+`lib/compression/`. Portable 128-bit arithmetic is implemented in `ch_wide.c`.
+The default build needs no external client or compression library, C++
+compiler, or Abseil. TLS builds need OpenSSL development headers and libraries
+(`libssl-dev` on Debian/Ubuntu), but not PHP's OpenSSL extension.
 
 ## Bug reports
 
@@ -76,40 +77,57 @@ and unexpected skips.
 
 ## Code style
 
-- Two-space indent for PHP, four-space for C/C++.
+- Two-space indent for PHP, four-space for C.
 - File headers carry the standard PHP-3.01 license block plus an
   `| Author: ` line. New files credit yourself there too.
-- Prefer adding to `clickhouse.cpp` and `typesToPhp.cpp` over creating
-  new translation units unless there's a structural reason. The build
-  rebuilds everything in one shot anyway and the symbol surface is
-  clearer when concentrated.
-- C++ exceptions caught at the PHP boundary must go through
-  `throwClickHouseError(e[, query_id])` so users get a
-  `ClickHouseException` with sanitized message and optional
-  `server_code` / `server_name` / `query_id`. Static validation
-  (bad config, empty columns, etc.) may call
-  `zend_throw_exception(clickhouse_exception_ce, ...)` directly.
-  Never throw with a NULL class entry for ClickHouse errors.
+- Keep changes in the component that owns the behavior: `clickhouse.c`
+  for module/configuration code, `ch_backend.c` for transport,
+  `ch_query.c` for query execution, `ch_insert.c` for insertion,
+  `ch_results.c` for results, and `ch_types_read.c` / `ch_types_write.c`
+  for conversion. Shared contracts live in `clickhouse_c_internal.h`,
+  `ch_backend.h`, and `ch_types.h`.
+- Return `CHC_*` status codes from the transport/protocol boundary.
+  Translate them with `ch_throw_error()` so PHP receives sanitized
+  `ClickHouseException` metadata. Preserve pending user exceptions.
+  When a PHP boundary creates a local validation error, preserve its
+  origin so `ch_annotate_local_exception()` can attach the query ID and
+  sanitize the message without changing callback exceptions.
+- Follow the ownership contracts in the shared headers. Decoded blocks may
+  outlive their connection; block builders borrow their column data until
+  sending completes. Never throw with a NULL class entry for ClickHouse errors.
 
 ## Vendored library updates
 
-`lib/clickhouse-cpp/` tracks a specific tag of
-[ClickHouse/clickhouse-cpp](https://github.com/ClickHouse/clickhouse-cpp).
-When bumping it:
+`lib/clickhouse-c/` tracks the commit recorded in
+[.upstream/clickhouse-c.yml](.upstream/clickhouse-c.yml). The current pin is
+`084498e63a8e814d8f8ab9a32b923d7d6c3c7d9f`. When updating it:
 
-1. Drop the new release into `lib/clickhouse-cpp/clickhouse/` and
-   `lib/clickhouse-cpp/contrib/` (keep cityhash, lz4, zstd, absl;
-   skip gtest, ut, bench, tests).
-2. Re-apply (or drop, if upstreamed) every patch listed in
-   `lib/clickhouse-cpp/LOCAL_PATCHES.md`. Bumping without this step
-   silently regresses the fixes the test suite depends on.
-3. Update the source list in `config.m4`. The list there is
-   alphabetical by directory; keep that order.
-4. Run the full test suite against the pinned
-   `clickhouse/clickhouse-server` digest in `.github/workflows/tests.yml`
-   (the `services.clickhouse.image` pin), not `:latest`.
-5. Note any breaking changes in `CHANGELOG.md` under the unreleased
-   section.
+1. Import the complete upstream source tree, including its license and tests,
+   from the chosen commit. Update the manifest's revision.
+2. Reapply or explicitly retire every patch documented in
+   `lib/clickhouse-c/LOCAL_PATCHES.md`. Keep the patch files under
+   `patches/clickhouse-c/` reproducible against the pinned source.
+3. Check the PHP compatibility options in `ch_protocol.c`, the transport
+   contract in `ch_backend.h`, and the source lists in `config.m4` and
+   `config.w32`. Preserve legacy-server revision gates, deferred external
+   data, decoding limits, error metadata, and compression configuration.
+4. Run `scripts/test-vendored-patches.sh` and
+   `scripts/check-vendored-patches.sh`. The latter reverses local patches and
+   compares the complete client tree with pristine upstream. Set
+   `CLICKHOUSE_C_PRISTINE` to a local pristine checkout for an offline check.
+5. Run the upstream tests and the full PHPT suite against the pinned server
+   digest in `.github/workflows/tests.yml`, plus the supported PHP, TLS,
+   Windows, and 32-bit lanes. Verify older-server compatibility separately;
+   upstream's default ClickHouse 23.3 minimum is not the PHP extension's
+   server-support contract.
+6. Record user-visible changes in `CHANGELOG.md` under Unreleased.
+
+The retained C compression sources have a separate provenance record in
+[lib/compression/UPSTREAM.md](lib/compression/UPSTREAM.md) and patch ledger in
+[lib/compression/LOCAL_PATCHES.md](lib/compression/LOCAL_PATCHES.md). The guard
+compares them with the sources shipped in ClickHouse/clickhouse-cpp v2.6.2;
+that checkout is a verification input, not a build dependency. Use
+`CLICKHOUSE_CODECS_PRISTINE` to supply it locally.
 
 ## Releases
 

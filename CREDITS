@@ -3,5 +3,11 @@ Ilia Alshanetsky <ilia@ilia.ws>
 
 Original SeasClick author: SeasX Group <ahhhh.wang@gmail.com>
 
-Vendored ClickHouse C++ client (lib/clickhouse-cpp/): ClickHouse, Inc.
+Vendored ClickHouse C client (lib/clickhouse-c/): ClickHouse, Inc.
 and contributors, Apache License 2.0.
+
+LZ4 (lib/compression/lz4/): Yann Collet and contributors,
+BSD 2-Clause license.
+ZSTD (lib/compression/zstd/): Meta Platforms, Inc. and affiliates,
+BSD 3-Clause license.
+CityHash: Google, Inc., MIT license; see lib/CITYHASH_LICENSE.

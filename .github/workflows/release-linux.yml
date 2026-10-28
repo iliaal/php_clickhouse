@@ -6,8 +6,8 @@ name: Release Linux & macOS binaries
 # uploads each as a release asset using PIE's pre-packaged-binary naming
 # convention. Assets upload only after every build and gate passes. PIE's
 # `pie install iliaal/php_clickhouse` then resolves the prebuilt asset
-# matching the host arch/os/libc/PHP-version instead of building
-# clickhouse-cpp from source (~3-5 min compile).
+# matching the host arch/os/libc/PHP-version instead of compiling the
+# extension and its bundled C dependencies from source.
 #
 # Coverage matrix: 3 lanes x 2 PHP = 6 prebuilt assets per release.
 #

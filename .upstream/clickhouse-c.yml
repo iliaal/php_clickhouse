@@ -1,0 +1,5 @@
+pinned: 084498e63a8e814d8f8ab9a32b923d7d6c3c7d9f
+vendored_at: lib/clickhouse-c
+resolver: github
+repo: ClickHouse/clickhouse-c
+note: "Pinned source + 1 local patches (patches/clickhouse-c/0001-php-compatibility.patch); see lib/clickhouse-c/LOCAL_PATCHES.md"

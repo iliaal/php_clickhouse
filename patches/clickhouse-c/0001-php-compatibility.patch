@@ -1,0 +1,2781 @@
+diff --git a/clickhouse.h b/clickhouse.h
+index 42c52e6..6f5f264 100644
+--- a/clickhouse.h
++++ b/clickhouse.h
+@@ -26,7 +26,7 @@
+ /* Macros use C23 features when available, degrading to GNU/builtin equivalent,
+  * then to harmless nop, so consumers may build under any -std >= c11 */
+
+-#if defined(__has_c_attribute)
++#if defined(__has_c_attribute) && defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L
+ #  define CHC__HAS_ATTR(x) __has_c_attribute(x)
+ #else
+ #  define CHC__HAS_ATTR(x) 0
+@@ -115,6 +115,9 @@ enum {
+ #ifndef CHC_ERR_MSG_LEN
+ #define CHC_ERR_MSG_LEN 256
+ #endif
++#ifndef CHC_PHP_COMPAT
++#define CHC_PHP_COMPAT 0
++#endif
+
+ typedef struct chc_err {
+     char msg[CHC_ERR_MSG_LEN];
+@@ -241,6 +244,8 @@ size_t       chc_type_qbit_dimension(const chc_type *t);
+  * number of FixedString bit-plane columns the column decodes into. */
+ size_t       chc_type_qbit_element_size(const chc_type *t);
+ const char  *chc_type_timezone(const chc_type *t, size_t *out_len);
++/* Borrowed spelling; use out_len. PHP compatibility nodes may share storage
++ * and are not individually NUL-terminated. */
+ const char  *chc_type_name(const chc_type *t, size_t *out_len);
+
+ size_t       chc_type_enum_count(const chc_type *t);
+@@ -331,6 +336,9 @@ int               chc_column_lc_key_size(const chc_column *c);
+ const void       *chc_column_lc_keys(const chc_column *c);
+ const chc_column *chc_column_lc_dict(const chc_column *c);
+
++/* Free a caller-owned column tree, not a borrowed column from a block. */
++void chc_column_destroy(chc_column *c, const chc_alloc *al);
++
+ /* Walk a column tree & enforce cross-field invariants the server itself
+  * enforces on its native deserialization path:
+  *   - Array offsets non-decreasing
+@@ -725,6 +733,9 @@ chc_alloc chc_alloc_stdlib(void) {
+ #ifndef CHC_MAX_STRING_SIZE
+ #define CHC_MAX_STRING_SIZE       (1ULL << 30)
+ #endif
++#ifndef CHC_MAX_PROTOCOL_STRING_SIZE
++#define CHC_MAX_PROTOCOL_STRING_SIZE CHC_MAX_STRING_SIZE
++#endif
+ #ifndef CHC_MAX_NUM_COLUMNS
+ #define CHC_MAX_NUM_COLUMNS       1000000ULL
+ #endif
+@@ -1007,39 +1018,131 @@ chc__read_u64_le(chc_in *in, uint64_t *out, chc_err *err)
+ }
+
+ static int
+-chc__read_string(chc_in *in, char **out, size_t *out_len, chc_err *err)
++chc__read_string_body(chc_in *in, size_t len, char **out, chc_err *err)
+ {
+     const chc_alloc *al = in->al;
++    char *buf = NULL;
++    size_t cap = 0, used = 0;
++    uint8_t chunk[8192];
++    while (used < len) {
++        size_t take = len - used < sizeof chunk ? len - used : sizeof chunk;
++        int rc = chc__read_bytes(in, chunk, take, err);
++        if (rc != CHC_OK) { al->free(al->ud, buf, cap); return rc; }
++        size_t need = used + take + 1;
++        if (need > cap) {
++            size_t next = cap && cap <= SIZE_MAX / 2 ? cap * 2 : need;
++            if (next < need) next = need;
++            if (next > len + 1) next = len + 1;
++            char *grown = chc__realloc(al, buf, cap, next, err);
++            if (!grown) { al->free(al->ud, buf, cap); return CHC_ERR_OOM; }
++            buf = grown;
++            cap = next;
++        }
++        memcpy(buf + used, chunk, take);
++        used += take;
++    }
++    if (!buf) {
++        buf = chc__alloc(al, 1, err);
++        if (!buf) return CHC_ERR_OOM;
++    }
++    buf[len] = '\0';
++    *out = buf;
++    return CHC_OK;
++}
++
++/* Grow only as preceding bytes arrive, retaining the allocation on failure. */
++static int
++chc__read_growing(chc_in *in, uint8_t **buf, size_t *cap,
++                  size_t loaded, size_t total, size_t first, bool reserve_ahead, chc_err *err)
++{
++    if (!in->io && total - loaded > in->fill - in->pos) return CHC_WOULD_BLOCK;
++    while (loaded < total) {
++        if (*cap <= loaded) {
++            size_t limit = reserve_ahead ? SIZE_MAX : total;
++            size_t next = loaded > limit / 8 ? limit : loaded * 8;
++            if (next < first) next = first;
++            if (next > total && !reserve_ahead) next = total;
++            uint8_t *grown = chc__realloc(in->al, *buf, *cap, next, err);
++            if (!grown) return CHC_ERR_OOM;
++            *buf = grown;
++            *cap = next;
++        }
++        size_t take = loaded > first ? loaded : first;
++        if (take > total - loaded) take = total - loaded;
++        if (take > *cap - loaded) take = *cap - loaded;
++        int rc = chc__read_bytes(in, *buf + loaded, take, err);
++        if (rc != CHC_OK) return rc;
++        loaded += take;
++    }
++    return CHC_OK;
++}
++
++/* The caller receives an exact-sized allocation only after the read succeeds. */
++static int
++chc__read_allocated(chc_in *in, size_t bytes, void **out, chc_err *err)
++{
++    uint8_t *buf = NULL;
++    size_t cap = 0;
++    int rc = chc__read_growing(in, &buf, &cap, 0, bytes, 1u << 20, false, err);
++    if (rc != CHC_OK) {
++        in->al->free(in->al->ud, buf, cap);
++        return rc;
++    }
++    *out = buf;
++    return CHC_OK;
++}
++
++static int
++chc__read_string(chc_in *in, char **out, size_t *out_len, chc_err *err)
++{
+     uint64_t len;
+     int rc = chc__read_varuint(in, &len, err);
+     if (rc != CHC_OK) return rc;
+-    if (len > CHC_MAX_STRING_SIZE)
++    if (len > CHC_MAX_PROTOCOL_STRING_SIZE || len >= SIZE_MAX)
+         return chc__err_set(err, CHC_ERR_PROTOCOL, "string too long: %llu",
+                             (unsigned long long) len);
+-    char *buf = chc__alloc(al, len + 1, err);
+-    if (!buf) return CHC_ERR_OOM;
+-    if (len) {
+-        rc = chc__read_bytes(in, buf, (size_t) len, err);
+-        if (rc != CHC_OK) { al->free(al->ud, buf, len + 1); return rc; }
+-    }
+-    buf[len] = '\0';
+-    *out = buf;
++    rc = chc__read_string_body(in, (size_t) len, out, err);
++    if (rc != CHC_OK) return rc;
+     *out_len = (size_t) len;
+     return CHC_OK;
+ }
+
+ /* -------- type AST internals ---------- */
+
++typedef struct {
++    size_t refs;
++    size_t bytes;
++} chc__type_spelling;
++
++enum {
++    CHC__PHP_FACTORY_OK,
++    CHC__PHP_FACTORY_CHILD_ZERO,
++    CHC__PHP_FACTORY_CHILD_LAST,
++    CHC__PHP_FACTORY_FIXEDSTRING_ZERO,
++    CHC__PHP_FACTORY_CONTENTS
++};
++
++static void
++chc__type_spelling_release(chc__type_spelling *spelling, const chc_alloc *al)
++{
++    if (spelling && !--spelling->refs)
++        al->free(al->ud, spelling, spelling->bytes);
++}
++
+ struct chc_type {
+     chc_kind  kind;
+     char     *name;
+     size_t    name_len;
++    chc__type_spelling *spelling;
++    unsigned php_factory_error;
+     size_t    n_children;
++    size_t    children_capacity;
+     chc_type **children;
+     /* For Tuple: parallel to children[]. NULL when tuple has no field names.
+      * Individual slots may be NULL for mixed-anonymity tuples (rare; CH allows it). */
+     char    **field_names;
+     size_t   *field_name_lens;
++    size_t    fields_capacity;
+     union {
+         struct { int n; }                              fixed_string;  /* FixedString(N) */
+         struct { int precision, scale; }               decimal;       /* Decimal(P, S) */
+@@ -1070,12 +1173,12 @@ chc_type_destroy(chc_type *t, const chc_alloc *al)
+     if (t->field_names) {
+         for (size_t i = 0; i < t->n_children; i++)
+             al->free(al->ud, t->field_names[i], t->field_name_lens[i] + 1);
+-        al->free(al->ud, t->field_names, t->n_children * sizeof *t->field_names);
++        al->free(al->ud, t->field_names, t->fields_capacity * sizeof *t->field_names);
+     }
+-    al->free(al->ud, t->field_name_lens, t->n_children * sizeof *t->field_name_lens);
++    al->free(al->ud, t->field_name_lens, t->fields_capacity * sizeof *t->field_name_lens);
+     for (size_t i = 0; i < t->n_children; i++)
+         chc_type_destroy(t->children[i], al);
+-    al->free(al->ud, t->children, t->n_children * sizeof *t->children);
++    al->free(al->ud, t->children, t->children_capacity * sizeof *t->children);
+     if (chc__kind_is_enum(t->kind) && t->enum_.items) {
+         for (size_t i = 0; i < t->enum_.n; i++)
+             al->free(al->ud, t->enum_.items[i].name,
+@@ -1086,7 +1189,8 @@ chc_type_destroy(chc_type *t, const chc_alloc *al)
+         al->free(al->ud, t->temporal.tz, t->temporal.tz_len + 1);
+     else if (chc__kind_is_agg(t->kind))
+         al->free(al->ud, t->agg.func, t->agg.func_len + 1);
+-    al->free(al->ud, t->name, t->name_len + 1);
++    if (t->spelling) chc__type_spelling_release(t->spelling, al);
++    else al->free(al->ud, t->name, t->name_len + 1);
+     al->free(al->ud, t, sizeof *t);
+ }
+
+@@ -1182,6 +1286,7 @@ typedef struct {
+     const char *cur, *end;
+     chc__tok    peeked;
+     bool        has_peek;
++    chc__type_spelling *spelling;
+ } chc__lex;
+
+ static chc__tok
+@@ -1427,11 +1532,18 @@ chc__type_push_child(const chc_alloc *al, chc_type *parent, chc_type *child,
+                      chc_err *err)
+ {
+     size_t n = parent->n_children;
+-    chc_type **arr = chc__realloc(al, parent->children,
+-                                  n * sizeof *arr, (n + 1) * sizeof *arr, err);
+-    if (!arr) return CHC_ERR_OOM;
+-    arr[n] = child;
+-    parent->children = arr;
++    if (n == parent->children_capacity) {
++        size_t limit = SIZE_MAX / sizeof *parent->children;
++        if (n == limit) return chc__err_set(err, CHC_ERR_OOM, "too many type children");
++        size_t next = n > limit / 2 ? limit : n * 2;
++        if (next < 4) next = 4;
++        chc_type **arr = chc__realloc(al, parent->children,
++            n * sizeof *arr, next * sizeof *arr, err);
++        if (!arr) return CHC_ERR_OOM;
++        parent->children = arr;
++        parent->children_capacity = next;
++    }
++    parent->children[n] = child;
+     parent->n_children = n + 1;
+     return CHC_OK;
+ }
+@@ -1472,24 +1584,32 @@ chc__fields_free(const chc_alloc *al, chc__fields *f)
+         al->free(al->ud, f->names[i], f->lens[i] + 1);
+     al->free(al->ud, f->names, f->n_names * sizeof *f->names);
+     al->free(al->ud, f->lens,  f->n_lens * sizeof *f->lens);
+-    *f = (chc__fields) {};
++    *f = (chc__fields) {0};
+ }
+
+ static int
+ chc__fields_grow(const chc_alloc *al, chc__fields *f, size_t n, chc_err *err)
+ {
++    if (n <= f->n_names && n <= f->n_lens) return CHC_OK;
++    size_t limit_names = SIZE_MAX / sizeof *f->names;
++    size_t limit_lens = SIZE_MAX / sizeof *f->lens;
++    size_t limit = limit_names < limit_lens ? limit_names : limit_lens;
++    if (n > limit) return chc__err_set(err, CHC_ERR_OOM, "too many tuple fields");
++    size_t next = f->n_names > limit / 2 ? limit : f->n_names * 2;
++    if (next < 4) next = 4;
++    if (next < n) next = n;
+     char **nn = chc__realloc(al, f->names, f->n_names * sizeof *f->names,
+-                             n * sizeof *f->names, err);
++                             next * sizeof *f->names, err);
+     if (!nn) return CHC_ERR_OOM;
+     f->names = nn;
+-    f->names[n - 1] = NULL;
+-    f->n_names = n;
++    memset(f->names + f->n_names, 0, (next - f->n_names) * sizeof *f->names);
++    f->n_names = next;
+     size_t *nl = chc__realloc(al, f->lens, f->n_lens * sizeof *f->lens,
+-                              n * sizeof *f->lens, err);
++                              next * sizeof *f->lens, err);
+     if (!nl) return CHC_ERR_OOM;
+     f->lens = nl;
+-    f->lens[n - 1] = 0;
+-    f->n_lens = n;
++    memset(f->lens + f->n_lens, 0, (next - f->n_lens) * sizeof *f->lens);
++    f->n_lens = next;
+     return CHC_OK;
+ }
+
+@@ -1504,27 +1624,35 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
+             (unsigned long long) CHC_MAX_TYPE_DEPTH);
+
+     chc__tok head = chc__eat_tok(lx);
+-    if (head.kind != CHC__TOK_NAME || head.quote)
++    int64_t literal_number;
++    bool literal = CHC_PHP_COMPAT &&
++        (head.kind == CHC__TOK_STRING ||
++         (head.kind == CHC__TOK_NUMBER && chc__atoi64(head.start, head.len, &literal_number)));
++    if (!literal && (head.kind != CHC__TOK_NAME || head.quote))
+         return chc__err_set(err, CHC_ERR_TYPE, "expected type name");
+
+     chc_type *t = chc__calloc(al, sizeof *t, err);
+     if (!t) return CHC_ERR_OOM;
+     bool decimal_alias = (head.len == 7 && memcmp(head.start, "Decimal", 7) == 0);
+-    if (decimal_alias) {
++    if (literal) {
++        /* The old AST retained literal arguments for the column factory to reject. */
++        t->kind = CHC_KIND_COUNT;
++    } else if (decimal_alias) {
+         t->kind = CHC_DECIMAL128;       /* placeholder; refined from precision */
+     } else {
+         const struct chc__name_row *row = chc__name_lookup(head.start, head.len);
+-        if (!row) {
++        if (!row && !CHC_PHP_COMPAT) {
+             chc_type_destroy(t, al);
+             return chc__err_set(err, CHC_ERR_TYPE, "unknown type: %.*s",
+                                 (int) head.len, head.start);
+         }
+-        t->kind = (chc_kind) row->kind;
++        t->kind = row ? (chc_kind) row->kind : CHC_KIND_COUNT;
+         if (t->kind == CHC_INTERVAL) t->interval = (chc_interval_unit) row->unit;
+     }
+
+     const char *name_start = head.start;
+     const char *name_end   = head.start + head.len;
++    const char *canonical_name = NULL;
+
+     /* ClickHouse defaults to milliseconds. */
+     if (t->kind == CHC_DATETIME64 || t->kind == CHC_TIME64)
+@@ -1534,7 +1662,33 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
+     if (chc__peek_tok(lx).kind == CHC__TOK_LPAREN) {
+         chc__eat_tok(lx);
+
+-        if (t->kind == CHC_ENUM8 || t->kind == CHC_ENUM16) {
++        bool empty_arguments = CHC_PHP_COMPAT && chc__peek_tok(lx).kind == CHC__TOK_RPAREN;
++        if (empty_arguments) {
++            if (decimal_alias || t->kind == CHC_SIMPLE_AGGREGATE_FUNCTION)
++                t->php_factory_error = CHC__PHP_FACTORY_CHILD_LAST;
++            else if (t->kind == CHC_ARRAY || t->kind == CHC_NULLABLE)
++                t->php_factory_error = CHC__PHP_FACTORY_CHILD_ZERO;
++            else if (t->kind == CHC_FIXED_STRING)
++                t->php_factory_error = CHC__PHP_FACTORY_FIXEDSTRING_ZERO;
++            else if (t->kind == CHC_ENUM8 || t->kind == CHC_ENUM16 || t->kind == CHC_MAP)
++                t->php_factory_error = CHC__PHP_FACTORY_CONTENTS;
++        }
++
++        if (empty_arguments && (t->php_factory_error || t->kind == CHC_DATETIME || t->kind == CHC_DATETIME64 ||
++                t->kind == CHC_TIME64 || t->kind == CHC_DECIMAL32 ||
++                t->kind == CHC_DECIMAL64 || t->kind == CHC_DECIMAL128)) {
++            switch (t->kind) {
++            case CHC_DATETIME: canonical_name = "DateTime"; break;
++            case CHC_DATETIME64: canonical_name = "DateTime64(0)"; t->temporal.scale = 0; break;
++            case CHC_TIME64: canonical_name = "Time64(0)"; t->temporal.scale = 0; break;
++            case CHC_DECIMAL32: canonical_name = "Decimal(9,0)"; break;
++            case CHC_DECIMAL64: canonical_name = "Decimal(18,0)"; break;
++            case CHC_DECIMAL128:
++                if (!decimal_alias) canonical_name = "Decimal(38,0)";
++                break;
++            default: break;
++            }
++        } else if (t->kind == CHC_ENUM8 || t->kind == CHC_ENUM16) {
+             /* 'name' = value, 'name' = value, ... */
+             while (chc__peek_tok(lx).kind != CHC__TOK_RPAREN) {
+                 chc__tok s = chc__eat_tok(lx);
+@@ -1572,9 +1726,14 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
+                 return chc__err_set(err, CHC_ERR_TYPE, "FixedString: expected N");
+             }
+             int64_t n;
+-            if (!chc__atoi64(num.start, num.len, &n)
++            bool parsed = chc__atoi64(num.start, num.len, &n);
++            if (!parsed
+                 || n <= 0 || (uint64_t) n > CHC_MAX_FIXEDSTRING_SIZE) {
+                 chc_type_destroy(t, al);
++                if (CHC_PHP_COMPAT && parsed)
++                    return chc__err_set(err, CHC_ERR_USAGE,
++                        "FixedString size must be between 1 and %llu, got %lld",
++                        (unsigned long long) CHC_MAX_FIXEDSTRING_SIZE, (long long) n);
+                 return chc__err_set(err, CHC_ERR_TYPE,
+                     "FixedString: N out of range: %.*s",
+                     (int) num.len, num.start);
+@@ -1768,12 +1927,12 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
+             bool        named     = (t->kind == CHC_TUPLE
+                                      || t->kind == CHC_NESTED);
+             bool        any_named = false;
+-            chc__fields fields    = {};
++            chc__fields fields    = {0};
+             for (;;) {
+                 chc__tok la = chc__peek_tok(lx);
+                 if (la.kind == CHC__TOK_RPAREN) break;
+
+-                chc__tok field = {};
++                chc__tok field = {0};
+                 bool has_field = false;
+                 if (named && la.kind == CHC__TOK_NAME) {
+                     chc__eat_tok(lx);
+@@ -1816,8 +1975,8 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
+                                               field.quote, &flen, err)
+                         : chc__strdup(al, field.start, field.len, err);
+                     if (nm) {
+-                        fields.names[fields.n_names - 1] = nm;
+-                        fields.lens[fields.n_names - 1]  = flen;
++                        fields.names[t->n_children - 1] = nm;
++                        fields.lens[t->n_children - 1]  = flen;
+                         any_named = true;
+                     } else
+                         rc = CHC_ERR_OOM;
+@@ -1839,6 +1998,7 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
+             if (any_named) {
+                 t->field_names     = fields.names;
+                 t->field_name_lens = fields.lens;
++                t->fields_capacity = fields.n_names;
+             } else
+                 chc__fields_free(al, &fields);
+         }
+@@ -1857,26 +2017,168 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
+         /* Treat Decimal without parameters as Decimal128 */
+     }
+
+-    t->name = chc__strdup(al, name_start, (size_t) (name_end - name_start), err);
+-    if (!t->name) { chc_type_destroy(t, al); return CHC_ERR_OOM; }
+-    t->name_len = (size_t) (name_end - name_start);
++    size_t stored_len = canonical_name ? strlen(canonical_name)
++        : literal ? 0 : (size_t) (name_end - name_start);
++    if (lx->spelling) {
++        t->name = (char *) (canonical_name ? canonical_name : name_start);
++        t->spelling = lx->spelling;
++        ++t->spelling->refs;
++    } else {
++        t->name = chc__strdup(al, name_start, stored_len, err);
++        if (!t->name) { chc_type_destroy(t, al); return CHC_ERR_OOM; }
++    }
++    t->name_len = stored_len;
+
+     *out = t;
+     return CHC_OK;
+ }
+
++static int
++chc__php_low_cardinality_error(const chc_type *nested, chc_err *err)
++{
++    const chc_type *inner = nested;
++    bool nullable = nested->kind == CHC_NULLABLE;
++    if (nullable && nested->n_children) inner = nested->children[0];
++    size_t len = 0;
++    while (len < inner->name_len && inner->name[len] != '(') ++len;
++    return chc__err_set(err, CHC_ERR_USAGE,
++        nullable ? "LowCardinality(Nullable(%.*s)) is not supported"
++                 : "LowCardinality(%.*s) is not supported", (int) len, inner->name);
++}
++
++static bool
++chc__php_terminal_kind(chc_kind kind)
++{
++    switch (kind) {
++    case CHC_INT8: case CHC_INT16: case CHC_INT32: case CHC_INT64: case CHC_INT128:
++    case CHC_UINT8: case CHC_UINT16: case CHC_UINT32: case CHC_UINT64: case CHC_UINT128:
++    case CHC_FLOAT32: case CHC_FLOAT64: case CHC_BOOL: case CHC_NOTHING: case CHC_VOID:
++    case CHC_STRING: case CHC_FIXED_STRING: case CHC_DATE: case CHC_DATE32:
++    case CHC_DATETIME: case CHC_DATETIME64: case CHC_TIME: case CHC_TIME64:
++    case CHC_DECIMAL32: case CHC_DECIMAL64: case CHC_DECIMAL128:
++    case CHC_UUID: case CHC_IPV4: case CHC_IPV6: case CHC_JSON:
++    case CHC_POINT: case CHC_RING: case CHC_POLYGON: case CHC_MULTI_POLYGON:
++        return true;
++    default:
++        return false;
++    }
++}
++
++/* Match the previous column factory before any column payload is consumed. */
++static int
++chc__php_factory_type(chc_type **slot, const chc_alloc *al, chc_err *err)
++{
++    chc_type *t = *slot;
++    switch (t->php_factory_error) {
++    case CHC__PHP_FACTORY_CHILD_ZERO:
++        return chc__err_set(err, CHC_ERR_USAGE, "AST child element index out of bounds: 0");
++    case CHC__PHP_FACTORY_CHILD_LAST:
++        return chc__err_set(err, CHC_ERR_USAGE, "AST child element index out of bounds: -1");
++    case CHC__PHP_FACTORY_FIXEDSTRING_ZERO:
++        return chc__err_set(err, CHC_ERR_USAGE,
++            "FixedString size must be between 1 and %llu, got 0",
++            (unsigned long long) CHC_MAX_FIXEDSTRING_SIZE);
++    case CHC__PHP_FACTORY_CONTENTS:
++        return chc__err_set(err, CHC_ERR_USAGE, "%s content is not correct",
++            t->kind == CHC_ENUM8 ? "Enum8" : t->kind == CHC_ENUM16 ? "Enum16" : "Map");
++    default: break;
++    }
++    if (t->kind == CHC_TUPLE && !t->n_children)
++        return chc__err_set(err, CHC_ERR_USAGE, "AST child element index out of bounds: 0");
++    if (t->kind == CHC_DATETIME64 || t->kind == CHC_TIME64 ||
++        t->kind == CHC_DECIMAL32 || t->kind == CHC_DECIMAL64 ||
++        t->kind == CHC_DECIMAL128 || t->kind == CHC_FIXED_STRING) {
++        if (!memchr(t->name, '(', t->name_len)) {
++            if (t->kind == CHC_DATETIME64 || t->kind == CHC_TIME64) return CHC_ERR_TYPE;
++            return chc__err_set(err, CHC_ERR_USAGE, "AST child element index out of bounds: 0");
++        }
++    }
++    if (t->kind == CHC_SIMPLE_AGGREGATE_FUNCTION) {
++        if (!t->n_children || !chc__php_terminal_kind(t->children[t->n_children - 1]->kind))
++            return CHC_ERR_TYPE;
++        size_t last = t->n_children - 1;
++        int rc = chc__php_factory_type(&t->children[last], al, err);
++        if (rc != CHC_OK) return rc;
++        *slot = t->children[last];
++        t->children[last] = NULL;
++        chc_type_destroy(t, al);
++        return CHC_OK;
++    }
++    if (t->kind == CHC_LOW_CARDINALITY) {
++        if (t->n_children != 1) return CHC_ERR_TYPE;
++        chc_type *nested = t->children[0];
++        if (nested->kind != CHC_STRING && nested->kind != CHC_FIXED_STRING && nested->kind != CHC_NULLABLE)
++            return chc__php_low_cardinality_error(nested, err);
++        int rc = chc__php_factory_type(&t->children[0], al, err);
++        if (rc == CHC_ERR_TYPE) return chc__php_low_cardinality_error(nested, err);
++        if (rc != CHC_OK) return rc;
++        const chc_type *dictionary = t->children[0];
++        while (dictionary->kind == CHC_NULLABLE) dictionary = dictionary->children[0];
++        if (dictionary->kind != CHC_STRING && dictionary->kind != CHC_FIXED_STRING)
++            return chc__err_set(err, CHC_ERR_USAGE,
++                "Unexpected dictionary column type: %.*s", (int) dictionary->name_len, dictionary->name);
++        return CHC_OK;
++    }
++    if ((t->kind == CHC_ARRAY || t->kind == CHC_NULLABLE) && t->n_children != 1)
++        return CHC_ERR_TYPE;
++    if (t->kind == CHC_MAP && t->n_children != 2) return CHC_ERR_TYPE;
++    if (!chc__php_terminal_kind(t->kind) && t->kind != CHC_ARRAY && t->kind != CHC_NULLABLE &&
++        t->kind != CHC_TUPLE && t->kind != CHC_MAP && t->kind != CHC_ENUM8 && t->kind != CHC_ENUM16)
++        return CHC_ERR_TYPE;
++    for (size_t i = 0; i < t->n_children; ++i) {
++        int rc = chc__php_factory_type(&t->children[i], al, err);
++        if (rc != CHC_OK) return rc;
++    }
++    return CHC_OK;
++}
++
++static int
++chc__php_parse_error(const char *name, size_t len, chc_err *err)
++{
++    return chc__err_set(err, CHC_ERR_TYPE, "unsupported column type: %.*s", (int) len, name);
++}
++
+ int
+ chc_type_parse(const char *name, size_t name_len,
+                const chc_alloc *al, chc_type **out, chc_err *err)
+ {
+-    chc__lex lx = { name, name + name_len, {}, false };
+-    int rc = chc__parse_type(&lx, al, name, name + name_len, 0, out, err);
+-    if (rc != CHC_OK) return rc;
++    *out = NULL;
++    chc__type_spelling *spelling = NULL;
++    const char *input = name;
++    if (CHC_PHP_COMPAT) {
++        if (name_len > SIZE_MAX - sizeof *spelling - 1)
++            return chc__err_set(err, CHC_ERR_OOM, "type spelling size overflow");
++        size_t bytes = sizeof *spelling + name_len + 1;
++        spelling = chc__alloc(al, bytes, err);
++        if (!spelling) return CHC_ERR_OOM;
++        spelling->refs = 1;
++        spelling->bytes = bytes;
++        char *data = (char *) (spelling + 1);
++        memcpy(data, name, name_len);
++        data[name_len] = '\0';
++        input = data;
++    }
++    chc__lex lx = { input, input + name_len, {0}, false, spelling };
++    int rc = chc__parse_type(&lx, al, input, input + name_len, 0, out, err);
++    chc__type_spelling_release(spelling, al);
++    if (rc != CHC_OK) {
++        if (CHC_PHP_COMPAT && rc == CHC_ERR_TYPE) return chc__php_parse_error(name, name_len, err);
++        return rc;
++    }
+     chc__tok tail = chc__eat_tok(&lx);
+     if (tail.kind != CHC__TOK_EOS) {
+         chc_type_destroy(*out, al);
+         *out = NULL;
+-        return chc__err_set(err, CHC_ERR_TYPE, "trailing tokens in type name");
++        return CHC_PHP_COMPAT ? chc__php_parse_error(name, name_len, err)
++                             : chc__err_set(err, CHC_ERR_TYPE, "trailing tokens in type name");
++    }
++    if (CHC_PHP_COMPAT) {
++        rc = chc__php_factory_type(out, al, err);
++        if (rc != CHC_OK) {
++            chc_type_destroy(*out, al);
++            *out = NULL;
++            return rc == CHC_ERR_TYPE ? chc__php_parse_error(name, name_len, err) : rc;
++        }
+     }
+     return CHC_OK;
+ }
+@@ -1968,6 +2270,12 @@ chc__column_destroy(chc_column *c, const chc_alloc *al)
+     al->free(al->ud, c, sizeof *c);
+ }
+
++void
++chc_column_destroy(chc_column *c, const chc_alloc *al)
++{
++    chc__column_destroy(c, al);
++}
++
+ int
+ chc_column_validate(const chc_column *c, chc_err *err)
+ {
+@@ -2069,9 +2377,7 @@ chc__col_read_fixed(chc_in *in, size_t elem_size, size_t n_rows,
+             chc__column_destroy(c, al);
+             return chc__err_set(err, CHC_ERR_PROTOCOL, "column size overflow");
+         }
+-        c->fixed.data = chc__alloc(al, nbytes, err);
+-        if (!c->fixed.data) { chc__column_destroy(c, al); return CHC_ERR_OOM; }
+-        int rc = chc__read_bytes(in, c->fixed.data, nbytes, err);
++        int rc = chc__read_allocated(in, nbytes, &c->fixed.data, err);
+         if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
+     }
+     *out = c;
+@@ -2093,8 +2399,7 @@ chc__col_read_string(chc_in *in, size_t n_rows,
+         chc__column_destroy(c, al);
+         return chc__err_set(err, CHC_ERR_PROTOCOL, "string column size overflow");
+     }
+-    c->str.offsets = chc__alloc(al, offs_bytes, err);
+-    if (!c->str.offsets) { chc__column_destroy(c, al); return CHC_ERR_OOM; }
++    size_t offsets_cap = 0;
+     size_t cap = 256;
+     size_t total = 0;
+     c->str.data = chc__alloc(al, cap, err);
+@@ -2103,23 +2408,26 @@ chc__col_read_string(chc_in *in, size_t n_rows,
+     for (size_t i = 0; i < n_rows; i++) {
+         uint64_t len;
+         int rc = chc__read_varuint(in, &len, err);
+-        if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
+-        if (len > CHC_MAX_STRING_SIZE) { chc__column_destroy(c, al);
+-            return chc__err_set(err, CHC_ERR_PROTOCOL, "string row too long"); }
+-        if (total + len > cap) {
+-            size_t new_cap = cap;
+-            while (new_cap < total + len) new_cap *= 2;
+-            uint8_t *r = chc__realloc(al, c->str.data, cap, new_cap, err);
+-            if (!r) { chc__column_destroy(c, al); return CHC_ERR_OOM; }
+-            c->str.data = r;
+-            cap = new_cap;
+-            c->str.bytes = cap;
++        if (rc == CHC_OK && (len > CHC_MAX_STRING_SIZE || len > SIZE_MAX - total))
++            rc = chc__err_set(err, CHC_ERR_PROTOCOL, "string row too long");
++        if (rc == CHC_OK)
++            rc = chc__read_growing(in, &c->str.data, &c->str.bytes,
++                                   total, total + (size_t) len, 256, true, err);
++        if (rc == CHC_OK && (i + 1) * sizeof(uint64_t) > offsets_cap) {
++            size_t next = offsets_cap > offs_bytes / 8 ? offs_bytes : offsets_cap * 8;
++            if (next < (1u << 20)) next = 1u << 20;
++            if (next > offs_bytes) next = offs_bytes;
++            uint64_t *grown = chc__realloc(al, c->str.offsets, offsets_cap, next, err);
++            if (!grown) rc = CHC_ERR_OOM;
++            else { c->str.offsets = grown; offsets_cap = next; }
+         }
+-        if (len) {
+-            rc = chc__read_bytes(in, c->str.data + total, (size_t) len, err);
+-            if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
++        if (rc != CHC_OK) {
++            al->free(al->ud, c->str.offsets, offsets_cap);
++            c->str.offsets = NULL;
++            chc__column_destroy(c, al);
++            return rc;
+         }
+-        total += len;
++        total += (size_t) len;
+         c->str.offsets[i] = total;
+     }
+     *out = c;
+@@ -2392,6 +2700,9 @@ chc__col_read(chc_in *in, const chc_type *t,
+     const chc_alloc *al = in->al;
+     /* Tier 1 / FIXED scalar */
+     size_t es = chc_type_elem_size(t);
++    if (CHC_PHP_COMPAT && t->kind == CHC_FIXED_STRING && es && n_rows > SIZE_MAX / es)
++        return chc__err_set(err, CHC_ERR_PROTOCOL,
++            "FixedString(%zu) column with %zu rows exceeds the addressable size", es, n_rows);
+     if (es) return chc__col_read_fixed(in, es, n_rows, out, err);
+
+     switch (t->kind) {
+@@ -2410,9 +2721,9 @@ chc__col_read(chc_in *in, const chc_type *t,
+         c->layout = CHC_COL_NULLABLE;
+         c->n_rows = n_rows;
+         if (n_rows) {
+-            c->nullable.null_map = chc__alloc(al, n_rows, err);
+-            if (!c->nullable.null_map) { chc__column_destroy(c, al); return CHC_ERR_OOM; }
+-            int rc = chc__read_bytes(in, c->nullable.null_map, n_rows, err);
++            void *null_map = NULL;
++            int rc = chc__read_allocated(in, n_rows, &null_map, err);
++            c->nullable.null_map = null_map;
+             if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
+         }
+         int rc = chc__col_read(in, t->children[0], n_rows, &c->nullable.inner, err);
+@@ -2441,13 +2752,26 @@ chc__col_read(chc_in *in, const chc_type *t,
+                 chc__column_destroy(c, al);
+                 return chc__err_set(err, CHC_ERR_PROTOCOL, "array offsets size overflow");
+             }
+-            c->array.offsets = chc__alloc(al, offs_bytes, err);
+-            if (!c->array.offsets) { chc__column_destroy(c, al); return CHC_ERR_OOM; }
+-            int rc = chc__read_bytes(in, c->array.offsets, offs_bytes, err);
++            void *offsets = NULL;
++            int rc = chc__read_allocated(in, offs_bytes, &offsets, err);
++            c->array.offsets = offsets;
+             if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
+             chc__swap_offsets(c->array.offsets, n_rows);
++            if (CHC_PHP_COMPAT) {
++                uint64_t previous = 0;
++                for (size_t row = 0; row < n_rows; ++row) {
++                    uint64_t offset = c->array.offsets[row];
++                    if (offset < previous) {
++                        chc__column_destroy(c, al);
++                        return chc__err_set(err, CHC_ERR_PROTOCOL,
++                            "Array offsets must be non-decreasing: offset %llu at row %zu is less than previous offset %llu",
++                            (unsigned long long) offset, row, (unsigned long long) previous);
++                    }
++                    previous = offset;
++                }
++            }
+             total = c->array.offsets[n_rows - 1];
+-            if (total > CHC_MAX_NUM_ROWS) {
++            if (total > CHC_MAX_NUM_ROWS || total > SIZE_MAX) {
+                 chc__column_destroy(c, al);
+                 return chc__err_set(err, CHC_ERR_PROTOCOL,
+                     "array nested length too large: %llu",
+@@ -2546,7 +2870,7 @@ chc__col_read(chc_in *in, const chc_type *t,
+         uint64_t dict_n;
+         rc = chc__read_u64_le(in, &dict_n, err);
+         if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
+-        if (dict_n > CHC_MAX_NUM_ROWS) {
++        if (dict_n > CHC_MAX_NUM_ROWS || dict_n > SIZE_MAX) {
+             chc__column_destroy(c, al);
+             return chc__err_set(err, CHC_ERR_PROTOCOL,
+                 "LowCardinality dictionary too large: %llu",
+@@ -2594,9 +2918,7 @@ chc__col_read(chc_in *in, const chc_type *t,
+             chc__column_destroy(c, al);
+             return chc__err_set(err, CHC_ERR_PROTOCOL, "LowCardinality keys size overflow");
+         }
+-        c->lc.keys = chc__alloc(al, keys_bytes, err);
+-        if (!c->lc.keys) { chc__column_destroy(c, al); return CHC_ERR_OOM; }
+-        rc = chc__read_bytes(in, c->lc.keys, keys_bytes, err);
++        rc = chc__read_allocated(in, keys_bytes, &c->lc.keys, err);
+         if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
+         chc__swap_keys(c->lc.keys, n_rows, c->lc.key_size);
+
+@@ -2711,6 +3033,7 @@ chc__read_kinds(chc_in *in, const chc_type *t, uint8_t **out, size_t *out_len,
+
+ struct chc_block {
+     size_t        n_columns;
++    size_t        allocated_columns;
+     size_t        n_rows;
+     bool          is_overflows;
+     int32_t       bucket_num;
+@@ -2724,19 +3047,57 @@ void
+ chc_block_destroy(chc_block *b, const chc_alloc *al)
+ {
+     if (!b) return;
+-    for (size_t i = 0; i < b->n_columns; i++) {
++    for (size_t i = 0; i < b->allocated_columns; i++) {
+         if (b->names && b->names[i])
+             al->free(al->ud, b->names[i], b->name_lens[i] + 1);
+         if (b->types) chc_type_destroy(b->types[i], al);
+         if (b->columns) chc__column_destroy(b->columns[i], al);
+     }
+-    al->free(al->ud, b->names,     b->n_columns * sizeof *b->names);
+-    al->free(al->ud, b->name_lens, b->n_columns * sizeof *b->name_lens);
+-    al->free(al->ud, b->types,     b->n_columns * sizeof *b->types);
+-    al->free(al->ud, b->columns,   b->n_columns * sizeof *b->columns);
++    al->free(al->ud, b->names,     b->allocated_columns * sizeof *b->names);
++    al->free(al->ud, b->name_lens, b->allocated_columns * sizeof *b->name_lens);
++    al->free(al->ud, b->types,     b->allocated_columns * sizeof *b->types);
++    al->free(al->ud, b->columns,   b->allocated_columns * sizeof *b->columns);
+     al->free(al->ud, b, sizeof *b);
+ }
+
++static int
++chc__block_reserve_column(chc_block *b, size_t index, const chc_alloc *al, chc_err *err)
++{
++    if (index < b->allocated_columns) return CHC_OK;
++    size_t next = b->allocated_columns > b->n_columns / 2
++        ? b->n_columns : b->allocated_columns * 2;
++    if (next < 16) next = 16;
++    if (next > b->n_columns) next = b->n_columns;
++    char **names = chc__calloc(al, next * sizeof *names, err);
++    size_t *lengths = chc__calloc(al, next * sizeof *lengths, err);
++    chc_type **types = chc__calloc(al, next * sizeof *types, err);
++    chc_column **columns = chc__calloc(al, next * sizeof *columns, err);
++    if (!names || !lengths || !types || !columns) {
++        al->free(al->ud, names, next * sizeof *names);
++        al->free(al->ud, lengths, next * sizeof *lengths);
++        al->free(al->ud, types, next * sizeof *types);
++        al->free(al->ud, columns, next * sizeof *columns);
++        return CHC_ERR_OOM;
++    }
++    size_t previous = b->allocated_columns;
++    if (previous) {
++        memcpy(names, b->names, previous * sizeof *names);
++        memcpy(lengths, b->name_lens, previous * sizeof *lengths);
++        memcpy(types, b->types, previous * sizeof *types);
++        memcpy(columns, b->columns, previous * sizeof *columns);
++    }
++    al->free(al->ud, b->names, previous * sizeof *names);
++    al->free(al->ud, b->name_lens, previous * sizeof *lengths);
++    al->free(al->ud, b->types, previous * sizeof *types);
++    al->free(al->ud, b->columns, previous * sizeof *columns);
++    b->names = names;
++    b->name_lens = lengths;
++    b->types = types;
++    b->columns = columns;
++    b->allocated_columns = next;
++    return CHC_OK;
++}
++
+ size_t            chc_block_n_rows(const chc_block *b)    { return b ? b->n_rows : 0; }
+ size_t            chc_block_n_columns(const chc_block *b) { return b ? b->n_columns : 0; }
+ const char       *chc_block_column_name(const chc_block *b, size_t i, size_t *out_len) {
+@@ -2831,12 +3192,22 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
+         rc = chc__read_varuint(in, &nrows, err);
+         if (rc != CHC_OK) goto header_fail;
+
+-        if (ncols > CHC_MAX_NUM_COLUMNS) {
++        if (CHC_PHP_COMPAT && (ncols > SIZE_MAX || nrows > SIZE_MAX)) {
++            rc = chc__err_set(err, CHC_ERR_PROTOCOL,
++                "block declares %llu columns and %llu rows, more than size_t can hold",
++                (unsigned long long) ncols, (unsigned long long) nrows);
++            goto header_fail;
++        }
++        if (ncols > CHC_MAX_NUM_COLUMNS ||
++            ncols > SIZE_MAX / sizeof *b->names ||
++            ncols > SIZE_MAX / sizeof *b->name_lens ||
++            ncols > SIZE_MAX / sizeof *b->types ||
++            ncols > SIZE_MAX / sizeof *b->columns) {
+             rc = chc__err_set(err, CHC_ERR_PROTOCOL,
+                 "suspiciously many columns: %llu", (unsigned long long) ncols);
+             goto header_fail;
+         }
+-        if (nrows > CHC_MAX_NUM_ROWS) {
++        if (nrows > CHC_MAX_NUM_ROWS || nrows > SIZE_MAX) {
+             rc = chc__err_set(err, CHC_ERR_PROTOCOL,
+                 "suspiciously many rows: %llu", (unsigned long long) nrows);
+             goto header_fail;
+@@ -2844,15 +3215,6 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
+
+         b->n_columns = (size_t) ncols;
+         b->n_rows    = (size_t) nrows;
+-        if (ncols) {
+-            b->names     = chc__calloc(al, ncols * sizeof *b->names,     err);
+-            b->name_lens = chc__calloc(al, ncols * sizeof *b->name_lens, err);
+-            b->types     = chc__calloc(al, ncols * sizeof *b->types,     err);
+-            b->columns   = chc__calloc(al, ncols * sizeof *b->columns,   err);
+-            if (!b->names || !b->name_lens || !b->types || !b->columns) {
+-                rc = CHC_ERR_OOM; goto header_fail;
+-            }
+-        }
+
+         /* Header fully parsed; commit the block and start at column 0. */
+         *blk = b;
+@@ -2863,6 +3225,8 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
+     for (size_t i = *next_col; i < b->n_columns; i++) {
+         char *type_name; size_t type_len;
+         uint8_t *kinds = NULL; size_t kinds_len = 0;
++        rc = chc__block_reserve_column(b, i, al, err);
++        if (rc != CHC_OK) goto col_fail;
+
+         /* Checkpoint column start so a mid-column would-block rewinds here,
+          * dropping completed columns' wire bytes on the caller's next submit. */
+@@ -2890,6 +3254,15 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
+             const uint8_t *cursor = kinds;
+             rc = kinds ? chc__col_read_kinds(in, b->types[i], nrows, &cursor, &b->columns[i], err)
+                        : chc__col_read(in, b->types[i], nrows, &b->columns[i], err);
++            if (CHC_PHP_COMPAT && rc == CHC_OK &&
++                chc_column_validate(b->columns[i], err) != CHC_OK)
++                rc = chc__err_set(err, CHC_ERR_PROTOCOL, "can't load column '%.*s' of type %.*s",
++                    (int) b->name_lens[i], b->names[i],
++                    (int) b->types[i]->name_len, b->types[i]->name);
++            if (CHC_PHP_COMPAT && rc == CHC_ERR_EOF)
++                rc = chc__err_set(err, CHC_ERR_PROTOCOL, "can't load column '%.*s' of type %.*s",
++                    (int) b->name_lens[i], b->names[i],
++                    (int) b->types[i]->name_len, b->types[i]->name);
+             if (rc != CHC_OK) goto col_fail;
+         }
+         al->free(al->ud, kinds, kinds_len);
+@@ -2937,7 +3310,7 @@ int
+ chc_block_read(chc_in *in, const chc_alloc *al,
+                const chc_block_opts *opts, chc_block **out, chc_err *err)
+ {
+-    chc_block_opts def = {};
++    chc_block_opts def = {0};
+     if (!opts) opts = &def;
+     /* Snapshot to roll back resume's per-column checkpoint progress: this
+      * non-resuming entry is baseline (rewind to packet start), so a would-block
+@@ -3344,7 +3717,7 @@ chc__col_write(chc_io *io, const chc_column *c, const chc_type *t, chc_err *err)
+
+     case CHC_NOTHING:
+     case CHC_VOID: {
+-        uint8_t zeros[256] = {};
++        uint8_t zeros[256] = {0};
+         size_t left = c->n_rows;
+         while (left) {
+             size_t take = left < sizeof zeros ? left : sizeof zeros;
+@@ -3364,7 +3737,7 @@ chc_block_write_cols(chc_io *io, const chc_block_col *cols,
+                      size_t n_cols, size_t n_rows,
+                      const chc_block_opts *opts, chc_err *err)
+ {
+-    chc_block_opts def = {};
++    chc_block_opts def = {0};
+     if (!opts) opts = &def;
+
+     if (opts->has_block_info) {
+@@ -3390,12 +3763,7 @@ chc_block_write_cols(chc_io *io, const chc_block_col *cols,
+         rc = chc__write_string(io, e->name, e->name_len, err);
+         if (rc != CHC_OK) return rc;
+
+-        char tbuf[256];
+-        size_t need = chc_type_format(e->type, tbuf, sizeof tbuf);
+-        if (need >= sizeof tbuf)
+-            return chc__err_set(err, CHC_ERR_USAGE,
+-                "type name too long for inline buffer");
+-        rc = chc__write_string(io, tbuf, need, err);
++        rc = chc__write_string(io, e->type->name, e->type->name_len, err);
+         if (rc != CHC_OK) return rc;
+
+         if (opts->has_custom_serialization) {
+diff --git a/clickhouse-client.h b/clickhouse-client.h
+index a27b217..697cdb1 100644
+--- a/clickhouse-client.h
++++ b/clickhouse-client.h
+@@ -26,8 +26,8 @@ extern "C" {
+ /* Protocol revisions & feature gates are documented in the Native Protocol
+  * spec: clickhouse.com/docs/reference/interfaces/specs/NativeProtocol
+  *
+- * Oldest supported server is ClickHouse 23.3. Client advertises
+- * SPARSE_SERIALIZATION (54465). */
++ * The default minimum is ClickHouse 23.3. Compatibility callers can opt into
++ * legacy revision gates. The default advertised revision is 54465. */
+ #define CHC_SERVER_MIN_REVISION 54462u
+ #define CHC_CLIENT_REVISION     54465u
+
+@@ -49,6 +49,15 @@ typedef struct chc_client_opts {
+
+     /* Internal read buffer size. 0 = use CHC_READ_BUFFER (8 KiB). */
+     size_t read_buffer_bytes;
++
++    /* Compatibility overrides. Zero-initialized options retain upstream defaults. */
++    uint64_t protocol_revision;     /* 0 = CHC_CLIENT_REVISION */
++    bool skip_init_ping;
++    bool allow_legacy_server;
++    bool strings_have_lengths;
++    size_t client_name_len, database_len, user_len, password_len;
++    bool has_max_compression_chunk_size;
++    size_t max_compression_chunk_size; /* explicit 0 = no configured cap */
+ } chc_client_opts;
+
+ typedef struct chc_server_info {
+@@ -58,7 +67,11 @@ typedef struct chc_server_info {
+     uint64_t version_major;
+     uint64_t version_minor;
+     uint64_t version_patch;
+-    uint64_t revision;              /* min(CHC_CLIENT_REVISION, server revision) */
++    uint64_t revision;              /* min(advertised revision, server revision) */
++    uint64_t server_revision;       /* actual server revision, before negotiation */
++    /* Untruncated strings owned by the client until close or timezone update. */
++    char *full_name, *full_timezone, *full_display_name;
++    size_t full_name_len, full_timezone_len, full_display_name_len;
+ } chc_server_info;
+
+ typedef struct chc_client chc_client;
+@@ -84,7 +97,8 @@ int  chc_client_send_query(chc_client *c,
+                            const char *query_id, size_t query_id_len,
+                            chc_err *err);
+
+-/* Per-query setting. name / value are NUL-terminated. Flags layout per the
++/* Per-query setting. name / value are NUL-terminated unless strings_have_lengths.
++ * Flags layout per the
+  * Native Protocol spec (Query packet, settings entry); only the low two
+  * bits are assigned. */
+ typedef struct chc_query_setting {
+@@ -92,10 +106,13 @@ typedef struct chc_query_setting {
+     const char *value;
+     bool        important;          /* flag bit 0 */
+     bool        custom;             /* flag bit 1 (user-defined "SET custom_*=...") */
++    bool        strings_have_lengths;
++    size_t      name_len, value_len;
+ } chc_query_setting;
+
+ /* Per-query parameter (substituted into `{name:Type}` placeholders in the
+- * SQL text). name / value are NUL-terminated. The wire-level flags byte is
++ * SQL text). name / value are NUL-terminated unless strings_have_lengths.
++ * The wire-level flags byte is
+  * always CUSTOM. The server parses value via Field::restoreFromDump, so
+  * callers must format value as a typed Field literal: e.g. `'hello'` for a
+  * String, `42` for an integer, `[1,2,3]` for an array. NULL is `'\\N'`.
+@@ -104,6 +121,8 @@ typedef struct chc_query_setting {
+ typedef struct chc_query_param {
+     const char *name;
+     const char *value;
++    bool        strings_have_lengths;
++    size_t      name_len, value_len;
+ } chc_query_param;
+
+ typedef struct chc_query_opts {
+@@ -113,6 +132,7 @@ typedef struct chc_query_opts {
+     size_t                   n_settings;
+     const chc_query_param   *params;
+     size_t                   n_params;
++    bool                     defer_data_terminator;
+ } chc_query_opts;
+
+ int  chc_client_send_query_ex(chc_client *c,
+@@ -194,6 +214,9 @@ void chc_packet_clear(chc_client *c, chc_packet *p);
+  * sent at the end of every SendQuery. */
+ int  chc_client_send_data(chc_client *c, const chc_block_builder *bb,
+                           chc_err *err);
++int  chc_client_send_data_named(chc_client *c, const chc_block_builder *bb,
++                                const char *table_name, size_t table_name_len,
++                                chc_err *err);
+
+ int  chc_client_send_cancel(chc_client *c, chc_err *err);
+ int  chc_client_send_ping(chc_client *c, chc_err *err);
+@@ -203,19 +226,36 @@ int  chc_client_send_ping(chc_client *c, chc_err *err);
+ #include <stdlib.h>
+ #include <string.h>
+
+-/* Only gate above CHC_SERVER_MIN_REVISION, Progress omits total_bytes below
+- * it. TimezoneUpdate (54464) & sparse (54465) decode at any revision */
++#define CHC__REV_TEMPORARY_TABLES 50264u
++#define CHC__REV_TOTAL_ROWS_IN_PROGRESS 51554u
++#define CHC__REV_BLOCK_INFO 51903u
++#define CHC__REV_CLIENT_INFO 54032u
++#define CHC__REV_SERVER_TIMEZONE 54058u
++#define CHC__REV_QUOTA_KEY 54060u
++#define CHC__REV_SERVER_DISPLAY_NAME 54372u
++#define CHC__REV_VERSION_PATCH 54401u
++#define CHC__REV_CLIENT_WRITE_INFO 54420u
++#define CHC__REV_STRING_SETTINGS 54429u
++#define CHC__REV_INTERSERVER_SECRET 54441u
++#define CHC__REV_OPENTELEMETRY 54442u
++#define CHC__REV_DISTRIBUTED_DEPTH 54448u
++#define CHC__REV_INITIAL_QUERY_TIME 54449u
++#define CHC__REV_PARALLEL_REPLICAS 54453u
++#define CHC__REV_CUSTOM_SERIALIZATION 54454u
++#define CHC__REV_ADDENDUM 54458u
++#define CHC__REV_PARAMETERS 54459u
++#define CHC__REV_PASSWORD_RULES 54461u
++#define CHC__REV_NONCE 54462u
+ #define CHC__REV_TOTAL_BYTES_IN_PROGRESS 54463u
++#define CHC__REV_ELAPSED_NS_IN_PROGRESS 54460u
+
+ /* Mirror ClickHouse DBMS_MAX_HELLO_STRING_SIZE & DBMS_MAX_PASSWORD_COMPLEXITY_RULES */
+-#define CHC__MAX_HELLO_STRING   4096u
++#ifndef CHC_MAX_HELLO_STRING_SIZE
++#define CHC_MAX_HELLO_STRING_SIZE 4096u
++#endif
++#define CHC__MAX_HELLO_STRING CHC_MAX_HELLO_STRING_SIZE
+ #define CHC__MAX_PASSWORD_RULES 256u
+
+-static const chc_block_opts chc__tcp_block_opts = {
+-    .has_block_info = true,
+-    .has_custom_serialization = true,
+-};
+-
+ /* Client → server packet kinds. */
+ #define CHC__CLIENT_HELLO  0u
+ #define CHC__CLIENT_QUERY  1u
+@@ -232,6 +272,12 @@ struct chc_client {
+     uint64_t         client_version_major;
+     uint64_t         client_version_minor;
+     uint64_t         client_version_patch;
++    uint64_t         protocol_revision;
++    bool             skip_init_ping;
++    bool             allow_legacy_server;
++    size_t           max_compression_chunk_size;
++    char            *client_name;
++    size_t           client_name_len;
+     chc_compression  compression;
+     const chc_codec *codec;
+
+@@ -298,19 +344,28 @@ chc__client_send_hello(chc_client *c, const chc_client_opts *opts, chc_err *err)
+ {
+     int rc;
+     const char *name = opts->client_name ? opts->client_name : "clickhouse-c";
+-    size_t name_len = strlen(name);
++    size_t name_len = opts->strings_have_lengths && opts->client_name
++        ? opts->client_name_len : strlen(name);
+     const char *db  = opts->database ? opts->database : "default";
+     const char *us  = opts->user     ? opts->user     : "default";
+     const char *pw  = opts->password ? opts->password : "";
++    size_t db_len = opts->strings_have_lengths && opts->database ? opts->database_len : strlen(db);
++    size_t us_len = opts->strings_have_lengths && opts->user ? opts->user_len : strlen(us);
++    size_t pw_len = opts->strings_have_lengths && opts->password ? opts->password_len : strlen(pw);
++    if (CHC_PHP_COMPAT && !c->client_name) {
++        c->client_name = chc__strdup(c->al, name, name_len, err);
++        if (!c->client_name) return CHC_ERR_OOM;
++        c->client_name_len = name_len;
++    }
+
+     if ((rc = chc__write_varuint(c->io, CHC__CLIENT_HELLO, err))) return rc;
+     if ((rc = chc__write_string (c->io, name, name_len, err)))   return rc;
+     if ((rc = chc__write_varuint(c->io, opts->client_version_major, err))) return rc;
+     if ((rc = chc__write_varuint(c->io, opts->client_version_minor, err))) return rc;
+-    if ((rc = chc__write_varuint(c->io, CHC_CLIENT_REVISION, err))) return rc;
+-    if ((rc = chc__write_string (c->io, db, strlen(db), err))) return rc;
+-    if ((rc = chc__write_string (c->io, us, strlen(us), err))) return rc;
+-    if ((rc = chc__write_string (c->io, pw, strlen(pw), err))) return rc;
++    if ((rc = chc__write_varuint(c->io, c->protocol_revision, err))) return rc;
++    if ((rc = chc__write_string (c->io, db, db_len, err))) return rc;
++    if ((rc = chc__write_string (c->io, us, us_len, err))) return rc;
++    if ((rc = chc__write_string (c->io, pw, pw_len, err))) return rc;
+     return CHC_OK;
+ }
+
+@@ -321,7 +376,7 @@ chc__read_server_string(chc_in *in, char *dst, size_t cap, chc_err *err)
+     uint64_t len;
+     int rc = chc__read_varuint(in, &len, err);
+     if (rc != CHC_OK) return rc;
+-    if (len > CHC__MAX_HELLO_STRING)
++    if (len > CHC__MAX_HELLO_STRING || len >= SIZE_MAX)
+         return chc__err_set(err, CHC_ERR_PROTOCOL, "server string too long: %llu",
+                             (unsigned long long) len);
+     size_t n = len < cap ? (size_t) len : cap - 1;
+@@ -330,13 +385,50 @@ chc__read_server_string(chc_in *in, char *dst, size_t cap, chc_err *err)
+     return chc__skip_bytes(in, (size_t) len - n, err);
+ }
+
++static void
++chc__server_info_free(chc_server_info *s, const chc_alloc *al)
++{
++    al->free(al->ud, s->full_name, s->full_name_len + 1);
++    al->free(al->ud, s->full_timezone, s->full_timezone_len + 1);
++    al->free(al->ud, s->full_display_name, s->full_display_name_len + 1);
++    s->full_name = s->full_timezone = s->full_display_name = NULL;
++    s->full_name_len = s->full_timezone_len = s->full_display_name_len = 0;
++}
++
++/* Publish neither the full value nor its compatibility prefix until complete. */
++static int
++chc__read_server_string_full(chc_in *in, char *dst, size_t cap,
++                             char **full, size_t *full_len, chc_err *err)
++{
++    uint64_t len;
++    int rc = chc__read_varuint(in, &len, err);
++    if (rc != CHC_OK) return rc;
++    if (len > CHC__MAX_HELLO_STRING || len >= SIZE_MAX)
++        return chc__err_set(err, CHC_ERR_PROTOCOL, "server string too long: %llu",
++                            (unsigned long long) len);
++    char *value = NULL;
++    rc = chc__read_string_body(in, (size_t) len, &value, err);
++    if (rc != CHC_OK) return rc;
++    size_t n = len < cap ? (size_t) len : cap - 1;
++    memcpy(dst, value, n);
++    dst[n] = '\0';
++    *full = value;
++    *full_len = (size_t) len;
++    return CHC_OK;
++}
++
+ static void
+ chc__client_setup(chc_client *c, const chc_client_opts *opts)
+ {
+     c->client_version_major = opts->client_version_major;
+     c->client_version_minor = opts->client_version_minor;
+     c->client_version_patch = opts->client_version_patch;
+-    c->server.revision = CHC_CLIENT_REVISION;
++    c->protocol_revision = opts->protocol_revision ? opts->protocol_revision : CHC_CLIENT_REVISION;
++    c->server.revision = c->protocol_revision;
++    c->skip_init_ping = opts->skip_init_ping;
++    c->allow_legacy_server = opts->allow_legacy_server;
++    c->max_compression_chunk_size = opts->has_max_compression_chunk_size
++        ? opts->max_compression_chunk_size : CHC_COMPRESS_MAX_CHUNK;
+     c->compression = opts->codec ? opts->compression : CHC_COMP_NONE;
+     c->codec       = opts->codec;
+ }
+@@ -382,35 +474,52 @@ chc__client_recv_hello(chc_client *c, chc_exception **exc, chc_err *err)
+                             (unsigned long long) kind);
+
+     /* Commit only complete Hello, async handshake retries on WOULD_BLOCK */
+-    chc_server_info s = {};
++    chc_server_info s = {0};
+     uint64_t n_rules, nonce;
+     char rule[1];
+-    if ((rc = chc__read_server_string(&c->in, s.name, sizeof s.name, err)) ||
++    if ((rc = chc__read_server_string_full(&c->in, s.name, sizeof s.name,
++                                           &s.full_name, &s.full_name_len, err)) ||
+         (rc = chc__read_varuint(&c->in, &s.version_major, err)) ||
+         (rc = chc__read_varuint(&c->in, &s.version_minor, err)) ||
+         (rc = chc__read_varuint(&c->in, &s.revision, err)))
+-        return rc;
+-    if (s.revision < CHC_SERVER_MIN_REVISION)
+-        return chc__err_set(err, CHC_ERR_PROTOCOL,
++        goto fail;
++    s.server_revision = s.revision;
++    if (!c->allow_legacy_server && s.revision < CHC_SERVER_MIN_REVISION) {
++        rc = chc__err_set(err, CHC_ERR_PROTOCOL,
+                             "server revision %llu older than %u",
+                             (unsigned long long) s.revision, CHC_SERVER_MIN_REVISION);
+-    if (s.revision > CHC_CLIENT_REVISION) s.revision = CHC_CLIENT_REVISION;
+-
+-    if ((rc = chc__read_server_string(&c->in, s.timezone, sizeof s.timezone, err)) ||
+-        (rc = chc__read_server_string(&c->in, s.display_name, sizeof s.display_name, err)) ||
+-        (rc = chc__read_varuint(&c->in, &s.version_patch, err)) ||
+-        (rc = chc__read_varuint(&c->in, &n_rules, err)))
+-        return rc;
+-    if (n_rules > CHC__MAX_PASSWORD_RULES)
+-        return chc__err_set(err, CHC_ERR_PROTOCOL, "too many password rules: %llu",
++        goto fail;
++    }
++    if (s.revision > c->protocol_revision) s.revision = c->protocol_revision;
++
++    if (s.revision >= CHC__REV_SERVER_TIMEZONE &&
++        (rc = chc__read_server_string_full(&c->in, s.timezone, sizeof s.timezone,
++                                           &s.full_timezone, &s.full_timezone_len, err))) goto fail;
++    if (s.revision >= CHC__REV_SERVER_DISPLAY_NAME &&
++        (rc = chc__read_server_string_full(&c->in, s.display_name, sizeof s.display_name,
++                                           &s.full_display_name, &s.full_display_name_len, err))) goto fail;
++    if (s.revision >= CHC__REV_VERSION_PATCH &&
++        (rc = chc__read_varuint(&c->in, &s.version_patch, err))) goto fail;
++    if (s.revision >= CHC__REV_PASSWORD_RULES) {
++        if ((rc = chc__read_varuint(&c->in, &n_rules, err))) goto fail;
++        if (n_rules > CHC__MAX_PASSWORD_RULES) {
++            rc = chc__err_set(err, CHC_ERR_PROTOCOL, "too many password rules: %llu",
+                             (unsigned long long) n_rules);
+-    /* Pattern & message pairs, discarded */
+-    for (uint64_t i = 0; i < 2 * n_rules; i++)
+-        if ((rc = chc__read_server_string(&c->in, rule, sizeof rule, err))) return rc;
++            goto fail;
++        }
++        /* Pattern & message pairs, discarded */
++        for (uint64_t i = 0; i < 2 * n_rules; i++)
++            if ((rc = chc__read_server_string(&c->in, rule, sizeof rule, err))) goto fail;
++    }
+     /* Nonce only serves interserver secret */
+-    if ((rc = chc__read_u64_le(&c->in, &nonce, err))) return rc;
++    if (s.revision >= CHC__REV_NONCE &&
++        (rc = chc__read_u64_le(&c->in, &nonce, err))) goto fail;
++    chc__server_info_free(&c->server, c->al);
+     c->server = s;
+     return CHC_OK;
++fail:
++    chc__server_info_free(&s, c->al);
++    return rc;
+ }
+
+ static int
+@@ -444,8 +553,10 @@ chc_client_init(chc_client **out, const chc_client_opts *opts,
+                 const chc_alloc *al, chc_io *io, chc_exception **exc,
+                 chc_err *err)
+ {
+-    chc_client_opts def_opts = {};
++    chc_client_opts def_opts = {0};
+     if (!opts) opts = &def_opts;
++    if (opts->protocol_revision > CHC_CLIENT_REVISION)
++        return chc__err_set(err, CHC_ERR_USAGE, "unsupported client protocol revision");
+
+     chc_client *c = chc__calloc(al, sizeof *c, err);
+     if (!c) return CHC_ERR_OOM;
+@@ -463,8 +574,10 @@ chc_client_init(chc_client **out, const chc_client_opts *opts,
+     if (rc != CHC_OK) goto fail;
+
+     /* Addendum: send empty quota_key. */
+-    rc = chc__write_string(c->io, "", 0, err);
+-    if (rc != CHC_OK) goto fail;
++    if (c->server.revision >= CHC__REV_ADDENDUM) {
++        rc = chc__write_string(c->io, "", 0, err);
++        if (rc != CHC_OK) goto fail;
++    }
+
+     /* Probe Ping. Server-side late-stage rejections (eg invalid
+      * default_database in 24.x) only surface after the Addendum is read,
+@@ -472,15 +585,19 @@ chc_client_init(chc_client **out, const chc_client_opts *opts,
+      * caller's first query: caller's writes may hit ECONNRESET before the
+      * exception packet is read. The Ping forces a round-trip here so the
+      * exception is delivered at init time instead. */
+-    rc = chc_client_send_ping(c, err);
+-    if (rc != CHC_OK) goto fail;
+-    rc = chc__recv_pong(c, exc, err);
+-    if (rc != CHC_OK) goto fail;
++    if (!c->skip_init_ping) {
++        rc = chc_client_send_ping(c, err);
++        if (rc != CHC_OK) goto fail;
++        rc = chc__recv_pong(c, exc, err);
++        if (rc != CHC_OK) goto fail;
++    }
+
+     *out = c;
+     return CHC_OK;
+
+ fail:
++    al->free(al->ud, c->client_name, c->client_name_len + 1);
++    chc__server_info_free(&c->server, al);
+     chc_in_free(&c->in);
+     al->free(al->ud, c, sizeof *c);
+     *out = NULL;
+@@ -492,6 +609,8 @@ chc_client_close(chc_client *c)
+ {
+     if (!c) return;
+     chc__client_recv_state_free(c);
++    c->al->free(c->al->ud, c->client_name, c->client_name_len + 1);
++    chc__server_info_free(&c->server, c->al);
+     chc_in_free(&c->in);
+     c->al->free(c->al->ud, c, sizeof *c);
+ }
+@@ -518,31 +637,74 @@ chc_client_send_cancel(chc_client *c, chc_err *err)
+  * both the uncompressed direct path and the compressed buffer-then-emit
+  * path. */
+ static int
+-chc__client_write_block_body(chc_io *sink, const chc_block_builder *bb,
++chc__client_write_block_body(chc_client *c, chc_io *sink, const chc_block_builder *bb,
+                              chc_err *err)
+ {
+     int rc;
+-    if (bb) return chc_block_write(sink, bb, &chc__tcp_block_opts, err);
++    chc_block_opts opts = {
++        .has_block_info = c->server.revision >= CHC__REV_BLOCK_INFO,
++        .has_custom_serialization = c->server.revision >= CHC__REV_CUSTOM_SERIALIZATION,
++    };
++    if (bb) return chc_block_write(sink, bb, &opts, err);
+
+-    if ((rc = chc__write_block_info(sink, err))) return rc;
++    if (opts.has_block_info && (rc = chc__write_block_info(sink, err))) return rc;
+     if ((rc = chc__write_varuint(sink, 0, err))) return rc;  /* n_cols */
+     if ((rc = chc__write_varuint(sink, 0, err))) return rc;  /* n_rows */
+     return CHC_OK;
+ }
+
++typedef struct {
++    chc_io *destination;
++    size_t used;
++    uint8_t data[8192];
++} chc__data_sink;
++
++static int
++chc__data_sink_flush(chc__data_sink *sink, chc_err *err)
++{
++    if (!sink->used) return CHC_OK;
++    int rc = chc__write_bytes(sink->destination, sink->data, sink->used, err);
++    if (rc == CHC_OK) sink->used = 0;
++    return rc;
++}
++
++static int
++chc__data_sink_write(void *ud, const void *data, size_t len, chc_err *err)
++{
++    chc__data_sink *sink = ud;
++    if (len > sizeof sink->data - sink->used) {
++        int rc = chc__data_sink_flush(sink, err);
++        if (rc != CHC_OK) return rc;
++        if (len > sizeof sink->data / 2)
++            return chc__write_bytes(sink->destination, data, len, err);
++    }
++    if (len) memcpy(sink->data + sink->used, data, len);
++    sink->used += len;
++    return CHC_OK;
++}
++
+ /* Write a Data packet. bb may be NULL for an empty (0 columns, 0 rows)
+  * block — the terminator the server uses to detect end-of-INSERT and
+  * end-of-query-text. */
+ static int
+-chc__client_write_data(chc_client *c, const chc_block_builder *bb, chc_err *err)
++chc__client_write_data(chc_client *c, const chc_block_builder *bb,
++                        const char *table_name, size_t table_name_len, chc_err *err)
+ {
+     int rc;
+-    if ((rc = chc__write_varuint(c->io, CHC__CLIENT_DATA, err))) return rc;
+-    /* Temporary table name (always empty from us). */
+-    if ((rc = chc__write_string(c->io, "", 0, err))) return rc;
++    chc__data_sink buffered;
++    buffered.destination = c->io;
++    buffered.used = 0;
++    chc_io buffered_io = {.ud = &buffered, .write = chc__data_sink_write};
++    chc_io *sink = CHC_PHP_COMPAT && c->compression == CHC_COMP_NONE
++        ? &buffered_io : c->io;
++    if ((rc = chc__write_varuint(sink, CHC__CLIENT_DATA, err))) return rc;
++    if (c->server.revision >= CHC__REV_TEMPORARY_TABLES &&
++        (rc = chc__write_string(sink, table_name, table_name_len, err))) return rc;
+
+     if (c->compression == CHC_COMP_NONE) {
+-        return chc__client_write_block_body(c->io, bb, err);
++        rc = chc__client_write_block_body(c, sink, bb, err);
++        if (rc == CHC_OK && CHC_PHP_COMPAT) rc = chc__data_sink_flush(&buffered, err);
++        return rc;
+     }
+
+     if (!c->codec)
+@@ -552,10 +714,11 @@ chc__client_write_data(chc_client *c, const chc_block_builder *bb, chc_err *err)
+     chc__mem_sink ms;
+     chc_io sink_io;
+     chc__mem_sink_init(&ms, &sink_io, c->al);
+-    rc = chc__client_write_block_body(&sink_io, bb, err);
++    rc = chc__client_write_block_body(c, &sink_io, bb, err);
+     if (rc != CHC_OK) { chc__mem_sink_free(&ms); return rc; }
+-    rc = chc__comp_emit_chunks(c->io, c->codec, c->compression,
+-                               ms.buf, ms.len, c->al, err);
++    rc = chc__comp_emit_chunks_sized(c->io, c->codec, c->compression,
++                                     ms.buf, ms.len, c->max_compression_chunk_size,
++                                     c->al, err);
+     chc__mem_sink_free(&ms);
+     return rc;
+ }
+@@ -563,15 +726,28 @@ chc__client_write_data(chc_client *c, const chc_block_builder *bb, chc_err *err)
+ int
+ chc_client_send_data(chc_client *c, const chc_block_builder *bb, chc_err *err)
+ {
+-    return chc__client_write_data(c, bb, err);
++    return chc__client_write_data(c, bb, "", 0, err);
++}
++
++int
++chc_client_send_data_named(chc_client *c, const chc_block_builder *bb,
++                           const char *table_name, size_t table_name_len, chc_err *err)
++{
++    if (!c || (!table_name && table_name_len))
++        return chc__err_set(err, CHC_ERR_USAGE, "invalid named Data arguments");
++    if (table_name_len && c->server.revision < CHC__REV_TEMPORARY_TABLES)
++        return chc__err_set(err, CHC_ERR_USAGE, "server does not support external tables");
++    return chc__client_write_data(c, bb, table_name, table_name_len, err);
+ }
+
+ int
+ chc_client_send_query_ex(chc_client *c, const char *sql, size_t sql_len,
+                          const chc_query_opts *opts, chc_err *err)
+ {
+-    chc_query_opts def = {};
++    chc_query_opts def = {0};
+     if (!opts) opts = &def;
++    if (opts->n_settings && c->server.revision < CHC__REV_STRING_SETTINGS)
++        return chc__err_set(err, CHC_ERR_USAGE, "server does not support string query settings");
+
+     int rc;
+     if ((rc = chc__write_varuint(c->io, CHC__CLIENT_QUERY, err))) return rc;
+@@ -581,36 +757,47 @@ chc_client_send_query_ex(chc_client *c, const char *sql, size_t sql_len,
+      * We send the minimum the server tolerates (initial fields blank,
+      * iface=TCP); only client_name identifies us. */
+     uint8_t query_kind = 1;       /* INITIAL_QUERY */
+-    uint8_t z8[8] = {};
++    uint8_t z8[8] = {0};
+     uint8_t iface_type = 1;       /* TCP */
+     uint8_t no_otel = 0;
++    if (c->server.revision >= CHC__REV_CLIENT_INFO) {
+     if ((rc = chc__write_bytes (c->io, &query_kind, 1, err))) return rc;
+     if ((rc = chc__write_string(c->io, "", 0, err))) return rc;  /* initial_user */
+     if ((rc = chc__write_string(c->io, "", 0, err))) return rc;  /* initial_query_id */
+     if ((rc = chc__write_string(c->io, "[::ffff:127.0.0.1]:0", 20, err))) return rc;
+-    if ((rc = chc__write_bytes (c->io, z8, 8, err))) return rc;  /* initial_query_start_time */
++    if (c->server.revision >= CHC__REV_INITIAL_QUERY_TIME &&
++        (rc = chc__write_bytes (c->io, z8, 8, err))) return rc;
+     if ((rc = chc__write_bytes (c->io, &iface_type, 1, err))) return rc;
+     if ((rc = chc__write_string(c->io, "", 0, err))) return rc;  /* os_user */
+     if ((rc = chc__write_string(c->io, "", 0, err))) return rc;  /* client_hostname */
+-    if ((rc = chc__write_string(c->io, "clickhouse-c client", 19, err))) return rc;
++    if ((rc = chc__write_string(c->io,
++        c->client_name ? c->client_name : "clickhouse-c client",
++        c->client_name ? c->client_name_len : 19, err))) return rc;
+     if ((rc = chc__write_varuint(c->io, c->client_version_major, err))) return rc;
+     if ((rc = chc__write_varuint(c->io, c->client_version_minor, err))) return rc;
+-    if ((rc = chc__write_varuint(c->io, CHC_CLIENT_REVISION, err))) return rc;
+-    if ((rc = chc__write_string(c->io, "", 0, err))) return rc;  /* quota_key */
+-    if ((rc = chc__write_varuint(c->io, 0, err))) return rc;     /* distributed_depth */
+-    if ((rc = chc__write_varuint(c->io, c->client_version_patch, err))) return rc;
+-    if ((rc = chc__write_bytes (c->io, &no_otel, 1, err))) return rc;
++    if ((rc = chc__write_varuint(c->io, c->protocol_revision, err))) return rc;
++    if (c->server.revision >= CHC__REV_QUOTA_KEY &&
++        (rc = chc__write_string(c->io, "", 0, err))) return rc;
++    if (c->server.revision >= CHC__REV_DISTRIBUTED_DEPTH &&
++        (rc = chc__write_varuint(c->io, 0, err))) return rc;
++    if (c->server.revision >= CHC__REV_VERSION_PATCH &&
++        (rc = chc__write_varuint(c->io, c->client_version_patch, err))) return rc;
++    if (c->server.revision >= CHC__REV_OPENTELEMETRY &&
++        (rc = chc__write_bytes (c->io, &no_otel, 1, err))) return rc;
+     /* Parallel replicas: collaborate_with_initiator, count, number */
+-    if ((rc = chc__write_varuint(c->io, 0, err))) return rc;
+-    if ((rc = chc__write_varuint(c->io, 0, err))) return rc;
+-    if ((rc = chc__write_varuint(c->io, 0, err))) return rc;
++    if (c->server.revision >= CHC__REV_PARALLEL_REPLICAS) {
++        if ((rc = chc__write_varuint(c->io, 0, err))) return rc;
++        if ((rc = chc__write_varuint(c->io, 0, err))) return rc;
++        if ((rc = chc__write_varuint(c->io, 0, err))) return rc;
++    }
++    }
+
+     /* Per-query settings: name + varuint(flags) + value, repeated, then
+      * empty-string terminator. */
+     for (size_t i = 0; i < opts->n_settings; i++) {
+         const chc_query_setting *s = &opts->settings[i];
+-        size_t nlen = s->name  ? strlen(s->name)  : 0;
+-        size_t vlen = s->value ? strlen(s->value) : 0;
++        size_t nlen = s->strings_have_lengths ? s->name_len : (s->name ? strlen(s->name) : 0);
++        size_t vlen = s->strings_have_lengths ? s->value_len : (s->value ? strlen(s->value) : 0);
+         uint64_t flags = (s->important ? 1u : 0u) | (s->custom ? 2u : 0u);
+         if ((rc = chc__write_string (c->io, s->name,  nlen, err))) return rc;
+         if ((rc = chc__write_varuint(c->io, flags, err))) return rc;
+@@ -618,7 +805,8 @@ chc_client_send_query_ex(chc_client *c, const char *sql, size_t sql_len,
+     }
+     if ((rc = chc__write_string(c->io, "", 0, err))) return rc;
+
+-    if ((rc = chc__write_string(c->io, "", 0, err))) return rc;  /* interserver secret */
++    if (c->server.revision >= CHC__REV_INTERSERVER_SECRET &&
++        (rc = chc__write_string(c->io, "", 0, err))) return rc;
+
+     /* Stages::Complete = 2. */
+     if ((rc = chc__write_varuint(c->io, 2, err))) return rc;
+@@ -629,18 +817,20 @@ chc_client_send_query_ex(chc_client *c, const char *sql, size_t sql_len,
+     if ((rc = chc__write_string(c->io, sql, sql_len, err))) return rc;
+
+     /* Parameters: same shape as settings; flags always CUSTOM (bit 1). */
++    if (c->server.revision >= CHC__REV_PARAMETERS) {
+     for (size_t i = 0; i < opts->n_params; i++) {
+         const chc_query_param *p = &opts->params[i];
+-        size_t nlen = p->name  ? strlen(p->name)  : 0;
+-        size_t vlen = p->value ? strlen(p->value) : 0;
++        size_t nlen = p->strings_have_lengths ? p->name_len : (p->name ? strlen(p->name) : 0);
++        size_t vlen = p->strings_have_lengths ? p->value_len : (p->value ? strlen(p->value) : 0);
+         if ((rc = chc__write_string (c->io, p->name,  nlen, err))) return rc;
+         if ((rc = chc__write_varuint(c->io, 2u, err))) return rc;
+         if ((rc = chc__write_string (c->io, p->value, vlen, err))) return rc;
+     }
+     if ((rc = chc__write_string(c->io, "", 0, err))) return rc;
++    }
+
+     /* Finalize: send an empty Data block as the query-text terminator. */
+-    return chc__client_write_data(c, NULL, err);
++    return opts->defer_data_terminator ? CHC_OK : chc__client_write_data(c, NULL, "", 0, err);
+ }
+
+ int
+@@ -778,6 +968,7 @@ chc__recv_block_compressed_resume(chc_client *c, const chc_block_opts *opts,
+         }
+         /* Complete frame committed (no rewind); push its decompressed bytes.
+          * chc_in_submit copies, so the next frame may reuse frame_buf. */
++        if (!c->recv_decomp.frame_fill) continue;
+         rc = chc_in_submit(&c->recv_dec_in, c->recv_decomp.frame_buf,
+                            c->recv_decomp.frame_fill, err);
+         if (rc != CHC_OK) {
+@@ -803,7 +994,11 @@ static int
+ chc__recv_packet_resumable(chc_client *c, chc_packet *out, chc_err *err)
+ {
+     bool ioless = c->in.io == NULL;
+-    const chc_block_opts *opts = &chc__tcp_block_opts;
++    chc_block_opts block_opts = {
++        .has_block_info = c->server.revision >= CHC__REV_BLOCK_INFO,
++        .has_custom_serialization = c->server.revision >= CHC__REV_CUSTOM_SERIALIZATION,
++    };
++    const chc_block_opts *opts = &block_opts;
+     int rc;
+     int is_log = 0;  /* LOG/PROFILE_EVENTS: never compressed */
+
+@@ -814,28 +1009,36 @@ chc__recv_packet_resumable(chc_client *c, chc_packet *out, chc_err *err)
+         uint64_t kind;
+         rc = chc__read_varuint(&c->in, &kind, err);
+         if (rc != CHC_OK) goto maybe_rewind;
++        if (CHC_PHP_COMPAT && (kind == CHC_PKT_TOTALS || kind == CHC_PKT_EXTREMES))
++            return chc__err_set(err, CHC_ERR_PROTOCOL, "unimplemented %llu", (unsigned long long) kind);
+
+         switch (kind) {
+         /* ---- control / non-block packets: parse inline ---- */
+         case CHC_PKT_EXCEPTION:
+             out->kind = CHC_PKT_EXCEPTION;
+             rc = chc__read_exception(c, &out->exception, err);  /* frees its partial on non-OK */
++            if (CHC_PHP_COMPAT && rc != CHC_OK && rc != CHC_WOULD_BLOCK && rc != CHC_ERR_OOM)
++                rc = chc__err_set(err, CHC_ERR_PROTOCOL,
++                    "server reported an error, but the exception packet could not be decoded (error details lost)");
+             if (rc != CHC_OK) goto maybe_rewind;
+             goto control_done;
+
+         case CHC_PKT_PROGRESS:
+             out->kind = CHC_PKT_PROGRESS;
+             if ((rc = chc__read_varuint(&c->in, &out->progress.rows,       err)) ||
+-                (rc = chc__read_varuint(&c->in, &out->progress.bytes,      err)) ||
+-                (rc = chc__read_varuint(&c->in, &out->progress.total_rows, err)))
++                (rc = chc__read_varuint(&c->in, &out->progress.bytes,      err)))
+                 goto maybe_rewind;
++            if (c->server.revision >= CHC__REV_TOTAL_ROWS_IN_PROGRESS &&
++                (rc = chc__read_varuint(&c->in, &out->progress.total_rows, err))) goto maybe_rewind;
+             if (c->server.revision >= CHC__REV_TOTAL_BYTES_IN_PROGRESS)
+                 if ((rc = chc__read_varuint(&c->in, &out->progress.total_bytes, err)))
+                     goto maybe_rewind;
+-            if ((rc = chc__read_varuint(&c->in, &out->progress.written_rows,  err)) ||
+-                (rc = chc__read_varuint(&c->in, &out->progress.written_bytes, err)) ||
+-                (rc = chc__read_varuint(&c->in, &out->progress.elapsed_ns,    err)))
++            if (c->server.revision >= CHC__REV_CLIENT_WRITE_INFO &&
++                ((rc = chc__read_varuint(&c->in, &out->progress.written_rows,  err)) ||
++                 (rc = chc__read_varuint(&c->in, &out->progress.written_bytes, err))))
+                 goto maybe_rewind;
++            if (c->server.revision >= CHC__REV_ELAPSED_NS_IN_PROGRESS &&
++                (rc = chc__read_varuint(&c->in, &out->progress.elapsed_ns, err))) goto maybe_rewind;
+             goto control_done;
+
+         case CHC_PKT_PONG:
+@@ -871,8 +1074,14 @@ chc__recv_packet_resumable(chc_client *c, chc_packet *out, chc_err *err)
+         /* Empty timezone means server default, as clickhouse-client treats it */
+         case CHC_PKT_TIMEZONE_UPDATE: {
+             out->kind = CHC_PKT_TIMEZONE_UPDATE;
+-            char tz[sizeof c->server.timezone];
+-            if ((rc = chc__read_server_string(&c->in, tz, sizeof tz, err))) goto maybe_rewind;
++            char tz[sizeof c->server.timezone] = {0};
++            char *full = NULL;
++            size_t full_len = 0;
++            if ((rc = chc__read_server_string_full(&c->in, tz, sizeof tz,
++                                                   &full, &full_len, err))) goto maybe_rewind;
++            c->al->free(c->al->ud, c->server.full_timezone, c->server.full_timezone_len + 1);
++            c->server.full_timezone = full;
++            c->server.full_timezone_len = full_len;
+             memcpy(c->server.timezone, tz, sizeof tz);
+             goto control_done;
+         }
+@@ -891,8 +1100,10 @@ chc__recv_packet_resumable(chc_client *c, chc_packet *out, chc_err *err)
+                                 (unsigned long long) kind);
+         }
+
+-        rc = chc__recv_skip_lead_string(c, err);
+-        if (rc != CHC_OK) goto maybe_rewind;
++        if (c->server.revision >= CHC__REV_TEMPORARY_TABLES) {
++            rc = chc__recv_skip_lead_string(c, err);
++            if (rc != CHC_OK) goto maybe_rewind;
++        }
+
+         /* Kind + leading string committed; resume owns the cursor from here.
+          * Do NOT rewind/reset on a mid-block would-block: resume re-parses only
+diff --git a/clickhouse-compression.h b/clickhouse-compression.h
+index 3d7a067..525c052 100644
+--- a/clickhouse-compression.h
++++ b/clickhouse-compression.h
+@@ -181,7 +181,7 @@ chc__city_hash128_with_seed(const char *s, size_t len, chc__u128 seed)
+ {
+     if (len < 128) return chc__city_murmur(s, len, seed);
+
+-    chc__u128 v = {}, w = {};
++    chc__u128 v = {0}, w = {0};
+     uint64_t x = seed.a, y = seed.b;
+     uint64_t z = len * chc__city_k1;
+     v.a = chc__city_rotate(y ^ chc__city_k1, 49) * chc__city_k1 + chc__city_fetch64(s);
+@@ -262,7 +262,10 @@ chc_cityhash128(const void *data, size_t len,
+ #define CHC__COMP_HEADER_BYTES 9u
+
+ /* lz4-style fallback bound. */
+-static size_t chc__comp_default_bound(size_t n) { return n + 256 + n / 255; }
++static size_t chc__comp_default_bound(size_t n)
++{
++    return n > SIZE_MAX - 256 - n / 255 ? 0 : n + 256 + n / 255;
++}
+
+ /* Write one compressed frame to io. Caller has already supplied the
+  * codec for the chosen method. */
+@@ -274,6 +277,8 @@ chc__comp_emit_frame(chc_io *io, const chc_codec *codec, chc_compression m,
+     int rc;
+     uint8_t method;
+     size_t bound;
++    if (src_len > UINT32_MAX)
++        return chc__err_set(err, CHC_ERR_USAGE, "compression frame exceeds wire size");
+     switch (m) {
+     case CHC_COMP_LZ4:
+         method = CHC__COMP_LZ4;
+@@ -289,6 +294,8 @@ chc__comp_emit_frame(chc_io *io, const chc_codec *codec, chc_compression m,
+         return chc__err_set(err, CHC_ERR_USAGE,
+                             "chc__comp_emit_frame: unsupported method");
+     }
++    if (!bound || bound > SIZE_MAX - CHC__COMP_HEADER_BYTES)
++        return chc__err_set(err, CHC_ERR_OOM, "compression buffer size overflow");
+     size_t buf_cap = CHC__COMP_HEADER_BYTES + bound;
+     uint8_t *buf = chc__alloc(al, buf_cap, err);
+     if (!buf) return CHC_ERR_OOM;
+@@ -306,6 +313,10 @@ chc__comp_emit_frame(chc_io *io, const chc_codec *codec, chc_compression m,
+                                   &comp_sz, err);
+     }
+     if (rc != CHC_OK) { al->free(al->ud, buf, buf_cap); return rc; }
++    if (comp_sz > UINT32_MAX - CHC__COMP_HEADER_BYTES || comp_sz > bound) {
++        al->free(al->ud, buf, buf_cap);
++        return chc__err_set(err, CHC_ERR_USAGE, "compressed frame exceeds wire size");
++    }
+
+     uint32_t comp_with_hdr = (uint32_t) (comp_sz + CHC__COMP_HEADER_BYTES);
+     uint32_t orig = (uint32_t) src_len;
+@@ -377,15 +388,14 @@ chc__mem_sink_free(chc__mem_sink *s)
+
+ /* Emit a buffered block as one or more compressed frames to io. */
+ static int
+-chc__comp_emit_chunks(chc_io *io, const chc_codec *codec, chc_compression m,
+-                      const void *src, size_t src_len,
++chc__comp_emit_chunks_sized(chc_io *io, const chc_codec *codec, chc_compression m,
++                      const void *src, size_t src_len, size_t max_chunk,
+                       const chc_alloc *al, chc_err *err)
+ {
+     const uint8_t *p = src;
+     size_t left = src_len;
+     while (left) {
+-        size_t take = left > CHC_COMPRESS_MAX_CHUNK
+-                          ? CHC_COMPRESS_MAX_CHUNK : left;
++        size_t take = max_chunk && left > max_chunk ? max_chunk : left;
+         int rc = chc__comp_emit_frame(io, codec, m, p, take, al, err);
+         if (rc != CHC_OK) return rc;
+         p    += take;
+@@ -394,6 +404,15 @@ chc__comp_emit_chunks(chc_io *io, const chc_codec *codec, chc_compression m,
+     return CHC_OK;
+ }
+
++CHC_MAYBE_UNUSED static int
++chc__comp_emit_chunks(chc_io *io, const chc_codec *codec, chc_compression m,
++                      const void *src, size_t src_len,
++                      const chc_alloc *al, chc_err *err)
++{
++    return chc__comp_emit_chunks_sized(io, codec, m, src, src_len,
++                                      CHC_COMPRESS_MAX_CHUNK, al, err);
++}
++
+ /* ---------- decompression side ---------- */
+
+ /* Adapter chc_io that produces decompressed bytes from a compressed
+@@ -422,6 +441,8 @@ chc__decomp_read_frame(chc__decomp_src *s, chc_err *err)
+     rc = chc__read_bytes(s->raw, header, CHC__COMP_HEADER_BYTES, err);
+     if (rc) return rc;
+     uint8_t method = header[0];
++    if (CHC_PHP_COMPAT && method != CHC__COMP_LZ4 && method != CHC__COMP_ZSTD)
++        return chc__err_set(err, CHC_ERR_PROTOCOL, "unsupported compression method %u", method);
+     uint32_t comp_with_hdr, orig;
+     memcpy(&comp_with_hdr, header + 1, sizeof comp_with_hdr);
+     memcpy(&orig, header + 5, sizeof orig);
+@@ -429,10 +450,15 @@ chc__decomp_read_frame(chc__decomp_src *s, chc_err *err)
+     orig = chc__bswap32(orig);
+     if (comp_with_hdr < CHC__COMP_HEADER_BYTES)
+         return chc__err_set(err, CHC_ERR_PROTOCOL,
+-            "compressed frame too short: %u", comp_with_hdr);
++            CHC_PHP_COMPAT ? "compressed block size %u is smaller than header, data is likely corrupted"
++                           : "compressed frame too short: %u", comp_with_hdr);
+     if (comp_with_hdr > 0x40000000u)
+         return chc__err_set(err, CHC_ERR_PROTOCOL,
+-            "compressed frame oversized: %u", comp_with_hdr);
++            CHC_PHP_COMPAT ? "compressed block size %u exceeds maximum allowed, data is likely corrupted"
++                           : "compressed frame oversized: %u", comp_with_hdr);
++    if (CHC_PHP_COMPAT && orig > 0x40000000u)
++        return chc__err_set(err, CHC_ERR_PROTOCOL,
++            "decompressed block size %u exceeds maximum allowed, data is likely corrupted", orig);
+     /* LZ4 API sizes are int; reject dst outside domain before (int)
+      * narrowing in codec adapter. src side bounded by frame cap above */
+     if (method == CHC__COMP_LZ4 && orig > (uint32_t) INT_MAX)
+@@ -441,22 +467,22 @@ chc__decomp_read_frame(chc__decomp_src *s, chc_err *err)
+
+     size_t payload = comp_with_hdr - CHC__COMP_HEADER_BYTES;
+     /* Capture the bytes hashed: header (9B) + payload. */
+-    if (comp_with_hdr > s->comp_cap) {
++    if (CHC__COMP_HEADER_BYTES > s->comp_cap) {
+         uint8_t *nb = chc__realloc(s->al, s->comp_buf, s->comp_cap,
+-                                   comp_with_hdr, err);
++                                   CHC__COMP_HEADER_BYTES, err);
+         if (!nb) return CHC_ERR_OOM;
+-        s->comp_buf = nb; s->comp_cap = comp_with_hdr;
++        s->comp_buf = nb; s->comp_cap = CHC__COMP_HEADER_BYTES;
+     }
+     memcpy(s->comp_buf, header, CHC__COMP_HEADER_BYTES);
+-    rc = chc__read_bytes(s->raw, s->comp_buf + CHC__COMP_HEADER_BYTES,
+-                         payload, err);
++    rc = chc__read_growing(s->raw, &s->comp_buf, &s->comp_cap,
++                           CHC__COMP_HEADER_BYTES, comp_with_hdr, 4u << 20, false, err);
+     if (rc) return rc;
+
+     uint64_t got_lo, got_hi;
+     chc_cityhash128(s->comp_buf, comp_with_hdr, &got_lo, &got_hi);
+     if (got_lo != lo || got_hi != hi)
+         return chc__err_set(err, CHC_ERR_PROTOCOL,
+-            "compressed frame hash mismatch");
++            CHC_PHP_COMPAT ? "data was corrupted" : "compressed frame hash mismatch");
+
+     if (orig > s->frame_cap) {
+         uint8_t *nb = chc__realloc(s->al, s->frame_buf, s->frame_cap,
+@@ -464,6 +490,8 @@ chc__decomp_read_frame(chc__decomp_src *s, chc_err *err)
+         if (!nb) return CHC_ERR_OOM;
+         s->frame_buf = nb; s->frame_cap = orig;
+     }
++    uint8_t empty_output = 0;
++    void *output = orig ? (void *) s->frame_buf : (void *) &empty_output;
+     switch (method) {
+     case CHC__COMP_LZ4:
+         if (!s->codec || !s->codec->lz4_decompress)
+@@ -471,7 +499,7 @@ chc__decomp_read_frame(chc__decomp_src *s, chc_err *err)
+                 "LZ4 frame received but no codec configured");
+         rc = s->codec->lz4_decompress(s->codec->ud,
+             s->comp_buf + CHC__COMP_HEADER_BYTES, payload,
+-            s->frame_buf, orig, err);
++            output, orig, err);
+         if (rc) return rc;
+         break;
+     case CHC__COMP_ZSTD:
+@@ -480,12 +508,13 @@ chc__decomp_read_frame(chc__decomp_src *s, chc_err *err)
+                 "ZSTD frame received but no codec configured");
+         rc = s->codec->zstd_decompress(s->codec->ud,
+             s->comp_buf + CHC__COMP_HEADER_BYTES, payload,
+-            s->frame_buf, orig, err);
++            output, orig, err);
+         if (rc) return rc;
+         break;
+     default:
+         return chc__err_set(err, CHC_ERR_PROTOCOL,
+-            "unknown compression method 0x%02x", method);
++            CHC_PHP_COMPAT ? "unsupported compression method %u"
++                           : "unknown compression method 0x%02x", method);
+     }
+     s->frame_pos = 0;
+     s->frame_fill = orig;
+@@ -497,7 +526,8 @@ chc__decomp_io_read(void *ud, void *buf, size_t len, size_t *out_n,
+                     chc_err *err)
+ {
+     chc__decomp_src *s = ud;
+-    if (s->frame_pos == s->frame_fill) {
++    if (!len) { *out_n = 0; return CHC_OK; }
++    while (s->frame_pos == s->frame_fill) {
+         int rc = chc__decomp_read_frame(s, err);
+         if (rc) { *out_n = 0; return rc; }
+     }
+@@ -558,14 +588,20 @@ chc__lz4_decompress(void *ud, const void *src, size_t src_len,
+     (void) ud;
+     int n = LZ4_decompress_safe((const char *) src, (char *) dst,
+                                 (int) src_len, (int) original);
++    if (n < 0 && CHC_PHP_COMPAT)
++        return chc__err_set(err, CHC_ERR_PROTOCOL, "can't decompress LZ4-encoded data");
+     if (n < 0 || (size_t) n != original)
+         return chc__err_set(err, CHC_ERR_PROTOCOL,
+-                            "LZ4_decompress_safe rc=%d, expected %zu",
++                            CHC_PHP_COMPAT ? "LZ4-encoded block decompressed to %d bytes, expected %zu"
++                                           : "LZ4_decompress_safe rc=%d, expected %zu",
+                             n, original);
+     return CHC_OK;
+ }
+
+-static size_t chc__lz4_bound(size_t n) { return (size_t) LZ4_compressBound((int) n); }
++static size_t chc__lz4_bound(size_t n)
++{
++    return n > (size_t) LZ4_MAX_INPUT_SIZE ? 0 : (size_t) LZ4_compressBound((int) n);
++}
+
+ void
+ chc_lz4_codec_init(chc_codec *out)
+@@ -586,12 +622,16 @@ chc_lz4_codec_init(chc_codec *out)
+
+ #include <zstd.h>
+
++#ifndef CHC_ZSTD_COMPRESSION_LEVEL
++#define CHC_ZSTD_COMPRESSION_LEVEL ZSTD_CLEVEL_DEFAULT
++#endif
++
+ static int
+ chc__zstd_compress(void *ud, const void *src, size_t src_len,
+                    void *dst, size_t dst_cap, size_t *dst_n, chc_err *err)
+ {
+     (void) ud;
+-    size_t n = ZSTD_compress(dst, dst_cap, src, src_len, ZSTD_CLEVEL_DEFAULT);
++    size_t n = ZSTD_compress(dst, dst_cap, src, src_len, CHC_ZSTD_COMPRESSION_LEVEL);
+     if (ZSTD_isError(n))
+         return chc__err_set(err, CHC_ERR_OOM,
+                             "ZSTD_compress failed: %s", ZSTD_getErrorName(n));
+@@ -607,10 +647,12 @@ chc__zstd_decompress(void *ud, const void *src, size_t src_len,
+     size_t n = ZSTD_decompress(dst, original, src, src_len);
+     if (ZSTD_isError(n))
+         return chc__err_set(err, CHC_ERR_PROTOCOL,
+-                            "ZSTD_decompress failed: %s", ZSTD_getErrorName(n));
++                            CHC_PHP_COMPAT ? "can't decompress ZSTD-encoded data, ZSTD error: %s"
++                                           : "ZSTD_decompress failed: %s", ZSTD_getErrorName(n));
+     if (n != original)
+         return chc__err_set(err, CHC_ERR_PROTOCOL,
+-                            "ZSTD_decompress produced %zu bytes, expected %zu",
++                            CHC_PHP_COMPAT ? "ZSTD-encoded block decompressed to %zu bytes, expected %zu"
++                                           : "ZSTD_decompress produced %zu bytes, expected %zu",
+                             n, original);
+     return CHC_OK;
+ }
+diff --git a/clickhouse-async.h b/clickhouse-async.h
+index 4b72143..b045271 100644
+--- a/clickhouse-async.h
++++ b/clickhouse-async.h
+@@ -104,26 +104,29 @@ struct chc_async_client {
+     char *database;
+     char *user;
+     char *password;
++    size_t client_name_len, database_len, user_len, password_len;
+ };
+
+ static char *
+-chc__async_dup(const chc_alloc *al, const char *s, chc_err *err)
++chc__async_dup(const chc_alloc *al, const char *s, size_t len, chc_err *err)
+ {
+-    return s ? chc__strdup(al, s, strlen(s), err) : NULL;
++    return s ? chc__strdup(al, s, len, err) : NULL;
+ }
+
+ static void
+-chc__async_free_str(const chc_alloc *al, char *s)
++chc__async_free_str(const chc_alloc *al, char *s, size_t len)
+ {
+-    if (s) al->free(al->ud, s, strlen(s) + 1);
++    if (s) al->free(al->ud, s, len + 1);
+ }
+
+ int
+ chc_async_client_init(chc_async_client **out, const chc_client_opts *opts,
+                       const chc_alloc *al, chc_err *err)
+ {
+-    chc_client_opts def_opts = {};
++    chc_client_opts def_opts = {0};
+     if (!opts) opts = &def_opts;
++    if (opts->protocol_revision > CHC_CLIENT_REVISION)
++        return chc__err_set(err, CHC_ERR_USAGE, "unsupported client protocol revision");
+
+     chc_async_client *c = chc__calloc(al, sizeof *c, err);
+     if (!c) return CHC_ERR_OOM;
+@@ -138,10 +141,14 @@ chc_async_client_init(chc_async_client **out, const chc_client_opts *opts,
+     if (rc != CHC_OK) { al->free(al->ud, c, sizeof *c); return rc; }
+
+     /* Own strings used after init. */
+-    if ((opts->client_name && !(c->client_name = chc__async_dup(al, opts->client_name, err))) ||
+-        (opts->database    && !(c->database    = chc__async_dup(al, opts->database,    err))) ||
+-        (opts->user        && !(c->user        = chc__async_dup(al, opts->user,        err))) ||
+-        (opts->password    && !(c->password    = chc__async_dup(al, opts->password,    err)))) {
++    c->client_name_len = opts->strings_have_lengths ? opts->client_name_len : (opts->client_name ? strlen(opts->client_name) : 0);
++    c->database_len = opts->strings_have_lengths ? opts->database_len : (opts->database ? strlen(opts->database) : 0);
++    c->user_len = opts->strings_have_lengths ? opts->user_len : (opts->user ? strlen(opts->user) : 0);
++    c->password_len = opts->strings_have_lengths ? opts->password_len : (opts->password ? strlen(opts->password) : 0);
++    if ((opts->client_name && !(c->client_name = chc__async_dup(al, opts->client_name, c->client_name_len, err))) ||
++        (opts->database    && !(c->database    = chc__async_dup(al, opts->database, c->database_len, err))) ||
++        (opts->user        && !(c->user        = chc__async_dup(al, opts->user, c->user_len, err))) ||
++        (opts->password    && !(c->password    = chc__async_dup(al, opts->password, c->password_len, err)))) {
+         chc_async_client_free(c);
+         return CHC_ERR_OOM;
+     }
+@@ -157,12 +164,14 @@ chc_async_client_free(chc_async_client *c)
+     if (!c) return;
+     const chc_alloc *al = c->cli.al;
+     chc__client_recv_state_free(&c->cli);
++    al->free(al->ud, c->cli.client_name, c->cli.client_name_len + 1);
++    chc__server_info_free(&c->cli.server, al);
+     chc_in_free(&c->cli.in);
+     chc__mem_sink_free(&c->out);
+-    chc__async_free_str(al, c->client_name);
+-    chc__async_free_str(al, c->database);
+-    chc__async_free_str(al, c->user);
+-    chc__async_free_str(al, c->password);
++    chc__async_free_str(al, c->client_name, c->client_name_len);
++    chc__async_free_str(al, c->database, c->database_len);
++    chc__async_free_str(al, c->user, c->user_len);
++    chc__async_free_str(al, c->password, c->password_len);
+     al->free(al->ud, c, sizeof *c);
+ }
+
+@@ -210,6 +219,11 @@ chc_async_handshake(chc_async_client *c, chc_exception **exc, chc_err *err)
+                 .database = c->database,
+                 .user = c->user,
+                 .password = c->password,
++                .strings_have_lengths = true,
++                .client_name_len = c->client_name_len,
++                .database_len = c->database_len,
++                .user_len = c->user_len,
++                .password_len = c->password_len,
+             };
+             rc = chc__client_send_hello(cli, &o, err);
+             if (rc != CHC_OK) return rc;
+@@ -227,8 +241,14 @@ chc_async_handshake(chc_async_client *c, chc_exception **exc, chc_err *err)
+             continue;
+
+         case CHC__HS_POST_HELLO:
+-            rc = chc__write_string(cli->io, "", 0, err);  /* quota_key */
+-            if (rc != CHC_OK) return rc;
++            if (cli->server.revision >= CHC__REV_ADDENDUM) {
++                rc = chc__write_string(cli->io, "", 0, err);  /* quota_key */
++                if (rc != CHC_OK) return rc;
++            }
++            if (cli->skip_init_ping) {
++                c->hs_phase = CHC__HS_DONE;
++                continue;
++            }
+             rc = chc_client_send_ping(cli, err);
+             if (rc != CHC_OK) return rc;
+             c->hs_phase = CHC__HS_RECV_PONG;
+diff --git a/test.sh b/test.sh
+index 9165933..85539a0 100755
+--- a/test.sh
++++ b/test.sh
+@@ -45,6 +45,7 @@ run_one() {
+         coverage_flags=(--coverage -O0 -g -fprofile-abs-path -fkeep-inline-functions -fkeep-static-functions)
+     fi
+     [[ $name == client_tcp ]] && libs+=(-llz4 -lzstd)
++    [[ $name == php_live ]] && libs+=(-llz4 -lzstd)
+     [[ $name == ioless ]] && libs+=(-llz4)
+     [[ $name == compression_errors ]] && libs+=(-llz4 -lzstd)
+     [[ $name == client_errors ]] && libs+=(-llz4)
+diff --git a/test/test_client_errors.c b/test/test_client_errors.c
+index 2fc2bd1..db61445 100644
+--- a/test/test_client_errors.c
++++ b/test/test_client_errors.c
+@@ -730,6 +730,7 @@ test_progress_timezone(void)
+         CHECK(recv_bytewise(&c, &b, &fed, &pkt, &err) == CHC_OK);
+         CHECK(strcmp(c.server.timezone, "Europe/Paris") == 0);
+
++        chc__server_info_free(&c.server, &al);
+         chc__client_recv_state_free(&c);
+         chc_in_free(&c.in);
+     }
+diff --git a/test/test_client_tcp.c b/test/test_client_tcp.c
+index b72f662..4a07916 100644
+--- a/test/test_client_tcp.c
++++ b/test/test_client_tcp.c
+@@ -74,7 +74,8 @@ typedef struct {
+ } test_conn;
+
+ static int
+-open_conn_compressed(test_conn *t, chc_compression comp, chc_err *err)
++open_conn_options(test_conn *t, chc_compression comp,
++                   const chc_client_opts *overrides, chc_err *err)
+ {
+     memset(t, 0, sizeof *t);
+     t->al = chc_alloc_stdlib();
+@@ -85,6 +86,7 @@ open_conn_compressed(test_conn *t, chc_compression comp, chc_err *err)
+     }
+     chc_posix_io_init(&t->io_state, &t->io, t->fd, NULL, NULL);
+     chc_client_opts opts = {};
++    if (overrides) opts = *overrides;
+     if (comp == CHC_COMP_LZ4) {
+         chc_lz4_codec_init(&t->codec);
+         opts.compression = CHC_COMP_LZ4;
+@@ -102,6 +104,12 @@ open_conn_compressed(test_conn *t, chc_compression comp, chc_err *err)
+     return rc;
+ }
+
++static int
++open_conn_compressed(test_conn *t, chc_compression comp, chc_err *err)
++{
++    return open_conn_options(t, comp, NULL, err);
++}
++
+ static int
+ open_conn(test_conn *t, chc_err *err)
+ {
+@@ -1151,6 +1159,69 @@ test_cityhash_known_vector(void)
+     CHECK(hi == 0x3dae10d6a77e0432ULL);
+ }
+
++static void
++test_external_data_compat(chc_compression compression, size_t chunk_size)
++{
++    current_test = "external_data_compat";
++    test_conn t;
++    chc_err err = {};
++    chc_type *type = NULL;
++    chc_client_opts opts = {
++        .protocol_revision = 54459,
++        .allow_legacy_server = true,
++        .skip_init_ping = true,
++        .has_max_compression_chunk_size = true,
++        .max_compression_chunk_size = chunk_size,
++    };
++    int rc = open_conn_options(&t, compression, &opts, &err);
++    CHECK_OK(rc, err);
++    CHECK(chc_client_server_info(t.c)->revision == 54459);
++    CHECK(chc_client_server_info(t.c)->server_revision >= 54459);
++    if (compression != CHC_COMP_NONE) {
++        rc = run_simple_query(&t, compression == CHC_COMP_ZSTD
++            ? "SET network_compression_method='zstd'"
++            : "SET network_compression_method='lz4'", &err);
++        CHECK_OK(rc, err);
++    }
++
++    char type_name[2048] = "Enum16(";
++    size_t type_len = strlen(type_name);
++    for (unsigned i = 1; i <= 40; ++i) {
++        int n = snprintf(type_name + type_len, sizeof type_name - type_len,
++                         "%s'value_%u'=%u", i == 1 ? "" : ",", i, i);
++        CHECK(n > 0 && (size_t) n < sizeof type_name - type_len);
++        if (n <= 0 || (size_t) n >= sizeof type_name - type_len) goto out;
++        type_len += (size_t) n;
++    }
++    type_name[type_len++] = ')';
++    CHECK(type_len > 255);
++    rc = chc_type_parse(type_name, type_len, &t.al, &type, &err);
++    CHECK_OK(rc, err);
++
++    const char *sql = "SELECT count(), sum(toInt64(x)) FROM external_values";
++    chc_query_opts query_opts = { .defer_data_terminator = true };
++    rc = chc_client_send_query_ex(t.c, sql, strlen(sql), &query_opts, &err);
++    CHECK_OK(rc, err);
++    uint8_t values[] = {1, 0, 2, 0, 3, 0};
++    chc_column column = chc_build_fixed(values, 2, 3);
++    chc_block_col columns[1];
++    chc_block_builder block;
++    chc_block_builder_init(&block, columns);
++    chc_block_builder_append(&block, "x", 1, type, &column);
++    rc = chc_client_send_data_named(t.c, &block, "external_values", 15, &err);
++    CHECK_OK(rc, err);
++    rc = chc_client_send_data(t.c, NULL, &err);
++    CHECK_OK(rc, err);
++    count_sum_acc acc = {};
++    rc = recv_until_eos(&t, 32, count_sum_cb, &acc, &err);
++    CHECK_OK(rc, err);
++    CHECK(acc.count == 3);
++    CHECK(acc.sum == 6);
++out:
++    chc_type_destroy(type, &t.al);
++    close_conn(&t);
++}
++
+ int main(void)
+ {
+     signal(SIGPIPE, SIG_IGN);
+@@ -1188,6 +1259,11 @@ int main(void)
+     test_qbit_live();
+     test_simple_aggregate_live();
+     test_sparse_live();
++    test_external_data_compat(CHC_COMP_NONE, 0);
++    test_external_data_compat(CHC_COMP_LZ4, 64);
++    test_external_data_compat(CHC_COMP_LZ4, 0);
++    test_external_data_compat(CHC_COMP_ZSTD, 64);
++    test_external_data_compat(CHC_COMP_ZSTD, 0);
+
+     stop_server();
+
+diff --git a/test/test_wire_errors.c b/test/test_wire_errors.c
+index 00882e9..c099c8a 100644
+--- a/test/test_wire_errors.c
++++ b/test/test_wire_errors.c
+@@ -660,15 +660,15 @@ test_read_oom_sweep(void)
+ }
+
+ static void
+-test_block_write_rejects(void)
++test_block_write_long_type(void)
+ {
+-    current_test = "block_write_rejects";
++    current_test = "block_write_long_type";
+     chc_alloc al = chc_alloc_stdlib();
+     test_mem_sink sink;
+     chc_io io;
+     chc_err err = {};
+
+-    /* A type name too long to stage in the inline buffer. */
++    /* Valid type names retain their full spelling beyond 255 bytes. */
+     char deep[600];
+     size_t levels = 60, n = 0;
+     for (size_t i = 0; i < levels; i++) n += (size_t) sprintf(deep + n, "Array(");
+@@ -678,12 +678,23 @@ test_block_write_rejects(void)
+
+     chc_type *t = type_of(&al, deep);
+     if (t) {
+-        uint64_t offs[1] = { 0 };
+         chc_column leaf = chc_build_fixed(NULL, 4, 0);
+-        chc_column arr = chc_build_array(offs, 1, &leaf);
++        chc_column arr = chc_build_array(NULL, 0, &leaf);
+         chc_block_col col = { .name = "c", .name_len = 1, .type = t, .col = &arr };
+         test_mem_sink_init(&sink, &io);
+-        CHECK(chc_block_write_cols(&io, &col, 1, 1, NULL, &err) == CHC_ERR_USAGE);
++        CHECK(chc_block_write_cols(&io, &col, 1, 0, NULL, &err) == CHC_OK);
++        test_mem_src src;
++        chc_io input;
++        test_mem_src_init(&src, &input, sink.data, sink.len);
++        chc_block_opts opts = {0};
++        chc_block *block = NULL;
++        CHECK(test_block_read_io(&input, &al, &opts, &block, &err) == CHC_OK);
++        if (block) {
++            char actual[sizeof deep];
++            CHECK(chc_type_format(chc_block_column_type(block, 0), actual, sizeof actual) == n);
++            CHECK(memcmp(actual, deep, n) == 0);
++        }
++        chc_block_destroy(block, &al);
+         test_mem_sink_free(&sink);
+         chc_type_destroy(t, &al);
+     }
+@@ -703,7 +714,7 @@ main(void)
+     test_write_mismatch();
+     test_write_failure_sweep();
+     test_read_oom_sweep();
+-    test_block_write_rejects();
++    test_block_write_long_type();
+
+     if (fail_count) {
+         fprintf(stderr, "%d failure(s)\n", fail_count);
+diff --git a/test/test_php_compat.c b/test/test_php_compat.c
+new file mode 100644
+index 0000000..4af7730
+--- /dev/null
++++ b/test/test_php_compat.c
+@@ -0,0 +1,464 @@
++/* Compatibility contracts used by the PHP adapter; wire fixtures are unit tests. */
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#define CHC_PROVIDE_STDLIB_ALLOC
++#define CHC_NO_LZ4
++#define CHC_NO_ZSTD
++#define CHC_PHP_COMPAT 1
++#define CHC_MAX_HELLO_STRING_SIZE 0xFFFFFFu
++#define CHC_MAX_PROTOCOL_STRING_SIZE 0xFFFFFFu
++#define CHC_IMPLEMENTATION
++#include "clickhouse-async.h"
++
++static int fail_count;
++static const char *current_test;
++#include "test_common.h"
++
++typedef struct {
++    test_mem_src input;
++    test_mem_sink output;
++} duplex;
++
++static int
++read_duplex(void *ud, void *buf, size_t len, size_t *n, chc_err *err)
++{
++    return test_mem_read(&((duplex *) ud)->input, buf, len, n, err);
++}
++
++static int
++write_duplex(void *ud, const void *buf, size_t len, chc_err *err)
++{
++    return test_mem_sink_write(&((duplex *) ud)->output, buf, len, err);
++}
++
++static void
++expect_number(chc_in *in, uint64_t value)
++{
++    uint64_t actual = 0;
++    chc_err err = {0};
++    CHECK(chc__read_varuint(in, &actual, &err) == CHC_OK);
++    CHECK_EQ_U64(actual, value);
++}
++
++static void
++expect_string(chc_in *in, const char *value, size_t len)
++{
++    char *actual = NULL;
++    size_t actual_len = 0;
++    chc_err err = {0};
++    CHECK(chc__read_string(in, &actual, &actual_len, &err) == CHC_OK);
++    CHECK(actual_len == len);
++    if (actual && actual_len == len) CHECK(memcmp(actual, value, len) == 0);
++    in->al->free(in->al->ud, actual, actual_len + 1);
++}
++
++static void
++test_hello(uint64_t server_revision)
++{
++    current_test = "compat_hello";
++    chc_alloc al = chc_alloc_stdlib();
++    chc_err err = {0};
++    chc_client *client = NULL;
++    chc_async_client *async = NULL;
++    test_mem_sink server = {0};
++    chc_io server_io = {.ud = &server, .write = test_mem_sink_write};
++    char name[5000], timezone[100], display_name[250];
++    memset(name, 'n', sizeof name);
++    memset(timezone, 't', sizeof timezone);
++    memset(display_name, 'd', sizeof display_name);
++    uint64_t revision = server_revision < 54459 ? server_revision : 54459;
++    CHECK(chc__write_varuint(&server_io, 0, &err) == CHC_OK);
++    CHECK(chc__write_string(&server_io, name, sizeof name, &err) == CHC_OK);
++    CHECK(chc__write_varuint(&server_io, 1, &err) == CHC_OK);
++    CHECK(chc__write_varuint(&server_io, 2, &err) == CHC_OK);
++    CHECK(chc__write_varuint(&server_io, server_revision, &err) == CHC_OK);
++    if (revision >= 54058)
++        CHECK(chc__write_string(&server_io, timezone, sizeof timezone, &err) == CHC_OK);
++    if (revision >= 54372)
++        CHECK(chc__write_string(&server_io, display_name, sizeof display_name, &err) == CHC_OK);
++    if (revision >= 54401)
++        CHECK(chc__write_varuint(&server_io, 3, &err) == CHC_OK);
++
++    const char identity[] = {'c', '\0', 'n'};
++    const char database[] = {'d', '\0', 'b'};
++    const char user[] = {'u', '\0', 's'};
++    const char password[] = {'p', '\0', 'w'};
++    chc_client_opts opts = {
++        .protocol_revision = 54459, .allow_legacy_server = true, .skip_init_ping = true,
++        .strings_have_lengths = true,
++        .client_name = identity, .client_name_len = sizeof identity,
++        .database = database, .database_len = sizeof database,
++        .user = user, .user_len = sizeof user,
++        .password = password, .password_len = sizeof password,
++        .client_version_major = 4, .client_version_minor = 5,
++    };
++    duplex stream = {.input = {.data = server.data, .len = server.len}};
++    chc_io io = {.ud = &stream, .read = read_duplex, .write = write_duplex};
++    int rc = chc_client_init(&client, &opts, &al, &io, NULL, &err);
++    CHECK_OK(rc, err);
++    const chc_server_info *info = chc_client_server_info(client);
++    CHECK_EQ_U64(info->server_revision, server_revision);
++    CHECK_EQ_U64(info->revision, revision);
++    CHECK(info->full_name_len == sizeof name);
++    CHECK(memcmp(info->full_name, name, sizeof name) == 0);
++    CHECK(info->full_timezone_len == (revision >= 54058 ? sizeof timezone : 0));
++    CHECK(info->full_display_name_len == (revision >= 54372 ? sizeof display_name : 0));
++    CHECK_EQ_U64(info->version_patch, revision >= 54401 ? 3 : 0);
++
++    test_mem_src hello_src;
++    chc_io hello_io;
++    test_mem_src_init(&hello_src, &hello_io, stream.output.data, stream.output.len);
++    chc_in hello;
++    rc = chc_in_init(&hello, &hello_io, &al, 0, &err);
++    CHECK_OK(rc, err);
++    expect_number(&hello, 0);
++    expect_string(&hello, identity, sizeof identity);
++    expect_number(&hello, 4);
++    expect_number(&hello, 5);
++    expect_number(&hello, 54459);
++    expect_string(&hello, database, sizeof database);
++    expect_string(&hello, user, sizeof user);
++    expect_string(&hello, password, sizeof password);
++    if (revision >= 54458) expect_string(&hello, "", 0);
++    uint64_t extra;
++    CHECK(chc__read_varuint(&hello, &extra, &err) == CHC_ERR_EOF);
++    chc_in_free(&hello);
++
++    rc = chc_async_client_init(&async, &opts, &al, &err);
++    CHECK_OK(rc, err);
++    CHECK(chc_async_handshake(async, NULL, &err) == CHC_WOULD_BLOCK);
++    for (size_t i = 0; i < server.len; ++i) {
++        CHECK(chc_async_submit(async, server.data + i, 1, &err) == CHC_OK);
++        rc = chc_async_handshake(async, NULL, &err);
++        CHECK(rc == (i + 1 == server.len ? CHC_OK : CHC_WOULD_BLOCK));
++    }
++    const uint8_t *output;
++    size_t output_len;
++    chc_async_pending_out(async, &output, &output_len);
++    CHECK(output_len == stream.output.len);
++    if (output_len == stream.output.len) CHECK(memcmp(output, stream.output.data, output_len) == 0);
++    CHECK(chc_async_server_info(async)->server_revision == server_revision);
++out:
++    chc_client_close(client);
++    chc_async_client_free(async);
++    test_mem_sink_free(&stream.output);
++    test_mem_sink_free(&server);
++}
++
++static void
++test_legacy_query_and_progress(void)
++{
++    current_test = "legacy_query_and_progress";
++    chc_alloc al = chc_alloc_stdlib();
++    chc_err err = {0};
++    test_mem_sink output = {0};
++    chc_io io = {.ud = &output, .write = test_mem_sink_write};
++    chc_client client = {.al = &al, .io = &io, .server = {.revision = 732}};
++    CHECK(chc_client_send_query(&client, "SELECT 1", 8, "q", 1, &err) == CHC_OK);
++    const uint8_t expected[] = {1, 1, 'q', 0, 2, 0, 8, 'S', 'E', 'L', 'E', 'C', 'T', ' ', '1', 2, 0, 0};
++    CHECK(output.len == sizeof expected);
++    if (output.len == sizeof expected) CHECK(memcmp(output.data, expected, sizeof expected) == 0);
++    size_t before = output.len;
++    CHECK(chc_client_send_data_named(&client, NULL, "ext", 3, &err) == CHC_ERR_USAGE);
++    CHECK(output.len == before);
++    const uint8_t progress[] = {3, 7, 8, 4};
++    CHECK(chc_in_init_ioless(&client.in, &al) == CHC_OK);
++    CHECK(chc_in_submit(&client.in, progress, sizeof progress, &err) == CHC_OK);
++    chc_packet packet;
++    CHECK(chc_client_recv_packet(&client, &packet, &err) == CHC_OK);
++    CHECK(packet.kind == CHC_PKT_PROGRESS);
++    CHECK(packet.progress.rows == 7 && packet.progress.bytes == 8);
++    CHECK(packet.progress.total_rows == 0 && packet.progress.written_rows == 0);
++    CHECK(chc_client_recv_packet(&client, &packet, &err) == CHC_OK);
++    CHECK(packet.kind == CHC_PKT_PONG);
++    chc_in_free(&client.in);
++    test_mem_sink_free(&output);
++}
++
++static void
++check_type_spelling(const chc_type *type)
++{
++    size_t len = 0;
++    const char *name = chc_type_name(type, &len);
++    char formatted[128];
++    memset(formatted, 0xa5, sizeof formatted);
++    CHECK(len < sizeof formatted);
++    CHECK_EQ_U64(chc_type_format(type, formatted, sizeof formatted), len);
++    if (len < sizeof formatted) {
++        CHECK(memcmp(formatted, name, len) == 0);
++        CHECK(formatted[len] == '\0');
++    }
++    for (size_t i = 0; i < chc_type_n_children(type); ++i)
++        check_type_spelling(chc_type_child(type, i));
++}
++
++static void
++test_type_spelling_ownership(void)
++{
++    current_test = "type_spelling_ownership";
++    static const char *sources[] = {
++        "Array(Nullable(String))",
++        "Tuple(label String, amount SimpleAggregateFunction(sum, UInt64))",
++        "SimpleAggregateFunction(sum, UInt64)",
++        "Map(String, Array(DateTime64(3, 'UTC')))",
++    };
++    for (size_t i = 0; i < sizeof sources / sizeof *sources; ++i) {
++        size_t len = strlen(sources[i]);
++        for (size_t fail_at = 0;; ++fail_at) {
++            char *input = malloc(len + 1);
++            CHECK(input != NULL);
++            if (!input) return;
++            memcpy(input, sources[i], len + 1);
++            test_fail_alloc fa;
++            chc_alloc al = test_fail_alloc_init(&fa, fail_at);
++            chc_type *type = NULL;
++            chc_err err = {0};
++            int rc = chc_type_parse(input, len, &al, &type, &err);
++            memset(input, 'x', len);
++            free(input);
++            if (rc == CHC_OK) {
++                const char *expected = i == 2 ? "UInt64" : sources[i];
++                size_t name_len = 0;
++                const char *name = chc_type_name(type, &name_len);
++                CHECK_STR_EQ(name, name_len, expected);
++                check_type_spelling(type);
++                if (i == 1) {
++                    const chc_type *amount = chc_type_child(type, 1);
++                    name = chc_type_name(amount, &name_len);
++                    CHECK_STR_EQ(name, name_len, "UInt64");
++                }
++                chc_type_destroy(type, &al);
++            } else {
++                CHECK(rc == CHC_ERR_OOM);
++                CHECK(type == NULL);
++            }
++            CHECK_EQ_U64(fa.live, 0);
++            CHECK_EQ_U64(fa.live_bytes, 0);
++            if (rc == CHC_OK && fail_at >= fa.calls) break;
++            if (rc != CHC_OK && rc != CHC_ERR_OOM) break;
++        }
++    }
++}
++
++static void
++test_type_spelling_growth(void)
++{
++    current_test = "type_spelling_growth";
++    size_t retained[2] = {0};
++    const size_t label_lengths[] = {64, 512};
++    for (size_t sample = 0; sample < 2; ++sample) {
++        char source[1024];
++        size_t len = 0;
++        for (size_t depth = 0; depth < 16; ++depth) {
++            memcpy(source + len, "Array(", 6);
++            len += 6;
++        }
++        memcpy(source + len, "Enum8('", 7);
++        len += 7;
++        memset(source + len, 'a', label_lengths[sample]);
++        len += label_lengths[sample];
++        memcpy(source + len, "'=1)", 4);
++        len += 4;
++        for (size_t depth = 0; depth < 16; ++depth) source[len++] = ')';
++        test_fail_alloc fa;
++        chc_alloc al = test_fail_alloc_init(&fa, SIZE_MAX);
++        chc_type *type = NULL;
++        chc_err err = {0};
++        int rc = chc_type_parse(source, len, &al, &type, &err);
++        CHECK(rc == CHC_OK);
++        retained[sample] = fa.live_bytes;
++        chc_type_destroy(type, &al);
++        CHECK_EQ_U64(fa.live, 0);
++        CHECK_EQ_U64(fa.live_bytes, 0);
++    }
++    /* Label growth must not be copied once for each enclosing Array. */
++    CHECK(retained[1] >= retained[0]);
++    CHECK(retained[1] - retained[0] <= 4 * (label_lengths[1] - label_lengths[0]));
++}
++
++static void
++test_empty_type_arguments(void)
++{
++    current_test = "empty_type_arguments";
++    static const struct {
++        const char *input, *name;
++        chc_kind kind;
++        int scale;
++        size_t nesting;
++    } cases[] = {
++        {"DateTime()", "DateTime", CHC_DATETIME, 0, 0},
++        {"DateTime64()", "DateTime64(0)", CHC_DATETIME64, 0, 0},
++        {"DateTime64( )", "DateTime64(0)", CHC_DATETIME64, 0, 0},
++        {"Time64()", "Time64(0)", CHC_TIME64, 0, 0},
++        {"Decimal32()", "Decimal(9,0)", CHC_DECIMAL32, 0, 0},
++        {"Decimal64()", "Decimal(18,0)", CHC_DECIMAL64, 0, 0},
++        {"Decimal128()", "Decimal(38,0)", CHC_DECIMAL128, 0, 0},
++        {"Array(Nullable(Decimal64()))", "Decimal(18,0)", CHC_DECIMAL64, 0, 2},
++        {"Array(DateTime64())", "DateTime64(0)", CHC_DATETIME64, 0, 1},
++        {"DateTime64(3)", "DateTime64(3)", CHC_DATETIME64, 3, 0},
++        {"Time64(3)", "Time64(3)", CHC_TIME64, 3, 0},
++        {"Decimal32(2)", "Decimal32(2)", CHC_DECIMAL32, 2, 0},
++    };
++    for (size_t i = 0; i < sizeof cases / sizeof *cases; ++i) {
++        for (size_t fail_at = 0;; ++fail_at) {
++            test_fail_alloc fa;
++            chc_alloc al = test_fail_alloc_init(&fa, fail_at);
++            chc_type *type = NULL;
++            chc_err err = {0};
++            int rc = chc_type_parse(cases[i].input, strlen(cases[i].input), &al, &type, &err);
++            if (rc == CHC_OK) {
++                const chc_type *leaf = type;
++                for (size_t depth = 0; depth < cases[i].nesting; ++depth)
++                    leaf = chc_type_child(leaf, 0);
++                CHECK(chc_type_kind(leaf) == cases[i].kind);
++                int scale = chc__kind_is_decimal(cases[i].kind)
++                    ? chc_type_decimal_scale(leaf) : chc_type_datetime64_scale(leaf);
++                CHECK(scale == cases[i].scale);
++                size_t len = 0;
++                const char *name = chc_type_name(leaf, &len);
++                CHECK_STR_EQ(name, len, cases[i].name);
++                check_type_spelling(type);
++                chc_type_destroy(type, &al);
++            } else {
++                CHECK(rc == CHC_ERR_OOM);
++                CHECK(type == NULL);
++            }
++            CHECK_EQ_U64(fa.live, 0);
++            CHECK_EQ_U64(fa.live_bytes, 0);
++            if (rc == CHC_OK && fail_at >= fa.calls) break;
++            if (rc != CHC_OK && rc != CHC_ERR_OOM) break;
++        }
++    }
++    static const struct { const char *input, *message; } rejected[] = {
++        {"Decimal32", "AST child element index out of bounds: 0"},
++        {"Array(Decimal64)", "AST child element index out of bounds: 0"},
++        {"Decimal()", "AST child element index out of bounds: -1"},
++        {"FixedString()", "FixedString size must be between 1 and 16777215, got 0"},
++        {"Enum8()", "Enum8 content is not correct"},
++        {"Enum16()", "Enum16 content is not correct"},
++        {"Array()", "AST child element index out of bounds: 0"},
++        {"Nullable()", "AST child element index out of bounds: 0"},
++        {"Map()", "Map content is not correct"},
++        {"SimpleAggregateFunction()", "AST child element index out of bounds: -1"},
++    };
++    chc_alloc al = chc_alloc_stdlib();
++    for (size_t i = 0; i < sizeof rejected / sizeof *rejected; ++i) {
++        chc_type *type = NULL;
++        chc_err err = {0};
++        CHECK(chc_type_parse(rejected[i].input, strlen(rejected[i].input), &al, &type, &err) == CHC_ERR_USAGE);
++        CHECK(type == NULL);
++        CHECK(strcmp(err.msg, rejected[i].message) == 0);
++        chc_type_destroy(type, &al);
++    }
++    chc_type *type = NULL;
++    chc_err err = {0};
++    const char *input = "LowCardinality(Array())";
++    CHECK(chc_type_parse(input, strlen(input), &al, &type, &err) == CHC_ERR_USAGE);
++    CHECK(type == NULL);
++    CHECK(strcmp(err.msg, "LowCardinality(Array) is not supported") == 0);
++    input = "SimpleAggregateFunction(sum, Array())";
++    CHECK(chc_type_parse(input, strlen(input), &al, &type, &err) == CHC_ERR_TYPE);
++    CHECK(type == NULL);
++    CHECK(strcmp(err.msg, "unsupported column type: SimpleAggregateFunction(sum, Array())") == 0);
++}
++
++typedef struct {
++    test_mem_sink bytes;
++    size_t calls;
++    size_t fail_at;
++    const void *direct;
++    size_t direct_len;
++    bool saw_direct;
++} counting_sink;
++
++static int
++write_counted(void *ud, const void *data, size_t len, chc_err *err)
++{
++    counting_sink *sink = ud;
++    if (++sink->calls == sink->fail_at)
++        return test_mem_err_set(err, CHC_ERR_IO, "sink write failed");
++    if (data == sink->direct && len == sink->direct_len) sink->saw_direct = true;
++    return test_mem_sink_write(&sink->bytes, data, len, err);
++}
++
++static void
++test_data_coalescing(void)
++{
++    current_test = "data_coalescing";
++    chc_alloc al = chc_alloc_stdlib();
++    chc_err err = {0};
++    chc_type *type = NULL;
++    uint8_t data[1000 * 20 + 16384 + 3];
++    uint64_t offsets[1002];
++    memset(data, 'v', sizeof data);
++    for (size_t i = 0; i < 1000; ++i) offsets[i] = (i + 1) * 20;
++    offsets[1000] = 20000 + 16384;
++    offsets[1001] = sizeof data;
++    int rc = chc_type_parse("String", 6, &al, &type, &err);
++    CHECK(rc == CHC_OK);
++    if (rc != CHC_OK) return;
++    chc_column column = chc_build_string(offsets, data, 1002);
++    chc_block_col storage[1];
++    chc_block_builder block;
++    chc_block_builder_init(&block, storage);
++    chc_block_builder_append(&block, "value", 5, type, &column);
++    counting_sink output = {
++        .fail_at = SIZE_MAX, .direct = data + 20000, .direct_len = 16384,
++    };
++    chc_io io = {.ud = &output, .write = write_counted};
++    chc_client client = {.al = &al, .io = &io, .server = {.revision = 54459}};
++    test_mem_sink expected = {0};
++    chc_io raw = {.ud = &expected, .write = test_mem_sink_write};
++    CHECK(chc__write_varuint(&raw, CHC__CLIENT_DATA, &err) == CHC_OK);
++    CHECK(chc__write_string(&raw, "external", 8, &err) == CHC_OK);
++    CHECK(chc__client_write_block_body(&client, &raw, &block, &err) == CHC_OK);
++    CHECK(chc_client_send_data_named(&client, &block, "external", 8, &err) == CHC_OK);
++    CHECK(output.bytes.len == expected.len);
++    if (output.bytes.len == expected.len)
++        CHECK(memcmp(output.bytes.data, expected.data, expected.len) == 0);
++    CHECK(output.calls <= expected.len / 4096 + 3);
++    CHECK(output.saw_direct);
++    size_t writes = output.calls;
++    for (size_t fail_at = 1; fail_at <= writes; ++fail_at) {
++        output.calls = 0;
++        output.bytes.len = 0;
++        output.fail_at = fail_at;
++        CHECK(chc_client_send_data_named(&client, &block, "external", 8, &err) == CHC_ERR_IO);
++        CHECK(strcmp(err.msg, "sink write failed") == 0);
++        CHECK(output.calls == fail_at);
++    }
++    output.calls = 0;
++    output.bytes.len = 0;
++    output.fail_at = SIZE_MAX;
++    expected.len = 0;
++    CHECK(chc__write_varuint(&raw, CHC__CLIENT_DATA, &err) == CHC_OK);
++    CHECK(chc__write_string(&raw, "", 0, &err) == CHC_OK);
++    CHECK(chc__client_write_block_body(&client, &raw, NULL, &err) == CHC_OK);
++    CHECK(chc_client_send_data(&client, NULL, &err) == CHC_OK);
++    CHECK(output.calls == 1);
++    CHECK(output.bytes.len == expected.len);
++    if (output.bytes.len == expected.len)
++        CHECK(memcmp(output.bytes.data, expected.data, expected.len) == 0);
++    test_mem_sink_free(&output.bytes);
++    test_mem_sink_free(&expected);
++    chc_type_destroy(type, &al);
++}
++
++int main(void)
++{
++    test_hello(732);
++    test_hello(54401);
++    test_hello(54470);
++    test_legacy_query_and_progress();
++    test_type_spelling_ownership();
++    test_type_spelling_growth();
++    test_empty_type_arguments();
++    test_data_coalescing();
++    if (fail_count) return 1;
++    fprintf(stderr, "all PHP compatibility unit tests passed\n");
++    return 0;
++}
+diff --git a/test/test_php_live.c b/test/test_php_live.c
+new file mode 100644
+index 0000000..27878c1
+--- /dev/null
++++ b/test/test_php_live.c
+@@ -0,0 +1,33 @@
++/* Live operations using the PHP compatibility implementation mode. */
++#define CHC_PHP_COMPAT 1
++#define CHC_ZSTD_COMPRESSION_LEVEL 1
++#define main upstream_client_test_main
++#include "test_client_tcp.c"
++#undef main
++
++int main(void)
++{
++    signal(SIGPIPE, SIG_IGN);
++    g_port = 19006;
++    g_server_pid = test_clickhouse_server_start("/tmp/ch-test-php-srv", g_port);
++    if (g_server_pid < 0) {
++        fprintf(stderr, "failed to start PHP compatibility test server\n");
++        return 77;
++    }
++    atexit(stop_server);
++    test_select_simple();
++    test_select_many();
++    test_select_with_param();
++    test_select_with_array_param();
++    test_insert_lz4_roundtrip();
++    test_insert_zstd_roundtrip();
++    test_external_data_compat(CHC_COMP_NONE, 0);
++    test_external_data_compat(CHC_COMP_LZ4, 64);
++    test_external_data_compat(CHC_COMP_LZ4, 0);
++    test_external_data_compat(CHC_COMP_ZSTD, 64);
++    test_external_data_compat(CHC_COMP_ZSTD, 0);
++    stop_server();
++    if (fail_count) return 1;
++    fprintf(stderr, "all PHP compatibility live tests passed\n");
++    return 0;
++}
+diff --git a/LOCAL_PATCHES.md b/LOCAL_PATCHES.md
+new file mode 100644
+index 0000000..3d67b8f
+--- /dev/null
++++ b/LOCAL_PATCHES.md
+@@ -0,0 +1,99 @@
++# Local compatibility patch
++
++This directory contains ClickHouse/clickhouse-c commit
++`084498e63a8e814d8f8ab9a32b923d7d6c3c7d9f`, including its license,
++documentation, examples, and tests. The migration retains the revision examined
++in the original analysis. No newer upstream implementation is mixed into it.
++
++Apply `patches/clickhouse-c/0001-php-compatibility.patch` with `git apply` from
++a checkout of that commit to reproduce the local changes. Paths in the patch
++are relative to this directory. Reapply or explicitly retire the patch when
++updating upstream.
++
++## 0001-php-compatibility.patch
++
++The patch adds the protocol behavior required by the existing PHP API:
++
++- `chc_client_opts.protocol_revision` selects an advertised revision no greater
++  than 54465. Zero preserves upstream's default. The PHP adapter uses 54459,
++  matching its previous client. `allow_legacy_server` enables the Hello,
++  ClientInfo, settings, parameter, progress, and block feature gates needed for
++  older peers. It does not change the default 54462 minimum.
++- `skip_init_ping` allows the adapter to preserve the constructor's existing
++  handshake. Zero retains upstream's Ping probe. Both synchronous and async
++  clients apply these options.
++- The Hello identity and credentials, settings, and parameters accept explicit
++  lengths when `strings_have_lengths` is true. Default callers retain their
++  NUL-terminated string behavior.
++- `chc_server_info.server_revision` preserves the server's actual revision.
++  `revision` remains the negotiated revision. The client owns the `full_name`,
++  `full_timezone`, and `full_display_name` strings and their length fields;
++  callers borrow them until close, or until a timezone update replaces that
++  field. Existing fixed arrays remain truncated compatibility views. The
++  default 4096-byte Hello string limit remains available. The PHP translation
++  unit sets `CHC_MAX_HELLO_STRING_SIZE` and `CHC_MAX_PROTOCOL_STRING_SIZE` to
++  `0x00FFFFFF`, preserving its previous metadata limit. Metadata strings grow
++  only as bytes arrive, preserving the previous client's allocation behavior.
++- `defer_data_terminator` and `chc_client_send_data_named()` allow callers to
++  send external tables before the final unnamed empty Data block. Ordinary
++  queries retain automatic finalization.
++- Block writers use the type parser's complete stored name. The former
++  256-byte staging buffer is removed. Its rejection test now checks a valid
++  long type's complete roundtrip.
++- `has_max_compression_chunk_size` selects a runtime compression chunk limit.
++  When present, zero means no configured cap; wire and codec size limits still
++  apply. When absent, upstream's 65535-byte default remains. Size calculations
++  are checked before frame allocation and wire narrowing.
++- `chc_column_destroy()` exposes the existing owned-column destructor. Columns
++  borrowed from blocks remain owned by their block; types remain separately
++  owned. Empty initializers in implementation headers use C11 syntax.
++- Fixed, String, nullable, array-offset, LowCardinality-index, and compressed
++  input buffers grow in steps as preceding bytes arrive. Ioless readers defer
++  allocation until the submitted payload is available. String buffers retain
++  geometric capacity across rows. Valid empty compressed frames are consumed
++  before reading the next data-bearing frame. Block metadata arrays grow as
++  columns arrive, and cleanup visits only allocated slots. Type-child and Tuple
++  field arrays grow geometrically instead of reallocating for every element.
++  In PHP compatibility mode, parsed nodes borrow length-delimited names from
++  one immutable, reference-counted spelling buffer. Partial parsing and
++  SimpleAggregateFunction unwrapping preserve ownership without copying every
++  subtree's spelling. Generic upstream mode retains separate terminated names.
++- `CHC_PHP_COMPAT=1` selects the previous column factory's supported types,
++  required temporal parameters, diagnostics, and 1 GiB decompressed-frame
++  limit. It validates offsets before consuming their nested values and checks
++  dictionary indexes before returning a block. SimpleAggregateFunction with a
++  supported terminal argument becomes that argument's type, matching the old
++  factory. LowCardinality dictionaries retain the previous String/FixedString
++  restriction beneath Nullable wrappers. Incoming DateTime timezones and named
++  Tuple fields remain intact. Empty Tuple factory errors retain their original
++  diagnostic, including inside LowCardinality dictionaries.
++  Empty DateTime, DateTime64, Time64, and fixed-width Decimal argument lists
++  retain the previous zero-precision defaults and canonical wire names. Required
++  argument failures are deferred until the factory constructs the affected node,
++  preserving both their diagnostics and outer-type rejection precedence.
++  Outgoing PHP-specific normalization belongs to the binding's column builder.
++- In PHP compatibility mode, ClientInfo uses the same owned identity bytes as
++  Hello. `CHC_ZSTD_COMPRESSION_LEVEL=1` restores the previous encoder level;
++  without an override, the upstream ZSTD default remains available.
++- Uncompressed PHP Data packets coalesce small writes in an 8 KiB stack buffer,
++  matching the previous output buffer. Large payloads can write directly to the
++  transport. A successful send flushes all bytes before returning; errors retain
++  no pending buffer across calls. Compression framing and chunk limits are
++  unchanged.
++- PHP compatibility mode rejects Totals and Extremes packets with the previous
++  native errors before reading their bodies. Generic upstream clients retain
++  support for both packet types.
++
++Revision constants follow the existing vendored C++ client's feature gates and
++[ClickHouse's protocol definitions](https://github.com/ClickHouse/ClickHouse/blob/master/src/Core/ProtocolDefines.h).
++The default decoder limits remain available; PHP overrides preserve its prior
++limits and column validation remains mandatory.
++
++`test/test_php_compat.c` checks compatibility against wire fixtures, including
++legacy revisions, full metadata, explicit credential lengths, and no implicit
++Ping. These are unit tests, not live interoperability evidence.
++`test/test_client_tcp.c` adds live external-table queries with a long Enum16 type
++at revision 54459, using uncompressed, LZ4, and ZSTD connections and both capped
++and uncapped chunks. `test/test_php_live.c` repeats the compatible operations
++with `CHC_PHP_COMPAT=1` against a separate disposable server. The standard
++`bash test.sh` runner includes these tests.

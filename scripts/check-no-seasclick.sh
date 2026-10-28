@@ -4,7 +4,7 @@
 #
 #   - php_clickhouse.h: CLICKHOUSE_RES_NAME_LEGACY / CLICKHOUSE_EXCEPTION_NAME_LEGACY
 #     definitions and the file-header attribution
-#   - clickhouse.cpp: alias-registration comments and the file-header
+#   - clickhouse.c: alias-registration comments and the file-header
 #     attribution
 #   - tests/_clickhouse.inc: seasclick_test_config / seasclick_skip_if_no_server
 #     back-compat function aliases
@@ -19,7 +19,7 @@
 #
 # Anywhere else, "SeasClick" usually means a rename was missed.
 #
-# Vendored library (lib/clickhouse-cpp/) and build artifacts are
+# Vendored libraries (lib/clickhouse-c/ and lib/compression/) and build artifacts are
 # excluded.
 
 set -Eeuo pipefail
@@ -54,10 +54,10 @@ if ((${#SOURCE_FILES[@]} > 0)); then
 fi
 
 UNEXPECTED=$(printf '%s\n' "${RAW_MATCHES}" |
-	grep -v '^lib/clickhouse-cpp/' |
+	grep -vE '^lib/(clickhouse-c|compression)/' |
 	grep -vE '^scripts/check-no-seasclick\.sh:' |
 	grep -vE '^php_clickhouse\.h:.*(Original SeasClick|RES_NAME_LEGACY|EXCEPTION_NAME_LEGACY|aliases for the original SeasClick)' |
-	grep -vE '^clickhouse\.cpp:.*(Original SeasClick|aliases for the original SeasClick)' |
+	grep -vE '^clickhouse\.c:.*(Original SeasClick|aliases for the original SeasClick)' |
 	grep -vE '^tests/_clickhouse\.inc:.*(seasclick_test_config|seasclick_skip_if_no_server)' |
 	grep -vE '^tests/026\.phpt:.*(BC aliases|new SeasClick|catch \(SeasClickException)' |
 	grep -vE '^tests/051\.phpt:.*(SeasClick", "SeasClickException|class\.SeasClick(Exception)?=)' |

@@ -5,54 +5,36 @@ ARG_ENABLE("clickhouse-openssl", "Enable TLS/SSL support in php_clickhouse (requ
 
 if (PHP_CLICKHOUSE != "no") {
     var ext_dir = configure_module_dirname;
-    var ch_root = ext_dir + "\\lib\\clickhouse-cpp";
+    var codec_root = ext_dir + "\\lib\\compression";
 
-    // /EHsc enables native exception unwinding; /DNOMINMAX avoids Windows macro
-    // collisions, and /bigobj accommodates the templated columns' section count.
-    ADD_FLAG("CFLAGS_CLICKHOUSE",   "/std:c++17 /EHsc /bigobj /DNOMINMAX /DZSTD_DISABLE_ASM /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS");
-    ADD_FLAG("CXXFLAGS_CLICKHOUSE", "/std:c++17 /EHsc /bigobj /DNOMINMAX /DZSTD_DISABLE_ASM /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS");
-    ADD_FLAG("LDFLAGS_CLICKHOUSE",  "ws2_32.lib");
+    ADD_FLAG("CFLAGS_CLICKHOUSE", "/std:c11 /DNOMINMAX /DZSTD_DISABLE_ASM /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS");
+    ADD_FLAG("LDFLAGS_CLICKHOUSE", "ws2_32.lib");
 
     ADD_FLAG("CFLAGS_CLICKHOUSE",
-        "/I" + ch_root +
-        " /I" + ch_root + "\\contrib" +
-        " /I" + ch_root + "\\contrib\\absl" +
-        " /I" + ch_root + "\\contrib\\cityhash" +
-        " /I" + ch_root + "\\contrib\\cityhash\\cityhash" +
-        " /I" + ch_root + "\\contrib\\lz4" +
-        " /I" + ch_root + "\\contrib\\lz4\\lz4" +
-        " /I" + ch_root + "\\contrib\\zstd\\zstd" +
-        " /I" + ch_root + "\\contrib\\zstd\\zstd\\common");
+        "/I" + ext_dir + "\\lib\\clickhouse-c" +
+        " /I" + codec_root + "\\lz4" +
+        " /I" + codec_root + "\\zstd" +
+        " /I" + codec_root + "\\zstd\\common");
 
-    var clickhouse_ssl_src = "";
     if (PHP_CLICKHOUSE_OPENSSL != "no") {
         if (CHECK_LIB("libssl.lib", "clickhouse") &&
             CHECK_LIB("libcrypto.lib", "clickhouse") &&
             CHECK_HEADER_ADD_INCLUDE("openssl/ssl.h", "CFLAGS_CLICKHOUSE")) {
-            ADD_FLAG("CXXFLAGS_CLICKHOUSE", "/DWITH_OPENSSL");
-            ADD_FLAG("CFLAGS_CLICKHOUSE",   "/DWITH_OPENSSL");
+            ADD_FLAG("CFLAGS_CLICKHOUSE", "/DWITH_OPENSSL");
             AC_DEFINE("WITH_OPENSSL", 1, "Build php_clickhouse with TLS/SSL support");
-            clickhouse_ssl_src = "sslsocket.cpp";
         } else {
-            ERROR("--enable-clickhouse-openssl was requested but libssl/libcrypto/openssl headers were not found. Install OpenSSL or drop the flag. (config.m4 fails hard here too.)");
+            ERROR("--enable-clickhouse-openssl was requested but libssl/libcrypto/openssl headers were not found. Install OpenSSL or drop the flag.");
         }
     }
 
-    EXTENSION("clickhouse", "clickhouse.cpp metadata.cpp query_log.cpp typesToPhp.cpp", null, "/DZEND_ENABLE_STATIC_TSRMLS_CACHE=1");
+    EXTENSION("clickhouse", "clickhouse.c ch_backend.c ch_protocol.c ch_query.c ch_insert.c ch_results.c ch_types_read.c ch_types_write.c ch_wide.c metadata.c query_log.c", null, "/DZEND_ENABLE_STATIC_TSRMLS_CACHE=1");
     ADD_EXTENSION_DEP("clickhouse", "json");
 
-    ADD_SOURCES(ch_root + "\\clickhouse",            "block.cpp client.cpp query.cpp",                                                                                                                                                                                                                              "clickhouse");
-    ADD_SOURCES(ch_root + "\\clickhouse\\base",      "compressed.cpp endpoints_iterator.cpp input.cpp output.cpp platform.cpp socket.cpp wire_format.cpp " + clickhouse_ssl_src,                                                                                                                                    "clickhouse");
-    ADD_SOURCES(ch_root + "\\clickhouse\\columns",   "array.cpp bool.cpp column.cpp date.cpp decimal.cpp enum.cpp factory.cpp geo.cpp ip4.cpp ip6.cpp itemview.cpp json.cpp lowcardinality.cpp map.cpp nullable.cpp numeric.cpp string.cpp time.cpp tuple.cpp uuid.cpp",                                                              "clickhouse");
-    ADD_SOURCES(ch_root + "\\clickhouse\\types",     "type_parser.cpp types.cpp",                                                                                                                                                                                                                                   "clickhouse");
-
-    ADD_SOURCES(ch_root + "\\contrib\\absl\\absl\\numeric", "int128.cc", "clickhouse");
-    ADD_SOURCES(ch_root + "\\contrib\\cityhash\\cityhash", "city.cc", "clickhouse");
-    ADD_SOURCES(ch_root + "\\contrib\\lz4\\lz4",           "lz4.c lz4hc.c", "clickhouse");
-    ADD_SOURCES(ch_root + "\\contrib\\zstd\\zstd\\common",
+    ADD_SOURCES(codec_root + "\\lz4", "lz4.c lz4hc.c", "clickhouse");
+    ADD_SOURCES(codec_root + "\\zstd\\common",
         "debug.c entropy_common.c error_private.c fse_decompress.c pool.c threading.c xxhash.c zstd_common.c", "clickhouse");
-    ADD_SOURCES(ch_root + "\\contrib\\zstd\\zstd\\compress",
+    ADD_SOURCES(codec_root + "\\zstd\\compress",
         "fse_compress.c hist.c huf_compress.c zstd_compress.c zstd_compress_literals.c zstd_compress_sequences.c zstd_compress_superblock.c zstd_double_fast.c zstd_fast.c zstd_lazy.c zstd_ldm.c zstd_opt.c zstdmt_compress.c", "clickhouse");
-    ADD_SOURCES(ch_root + "\\contrib\\zstd\\zstd\\decompress",
+    ADD_SOURCES(codec_root + "\\zstd\\decompress",
         "huf_decompress.c zstd_ddict.c zstd_decompress.c zstd_decompress_block.c", "clickhouse");
 }
