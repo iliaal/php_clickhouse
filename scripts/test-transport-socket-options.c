@@ -45,6 +45,21 @@ static int ch_test_option(int descriptor, int level, int option, int expected, c
 	return 1;
 }
 
+static int ch_test_bool_option(int descriptor, int level, int option, bool expected, const char *name)
+{
+	int actual = -1;
+	socklen_t size = sizeof(actual);
+	if (getsockopt(descriptor, level, option, &actual, &size) != 0) {
+		perror(name);
+		return 0;
+	}
+	if (size != sizeof(actual) || (actual != 0) != expected) {
+		fprintf(stderr, "%s: expected %s, got %d\n", name, expected ? "enabled" : "disabled", actual);
+		return 0;
+	}
+	return 1;
+}
+
 static int ch_test_tcp_options(void)
 {
 	ch_connection connection = {0};
@@ -59,19 +74,19 @@ static int ch_test_tcp_options(void)
 		return 0;
 	}
 	ch_apply_socket_options(&connection);
-	int valid = ch_test_option(connection.socket, SOL_SOCKET, SO_KEEPALIVE, 1, "SO_KEEPALIVE") &&
-		ch_test_option(connection.socket, IPPROTO_TCP, TCP_NODELAY, 1, "TCP_NODELAY") &&
+	int valid = ch_test_bool_option(connection.socket, SOL_SOCKET, SO_KEEPALIVE, true, "SO_KEEPALIVE") &&
+		ch_test_bool_option(connection.socket, IPPROTO_TCP, TCP_NODELAY, true, "TCP_NODELAY") &&
 		ch_test_option(connection.socket, IPPROTO_TCP, CH_TEST_KEEPIDLE, 19, "keepalive idle") &&
 		ch_test_option(connection.socket, IPPROTO_TCP, TCP_KEEPINTVL, 7, "TCP_KEEPINTVL") &&
 		ch_test_option(connection.socket, IPPROTO_TCP, TCP_KEEPCNT, 4, "TCP_KEEPCNT");
 #ifdef __APPLE__
-	valid = ch_test_option(connection.socket, SOL_SOCKET, SO_NOSIGPIPE, 1, "SO_NOSIGPIPE") && valid;
+	valid = ch_test_bool_option(connection.socket, SOL_SOCKET, SO_NOSIGPIPE, true, "SO_NOSIGPIPE") && valid;
 #endif
 	connection.options.tcp_keepalive = false;
 	connection.options.tcp_nodelay = false;
 	ch_apply_socket_options(&connection);
-	valid = ch_test_option(connection.socket, SOL_SOCKET, SO_KEEPALIVE, 0, "disabled SO_KEEPALIVE") && valid;
-	valid = ch_test_option(connection.socket, IPPROTO_TCP, TCP_NODELAY, 0, "disabled TCP_NODELAY") && valid;
+	valid = ch_test_bool_option(connection.socket, SOL_SOCKET, SO_KEEPALIVE, false, "disabled SO_KEEPALIVE") && valid;
+	valid = ch_test_bool_option(connection.socket, IPPROTO_TCP, TCP_NODELAY, false, "disabled TCP_NODELAY") && valid;
 	ch_close_socket(&connection);
 	return valid;
 }
@@ -99,7 +114,7 @@ static int ch_test_closed_peer(void)
 	ch_apply_socket_options(&connection);
 	int valid = 1;
 #ifdef __APPLE__
-	valid = ch_test_option(connection.socket, SOL_SOCKET, SO_NOSIGPIPE, 1, "socketpair SO_NOSIGPIPE");
+	valid = ch_test_bool_option(connection.socket, SOL_SOCKET, SO_NOSIGPIPE, true, "socketpair SO_NOSIGPIPE");
 #endif
 	if (close(descriptors[1]) != 0) {
 		perror("close peer");
