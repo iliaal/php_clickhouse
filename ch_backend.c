@@ -67,6 +67,10 @@ typedef int ch_socket;
 
 #include "ch_backend.h"
 
+#define ZSTD_STATIC_LINKING_ONLY
+#include <zstd.h>
+#include <zstd_errors.h>
+
 struct ch_connection {
 	const chc_alloc *allocator;
 	ch_backend_options options;
@@ -109,6 +113,82 @@ static int ch_error(chc_err *error, int status, const char *format, ...)
 		va_end(arguments);
 	}
 	return status;
+}
+
+/* ZSTD frees without a size and requires an eight-byte-aligned payload. */
+typedef union {
+	size_t bytes;
+	uint64_t alignment;
+} ch_zstd_allocation;
+
+_Static_assert(sizeof(ch_zstd_allocation) % 8 == 0, "ZSTD allocation prefix alignment");
+
+static void *ch_zstd_alloc(void *context, size_t bytes)
+{
+	ch_connection *connection = (ch_connection *) context;
+	const chc_alloc *allocator = connection->allocator;
+	ch_zstd_allocation *allocation;
+	if (bytes > SIZE_MAX - sizeof(*allocation)) {
+		return NULL;
+	}
+	bytes += sizeof(*allocation);
+	allocation = (ch_zstd_allocation *) allocator->alloc(allocator->ud, bytes);
+	if (!allocation) {
+		return NULL;
+	}
+	allocation->bytes = bytes;
+	return allocation + 1;
+}
+
+static void ch_zstd_free(void *context, void *pointer)
+{
+	ch_connection *connection = (ch_connection *) context;
+	const chc_alloc *allocator = connection->allocator;
+	if (pointer) {
+		ch_zstd_allocation *allocation = (ch_zstd_allocation *) pointer - 1;
+		allocator->free(allocator->ud, allocation, allocation->bytes);
+	}
+}
+
+static int ch_zstd_compress(void *context, const void *source, size_t source_len,
+	void *destination, size_t capacity, size_t *written, chc_err *error)
+{
+	ZSTD_customMem memory = {ch_zstd_alloc, ch_zstd_free, context};
+	ZSTD_CCtx *compressor = ZSTD_createCCtx_advanced(memory);
+	if (!compressor) {
+		return ch_error(error, CHC_ERR_OOM, "ZSTD_compress failed: %s",
+			ZSTD_getErrorString(ZSTD_error_memory_allocation));
+	}
+	size_t size = ZSTD_compressCCtx(compressor, destination, capacity, source, source_len, 1);
+	ZSTD_freeCCtx(compressor);
+	if (ZSTD_isError(size)) {
+		return ch_error(error, CHC_ERR_OOM, "ZSTD_compress failed: %s", ZSTD_getErrorName(size));
+	}
+	*written = size;
+	return CHC_OK;
+}
+
+static int ch_zstd_decompress(void *context, const void *source, size_t source_len,
+	void *destination, size_t original, chc_err *error)
+{
+	ZSTD_customMem memory = {ch_zstd_alloc, ch_zstd_free, context};
+	ZSTD_DCtx *decompressor = ZSTD_createDCtx_advanced(memory);
+	if (!decompressor) {
+		return ch_error(error, CHC_ERR_OOM, "can't decompress ZSTD-encoded data, ZSTD error: %s",
+			ZSTD_getErrorString(ZSTD_error_memory_allocation));
+	}
+	size_t size = ZSTD_decompressDCtx(decompressor, destination, original, source, source_len);
+	ZSTD_freeDCtx(decompressor);
+	if (ZSTD_isError(size)) {
+		int status = ZSTD_getErrorCode(size) == ZSTD_error_memory_allocation ? CHC_ERR_OOM : CHC_ERR_PROTOCOL;
+		return ch_error(error, status, "can't decompress ZSTD-encoded data, ZSTD error: %s",
+			ZSTD_getErrorName(size));
+	}
+	if (size != original) {
+		return ch_error(error, CHC_ERR_PROTOCOL,
+			"ZSTD-encoded block decompressed to %zu bytes, expected %zu", size, original);
+	}
+	return CHC_OK;
 }
 
 static int ch_socket_error_code(void)
@@ -793,6 +873,9 @@ int ch_backend_create(ch_connection **out, const ch_backend_options *options,
 	connection->io.write = ch_io_write;
 	chc_lz4_codec_init(&connection->codec);
 	chc_zstd_codec_init(&connection->codec);
+	connection->codec.ud = connection;
+	connection->codec.zstd_compress = ch_zstd_compress;
+	connection->codec.zstd_decompress = ch_zstd_decompress;
 	int status = ch_copy_string(connection, &connection->options.database, options->database, error);
 	if (status != CHC_OK) return status;
 	status = ch_copy_string(connection, &connection->options.user, options->user, error);

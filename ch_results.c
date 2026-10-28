@@ -548,7 +548,9 @@ static ch_block_action ch_collect_blocks(clickhouse_object *obj, chc_block **own
 	size_t incoming = 0;
 	if (!rows || !columns) return CH_BLOCK_CONTINUE;
 	if (ch_result_block(obj, block, &result->blocks) == FAILURE) return CH_BLOCK_FAIL;
-	if (PG(memory_limit) > 0) {
+	/* Normal Zend MM already counts every retained native allocation. Keep the
+	 * estimate for allocator-disabled diagnostic runs, where it cannot do so. */
+	if (!is_zend_mm() && PG(memory_limit) > 0) {
 		size_t floor = ch_size_mul(ch_size_mul(rows, columns), 32);
 		size_t limit = (size_t)PG(memory_limit), used = zend_memory_usage(1);
 		for (size_t col = 0; col < columns; ++col) incoming = ch_size_add(incoming, ch_column_bytes(chc_block_column(block, col)));
