@@ -71,6 +71,17 @@ typedef int ch_socket;
 #include "lib/compression/zstd/zstd.h"
 #include "lib/compression/zstd/zstd_errors.h"
 
+#if defined(__SANITIZE_ADDRESS__)
+# define CH_ZSTD_ASAN 1
+#elif defined(__has_feature)
+# if __has_feature(address_sanitizer)
+#  define CH_ZSTD_ASAN 1
+# endif
+#endif
+#ifdef CH_ZSTD_ASAN
+# include <sanitizer/asan_interface.h>
+#endif
+
 struct ch_connection {
 	const chc_alloc *allocator;
 	ch_backend_options options;
@@ -146,7 +157,12 @@ static void ch_zstd_free(void *context, void *pointer)
 	const chc_alloc *allocator = connection->allocator;
 	if (pointer) {
 		ch_zstd_allocation *allocation = (ch_zstd_allocation *) pointer - 1;
-		allocator->free(allocator->ud, allocation, allocation->bytes);
+		size_t bytes = allocation->bytes;
+#ifdef CH_ZSTD_ASAN
+		/* ZSTD leaves workspace redzones poisoned; pooled allocators reuse them. */
+		ASAN_UNPOISON_MEMORY_REGION(allocation, bytes);
+#endif
+		allocator->free(allocator->ud, allocation, bytes);
 	}
 }
 
