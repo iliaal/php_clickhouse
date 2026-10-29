@@ -741,7 +741,32 @@ jobs:
             tests/233_ssl_ca_path_validation.phpt \
             tests/234_ssl_options_require_ssl.phpt \
             tests/265_tls_handshake_tarpit_failover.phpt \
-            tests/266_tls_handshake_tarpit_timeout.phpt
+            tests/266_tls_handshake_tarpit_timeout.phpt \
+            tests/283_zend_native_memory_accounting.phpt \
+            tests/284_zend_native_memory_shared_limit.phpt \
+            tests/285_zend_native_memory_no_double_charge.phpt
+
+      - name: Verify Zend-managed native memory under ASAN
+        env:
+          LD_LIBRARY_PATH: ${{ steps.clang_rt.outputs.dir }}
+          CLICKHOUSE_HOST: 127.0.0.1
+          CLICKHOUSE_PORT: 9000
+          CLICKHOUSE_USER: test
+          CLICKHOUSE_PASSWD: test
+          NO_INTERACTION: 1
+          USE_ZEND_ALLOC: 1
+        run: |
+          export TEST_PHP_EXECUTABLE=/tmp/php-asan/bin/php
+          set -Eeuo pipefail
+          zend_asan_output="${RUNNER_TEMP:?}/phpt-zend-asan.out"
+          /tmp/php-asan/bin/php run-tests.php -j1 --show-diff -g FAIL,BORK,LEAK,XLEAK,SKIP \
+            tests/211_stream_native_memory_limit.phpt \
+            tests/213_stream_untyped_null_column.phpt \
+            tests/283_zend_native_memory_accounting.phpt \
+            tests/284_zend_native_memory_shared_limit.phpt \
+            tests/285_zend_native_memory_no_double_charge.phpt |
+            tee "${zend_asan_output}"
+          scripts/assert-phpt-summary.sh "${zend_asan_output}"
 
       - name: Run leak-enabled client lifecycle probe
         env:

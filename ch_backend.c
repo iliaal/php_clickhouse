@@ -68,8 +68,8 @@ typedef int ch_socket;
 #include "ch_backend.h"
 
 #define ZSTD_STATIC_LINKING_ONLY
-#include <zstd.h>
-#include <zstd_errors.h>
+#include "lib/compression/zstd/zstd.h"
+#include "lib/compression/zstd/zstd_errors.h"
 
 struct ch_connection {
 	const chc_alloc *allocator;
