@@ -387,6 +387,11 @@ jobs:
           case "$PHP_VERSION" in
             7.4|8.0) php_extra+=("CFLAGS=-g -O2 -std=gnu17") ;;
           esac
+          # Only one existing ZTS cell needs libphp for the threaded-request
+          # regression. Keep the other version builds unchanged.
+          if [ "$PHP_VERSION" = "8.4" ]; then
+            php_extra+=(--enable-embed=shared)
+          fi
           ./configure \
             "$zts_flag" \
             "${php_extra[@]}" \
@@ -407,6 +412,12 @@ jobs:
           phpize
           ./configure --enable-clickhouse --with-php-config=/tmp/php-zts/bin/php-config
           make -j$(nproc)
+
+      - name: Test request initialization on a separate thread
+        if: matrix.php == '8.4'
+        env:
+          PHP_CONFIG: /tmp/php-zts/bin/php-config
+        run: ./scripts/test-zts-request-thread.sh modules/clickhouse.so
 
       - name: Run test suite under ZTS
         env:
