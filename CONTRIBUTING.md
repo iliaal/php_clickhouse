@@ -74,6 +74,22 @@ tests when the server is unreachable; CI uses a separate
 [summary guard](scripts/assert-phpt-summary.sh) to reject an all-skip run
 and unexpected skips.
 
+### Threaded ZTS request regression
+
+The PHP 8.4 ZTS CI cell also builds the shared embed SAPI and runs
+`scripts/test-zts-request-thread.sh`. Unlike CLI PHPTs, this starts module
+initialization on the main thread and constructs `ClickHouse` on fresh
+worker threads. It protects the per-request TSRM cache initialization
+without requiring a ClickHouse server.
+
+To run locally on Linux, build PHP with `--enable-zts --enable-embed=shared`,
+build the extension with that PHP's `phpize` and `php-config`, then run:
+
+```sh
+PHP_CONFIG=/path/to/php-zts/bin/php-config \
+  ./scripts/test-zts-request-thread.sh modules/clickhouse.so
+```
+
 ## Code style
 
 - Two-space indent for PHP, four-space for C/C++.
