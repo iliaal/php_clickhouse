@@ -21,7 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wrapper that `insertFromStream()` reads. Before, every later call on that
   client, such as calls from shutdown functions, threw "Reentrant operation:
   another query is already in progress". A fatal error in `insert()`
-  conversion of 200,000 rows also leaked about 5.9 MB.
+  conversion of 200,000 rows also leaked about 5.9 MB. Before PHP 8.5, a
+  `memory_limit` fatal error while `select()` and the streaming readers
+  converted rows leaked up to about 1.9 MB of native result data.
 - `selectWithExternalData()` and `selectStream()` iteration no longer inherit
   NULL or nesting-depth state from a conversion that a fatal error, or a
   reentrant call from `__toString()`, left unfinished. Before, `NULL` was

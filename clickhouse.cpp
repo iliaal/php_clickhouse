@@ -1935,7 +1935,7 @@ static void attachProgressAndProfile(Query &q, clickhouse_object *obj)
             /* Pin the callable and bound object if the callback unregisters itself. */
             zval cb_copy;
             ZVAL_COPY(&cb_copy, &obj->progress_callback);
-            call_user_function(NULL, NULL, &cb_copy, &retval, 1, args);
+            runPhpCode([&] { call_user_function(NULL, NULL, &cb_copy, &retval, 1, args); });
             zval_ptr_dtor(&cb_copy);
             zval_ptr_dtor(&args[0]);
             zval_ptr_dtor(&retval);
@@ -1970,7 +1970,7 @@ static void attachProgressAndProfile(Query &q, clickhouse_object *obj)
             /* Pin the callable across the call; see the OnProgress note. */
             zval cb_copy;
             ZVAL_COPY(&cb_copy, &obj->profile_callback);
-            call_user_function(NULL, NULL, &cb_copy, &retval, 1, args);
+            runPhpCode([&] { call_user_function(NULL, NULL, &cb_copy, &retval, 1, args); });
             zval_ptr_dtor(&cb_copy);
             zval_ptr_dtor(&args[0]);
             zval_ptr_dtor(&retval);
@@ -2555,22 +2555,31 @@ void do_select_into(zval *out, zval *this_obj,
                 add_assoc_long(&ctx, "block_index", (zend_long)verbose_block_idx++);
                 emitVerbose(obj, "data_block", &ctx);
             }
+            /* Native state lives outside the conversion region below, so a
+             * memory_limit bailout during conversion still unwinds it. */
+            const size_t col_count = block.GetColumnCount();
+            std::vector<ColumnRef> cols;
+            cols.reserve(col_count);
+            for (size_t c = 0; c < col_count; ++c) {
+                cols.push_back(block[c]);
+            }
+
             if (fetch_mode & SC_FETCH_ONE) {
-                if (!fetched_one && block.GetRowCount() > 0 && block.GetColumnCount() > 0) {
-                    convertToZval(out, block[0], 0, "", 0, fetch_mode);
+                if (!fetched_one && block.GetRowCount() > 0 && col_count > 0) {
+                    runPhpCode([&] { convertToZval(out, cols[0], 0, "", 0, fetch_mode); });
                     fetched_one = true;
                 }
                 return;
             }
 
             /* GetColumnName allocates a string; names are stable across the block. */
-            const size_t col_count = block.GetColumnCount();
             std::vector<std::string> col_names;
             col_names.reserve(col_count);
             for (size_t c = 0; c < col_count; ++c) {
                 col_names.emplace_back(block.GetColumnName(c));
             }
 
+            bool init_positional = false;
             if (positional_out && !pos_decided) {
                 pos_decided = true;
                 /* Avoid a quadratic scan for wide results. The names stay
@@ -2583,109 +2592,113 @@ void do_select_into(zval *out, zval *this_obj,
                         break;
                     }
                 }
-                if (pos_active) {
+                init_positional = pos_active;
+            }
+
+            runPhpCode([&] {
+                if (init_positional) {
                     array_init(positional_out);
                 }
-            }
 
-            for (size_t row = 0; row < block.GetRowCount(); ++row)
-            {
+                for (size_t row = 0; row < block.GetRowCount(); ++row)
+                {
 #ifdef ZEND_HAS_OOM
-                /* PHP 8.5 defers the memory_limit error to the next VM interrupt
-                 * and _exit()s the process at the hard limit. Stop converting so
-                 * the deferred error is raised when the method returns. */
-                if (ZEND_HAS_OOM()) {
-                    throw std::runtime_error("memory limit exhausted while fetching rows");
-                }
+                    /* PHP 8.5 defers the memory_limit error to the next VM interrupt
+                     * and _exit()s the process at the hard limit. Stop converting so
+                     * the deferred error is raised when the method returns. */
+                    if (ZEND_HAS_OOM()) {
+                        throw std::runtime_error("memory limit exhausted while fetching rows");
+                    }
 #endif
-                if (fetch_mode & SC_FETCH_KEY_PAIR) {
-                    if (col_count < 2) {
-                        throw std::runtime_error("Key pair mode requires at least 2 columns to be present");
-                    }
-                    zval kp_col1, kp_col2;
-                    ZVAL_UNDEF(&kp_col1);
-                    ZVAL_UNDEF(&kp_col2);
-                    try {
-                        convertToZval(&kp_col1, block[0], row, "", 0, fetch_mode|SC_FETCH_ONE);
-                        convertToZval(&kp_col2, block[1], row, "", 0, fetch_mode|SC_FETCH_ONE);
-                    } catch (...) {
-                        if (Z_TYPE(kp_col1) != IS_UNDEF) zval_ptr_dtor(&kp_col1);
-                        if (Z_TYPE(kp_col2) != IS_UNDEF) zval_ptr_dtor(&kp_col2);
-                        throw;
-                    }
-
-                    if (Z_TYPE(kp_col1) == IS_ARRAY || Z_TYPE(kp_col1) == IS_OBJECT) {
-                        /* Composite key column would stringify to "Array";
-                         * reject so the result isn't silently collapsed. */
-                        zval_ptr_dtor(&kp_col1);
-                        zval_ptr_dtor(&kp_col2);
-                        throw std::runtime_error("Key pair mode requires a scalar key column");
-                    }
-                    if (Z_TYPE(kp_col1) == IS_LONG) {
-                         zend_hash_index_update(Z_ARRVAL_P(out), Z_LVAL(kp_col1), &kp_col2);
-                    } else {
-                        zend_string *coerced = NULL;
+                    if (fetch_mode & SC_FETCH_KEY_PAIR) {
+                        if (col_count < 2) {
+                            throw std::runtime_error("Key pair mode requires at least 2 columns to be present");
+                        }
+                        zval kp_col1, kp_col2;
+                        ZVAL_UNDEF(&kp_col1);
+                        ZVAL_UNDEF(&kp_col2);
                         try {
-                            coerced = zvalGetStringOrThrow(&kp_col1);
-                            zend_symtable_update(Z_ARRVAL_P(out), coerced, &kp_col2);
-                            zend_string_release(coerced);
+                            convertToZval(&kp_col1, cols[0], row, "", 0, fetch_mode|SC_FETCH_ONE);
+                            convertToZval(&kp_col2, cols[1], row, "", 0, fetch_mode|SC_FETCH_ONE);
                         } catch (...) {
-                            if (coerced) zend_string_release(coerced);
+                            if (Z_TYPE(kp_col1) != IS_UNDEF) zval_ptr_dtor(&kp_col1);
+                            if (Z_TYPE(kp_col2) != IS_UNDEF) zval_ptr_dtor(&kp_col2);
+                            throw;
+                        }
+
+                        if (Z_TYPE(kp_col1) == IS_ARRAY || Z_TYPE(kp_col1) == IS_OBJECT) {
+                            /* Composite key column would stringify to "Array";
+                             * reject so the result isn't silently collapsed. */
                             zval_ptr_dtor(&kp_col1);
                             zval_ptr_dtor(&kp_col2);
-                            throw;
+                            throw std::runtime_error("Key pair mode requires a scalar key column");
                         }
+                        if (Z_TYPE(kp_col1) == IS_LONG) {
+                             zend_hash_index_update(Z_ARRVAL_P(out), Z_LVAL(kp_col1), &kp_col2);
+                        } else {
+                            zend_string *coerced = NULL;
+                            try {
+                                coerced = zvalGetStringOrThrow(&kp_col1);
+                                zend_symtable_update(Z_ARRVAL_P(out), coerced, &kp_col2);
+                                zend_string_release(coerced);
+                            } catch (...) {
+                                if (coerced) zend_string_release(coerced);
+                                zval_ptr_dtor(&kp_col1);
+                                zval_ptr_dtor(&kp_col2);
+                                throw;
+                            }
+                        }
+                        zval_ptr_dtor(&kp_col1);
+                        continue;
                     }
-                    zval_ptr_dtor(&kp_col1);
-                    continue;
-                }
 
-                zval row_tmp;
-                ZVAL_UNDEF(&row_tmp);
-                if (!(fetch_mode & SC_FETCH_COLUMN)) {
-                    array_init_size(&row_tmp, (uint32_t)col_count);
-                }
+                    zval row_tmp;
+                    ZVAL_UNDEF(&row_tmp);
+                    if (!(fetch_mode & SC_FETCH_COLUMN)) {
+                        array_init_size(&row_tmp, (uint32_t)col_count);
+                    }
 
-                try {
-                    if (pos_active && !(fetch_mode & SC_FETCH_COLUMN)) {
-                        zval pos_tmp;
-                        array_init_size(&pos_tmp, (uint32_t)col_count);
-                        try {
+                    try {
+                        if (pos_active && !(fetch_mode & SC_FETCH_COLUMN)) {
+                            zval pos_tmp;
+                            array_init_size(&pos_tmp, (uint32_t)col_count);
+                            try {
+                                for (size_t column = 0; column < col_count; ++column)
+                                {
+                                    zval cell;
+                                    ZVAL_UNDEF(&cell);
+                                    convertToZval(&cell, cols[column], row, "", 0, fetch_mode|SC_FETCH_ONE);
+
+                                    zval assoc_cell;
+                                    ZVAL_COPY(&assoc_cell, &cell);
+                                    add_assoc_zval_ex(&row_tmp,
+                                        col_names[column].c_str(),
+                                        col_names[column].length(),
+                                        &assoc_cell);
+                                    add_next_index_zval(&pos_tmp, &cell);
+                                }
+                                add_next_index_zval(positional_out, &pos_tmp);
+                            } catch (...) {
+                                zval_ptr_dtor(&pos_tmp);
+                                throw;
+                            }
+                        } else {
                             for (size_t column = 0; column < col_count; ++column)
                             {
-                                zval cell;
-                                ZVAL_UNDEF(&cell);
-                                convertToZval(&cell, block[column], row, "", 0, fetch_mode|SC_FETCH_ONE);
-
-                                zval assoc_cell;
-                                ZVAL_COPY(&assoc_cell, &cell);
-                                add_assoc_zval_ex(&row_tmp,
-                                    col_names[column].c_str(),
-                                    col_names[column].length(),
-                                    &assoc_cell);
-                                add_next_index_zval(&pos_tmp, &cell);
+                                if (fetch_mode & SC_FETCH_COLUMN) {
+                                    convertToZval(&row_tmp, cols[0], row, "", 0, fetch_mode|SC_FETCH_ONE);
+                                    break;
+                                }
+                                convertToZval(&row_tmp, cols[column], row, col_names[column], 0, fetch_mode);
                             }
-                            add_next_index_zval(positional_out, &pos_tmp);
-                        } catch (...) {
-                            zval_ptr_dtor(&pos_tmp);
-                            throw;
                         }
-                    } else {
-                        for (size_t column = 0; column < col_count; ++column)
-                        {
-                            if (fetch_mode & SC_FETCH_COLUMN) {
-                                convertToZval(&row_tmp, block[0], row, "", 0, fetch_mode|SC_FETCH_ONE);
-                                break;
-                            }
-                            convertToZval(&row_tmp, block[column], row, col_names[column], 0, fetch_mode);
-                        }
+                    } catch (...) {
+                        if (Z_TYPE(row_tmp) != IS_UNDEF) zval_ptr_dtor(&row_tmp);
+                        throw;
                     }
-                } catch (...) {
-                    if (Z_TYPE(row_tmp) != IS_UNDEF) zval_ptr_dtor(&row_tmp);
-                    throw;
+                    add_next_index_zval(out, &row_tmp);
                 }
-                add_next_index_zval(out, &row_tmp);
-            }
+            });
         }));
 
         runSelectWithRecovery(client, query, this_obj, obj, external_tables,
@@ -3224,11 +3237,19 @@ static zend_long do_select_to_stream(zval *this_obj,
                 emitVerbose(obj, "data_block", &ctx);
             }
 
+            /* Columns live outside the PHP region below, so a fatal error in
+             * conversion or in a userland stream write unwinds them. */
+            std::vector<ColumnRef> cols;
+            cols.reserve(col_count);
+            for (size_t c = 0; c < col_count; ++c) {
+                cols.push_back(block[c]);
+            }
+
             if (!header_written) {
                 /* Schema is stable across all blocks of a query. */
                 for (size_t c = 0; c < col_count; ++c) {
                     std::string reason;
-                    if (!isStreamableColumnType(block[c]->Type(), reason)) {
+                    if (!isStreamableColumnType(cols[c]->Type(), reason)) {
                         throw std::runtime_error(
                             "selectToStream: column '" + std::string(block.GetColumnName(c)) +
                             "' has unsupported type '" + reason +
@@ -3238,7 +3259,7 @@ static zend_long do_select_to_stream(zval *this_obj,
                 if (streamFormatHasHeader(fmt)) {
                     for (size_t c = 0; c < col_count; ++c) {
                         if (c > 0) smart_str_appendc(&buf, cell_sep);
-                        std::string nm = block.GetColumnName(c);
+                        const std::string &nm = block.GetColumnName(c);
                         if (streamFormatIsCSV(fmt)) {
                             csvAppendEscaped(&buf, nm.data(), nm.size());
                         } else {
@@ -3250,28 +3271,30 @@ static zend_long do_select_to_stream(zval *this_obj,
                 header_written = true;
             }
 
-            for (size_t r = 0; r < row_count; ++r) {
-                for (size_t c = 0; c < col_count; ++c) {
-                    if (c > 0) smart_str_appendc(&buf, cell_sep);
-                    if (tryAppendStreamCell(&buf, block[c], r)) {
-                        continue;
+            runPhpCode([&] {
+                for (size_t r = 0; r < row_count; ++r) {
+                    for (size_t c = 0; c < col_count; ++c) {
+                        if (c > 0) smart_str_appendc(&buf, cell_sep);
+                        if (tryAppendStreamCell(&buf, cols[c], r)) {
+                            continue;
+                        }
+                        zval cell;
+                        ZVAL_UNDEF(&cell);
+                        try {
+                            convertToZval(&cell, cols[c], r, "", 0, fetch_mode);
+                        } catch (...) {
+                            if (Z_TYPE(cell) != IS_UNDEF) zval_ptr_dtor(&cell);
+                            throw;
+                        }
+                        appendCellForStream(&buf, &cell, fmt);
+                        zval_ptr_dtor(&cell);
                     }
-                    zval cell;
-                    ZVAL_UNDEF(&cell);
-                    try {
-                        convertToZval(&cell, block[c], r, "", 0, fetch_mode);
-                    } catch (...) {
-                        if (Z_TYPE(cell) != IS_UNDEF) zval_ptr_dtor(&cell);
-                        throw;
-                    }
-                    appendCellForStream(&buf, &cell, fmt);
-                    zval_ptr_dtor(&cell);
+                    smart_str_appendl(&buf, row_term, row_term_len);
+                    ++total_rows;
                 }
-                smart_str_appendl(&buf, row_term, row_term_len);
-                ++total_rows;
-            }
 
-            flushStreamBuf(&buf, stream_zv);
+                flushStreamBuf(&buf, stream_zv);
+            });
         }));
 
         runSelectWithRecovery(client, query, this_obj, obj, nullptr,
@@ -4153,7 +4176,9 @@ CLICKHOUSE_METHOD(insertFromStream)
                         "insertFromStream: stream read returned an error");
                 }
                 if (n == 0) {
-                    if (php_stream_eof(stream)) break;
+                    bool eof = false;
+                    runPhpCode([&] { eof = php_stream_eof(stream); });
+                    if (eof) break;
                     /* Some wrappers return 0 without setting the EOF
                      * flag (transient unavailability, badly-written
                      * userland wrapper). Don't conflate with EOF. */
@@ -5104,40 +5129,47 @@ CLICKHOUSE_METHOD(selectStreamCallback)
                 emitVerbose(obj, "data_block", &ctx);
             }
             /* GetColumnName allocates; cache names outside the row loop. */
+            /* The cached names and columns live outside the PHP region below,
+             * so a fatal error in conversion or in the callback unwinds them. */
             const size_t col_count = block.GetColumnCount();
             std::vector<std::string> col_names;
+            std::vector<ColumnRef> cols;
             col_names.reserve(col_count);
+            cols.reserve(col_count);
             for (size_t c = 0; c < col_count; ++c) {
                 col_names.emplace_back(block.GetColumnName(c));
+                cols.push_back(block[c]);
             }
-            for (size_t row = 0; row < block.GetRowCount(); ++row) {
-                zval row_zv;
-                array_init_size(&row_zv, (uint32_t)col_count);
-                try {
-                    for (size_t col = 0; col < col_count; ++col) {
-                        convertToZval(&row_zv, block[col], row, col_names[col], 0,
-                                      fetch_mode & SC_FETCH_VALUE_FLAGS);
+            runPhpCode([&] {
+                for (size_t row = 0; row < block.GetRowCount(); ++row) {
+                    zval row_zv;
+                    array_init_size(&row_zv, (uint32_t)col_count);
+                    try {
+                        for (size_t col = 0; col < col_count; ++col) {
+                            convertToZval(&row_zv, cols[col], row, col_names[col], 0,
+                                          fetch_mode & SC_FETCH_VALUE_FLAGS);
+                        }
+                    } catch (...) {
+                        zval_ptr_dtor(&row_zv);
+                        throw;
                     }
-                } catch (...) {
-                    zval_ptr_dtor(&row_zv);
-                    throw;
+                    zval args[1], retval;
+                    ZVAL_NULL(&retval);
+                    ZVAL_COPY_VALUE(&args[0], &row_zv);
+                    call_user_function(NULL, NULL, cb, &retval, 1, args);
+                    bool row_stop = (Z_TYPE(retval) == IS_FALSE);
+                    zval_ptr_dtor(&args[0]);
+                    zval_ptr_dtor(&retval);
+                    /* Abort the packet loop while preserving the PHP callback exception. */
+                    if (EG(exception)) {
+                        throw std::runtime_error("row callback aborted query");
+                    }
+                    if (row_stop) {
+                        stop_requested = true;
+                        break;
+                    }
                 }
-                zval args[1], retval;
-                ZVAL_NULL(&retval);
-                ZVAL_COPY_VALUE(&args[0], &row_zv);
-                call_user_function(NULL, NULL, cb, &retval, 1, args);
-                bool row_stop = (Z_TYPE(retval) == IS_FALSE);
-                zval_ptr_dtor(&args[0]);
-                zval_ptr_dtor(&retval);
-                /* Abort the packet loop while preserving the PHP callback exception. */
-                if (EG(exception)) {
-                    throw std::runtime_error("row callback aborted query");
-                }
-                if (row_stop) {
-                    stop_requested = true;
-                    break;
-                }
-            }
+            });
         }));
         query.OnDataCancelable([&stop_requested](const Block &) {
             return !stop_requested;
