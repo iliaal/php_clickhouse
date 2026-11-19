@@ -1,21 +1,26 @@
 name: Release Linux & macOS binaries
 
 # Triggered when a GitHub Release is published. Builds .so binaries for
-# Linux glibc 2.35 (x86_64 + arm64) and macOS 12+ arm64 at PHP 8.4 + 8.5 (NTS
-# binaries; supported Unix ZTS installs build from source), gates them, and
+# Linux glibc 2.35 (x86_64 + arm64) at PHP 8.4 + 8.5 + 8.6 and macOS 12+ arm64
+# at PHP 8.4 + 8.5 (NTS binaries; supported Unix ZTS installs build from
+# source), gates them, and
 # uploads each as a release asset using PIE's pre-packaged-binary naming
 # convention. Assets upload only after every build and gate passes. PIE's
 # `pie install iliaal/php_clickhouse` then resolves the prebuilt asset
 # matching the host arch/os/libc/PHP-version instead of building
 # clickhouse-cpp from source (~3-5 min compile).
 #
-# Coverage matrix: 3 lanes x 2 PHP = 6 prebuilt assets per release.
+# Coverage matrix: 3 lanes x 2 PHP + 2 Linux lanes x PHP 8.6 = 8 prebuilt
+# assets per release.
 #
-# PHP 8.6 is absent from both platforms. Every official php:8.6 Docker image
-# (cli, fpm, apache; Debian and Alpine) is built with --enable-zts, so the
-# Linux gate has no NTS 8.6 image to load the module on. The macOS gate
-# compares against setup-php's PHP, and its Homebrew php@8.6 build predates
-# the php-8.6.0 tag. PHP 8.6 installs here build from source via PIE's
+# The official php:8.6 Docker images are ZTS-only by design
+# (docker-library/php#1686), so the Linux 8.6 gate loads the module on NTS
+# PHP built from the checksum-pinned php.net tarball inside the
+# digest-pinned debian:bookworm-slim image (scripts/build-nts-php-image.sh).
+#
+# macOS PHP 8.6 is absent: the macOS gate compares against setup-php's PHP,
+# and the Homebrew php@8.6 formula it installs builds php-src ed13285, 23
+# commits behind the php-8.6.0 tag. macOS 8.6 users source-build via PIE's
 # composer-default fallback.
 #
 # Each lane compiles against the oldest patch release of its minor, built
@@ -30,7 +35,8 @@ name: Release Linux & macOS binaries
 # path) against a ClickHouse server on the oldest and a pinned newest patch
 # image; macOS loads the module on the oldest-patch build PHP and on
 # setup-php's current patch and rejects imports only the newer one exports.
-# Move newest-image to each new patch release.
+# Move newest-image to each new patch release. 8.6 gates on its 8.6.0 build
+# alone (oldest = newest) until an 8.6.x NTS gate image is added.
 #
 # macOS Intel (macos-13) is intentionally absent: GitHub's Intel runner
 # pool is too contended to ship reliably, and macOS 26 drops Intel
@@ -42,7 +48,7 @@ name: Release Linux & macOS binaries
 # composer-default fallback meanwhile.
 #
 # This workflow + the existing release-windows.yml together produce
-# 6 Linux/macOS + 16 Windows = 22 prebuilt assets per release.
+# 8 Linux/macOS + 16 Windows = 24 prebuilt assets per release.
 
 on:
   release:
@@ -95,6 +101,14 @@ jobs:
         php:
           - '8.4'
           - '8.5'
+          - '8.6'
+        exclude:
+          - platform:
+              os: macos-15
+              compat_mode: --macos-min
+              compat_maximum: '12.0'
+              macos_target: '12.0'
+            php: '8.6'
         # php-src: the oldest patch release of the minor, which the binaries
         # are built against. Hashes are the php.net-published tar.xz
         # SHA-256s. oldest-image/newest-image: official images the Linux gate
@@ -113,6 +127,14 @@ jobs:
             php-src-sha256: 39cb6e4acd679b574d3d3276f148213e935fc25f90403eb84fb1b836a806ef1e
             oldest-image: public.ecr.aws/docker/library/php:8.5.0-cli@sha256:fb551f94cba4698612c90158aa7d4fe8e1a5355f9c444d0f90929d366fc75b36
             newest-image: public.ecr.aws/docker/library/php:8.5.12-cli@sha256:635a4b998025ab269194639a5549c6fdcd9b4f88ec8cd761b092de8653d40663
+          # No NTS official image exists for 8.6, so both gate images are
+          # local/php:8.6.0-cli, built from the php-src tarball on nts-base.
+          - php: '8.6'
+            php-src: '8.6.0'
+            php-src-sha256: 5f84beaa3d763aee1e4feed99bf54ec692c383b322e25626807b589238c3a087
+            oldest-image: local/php:8.6.0-cli
+            newest-image: local/php:8.6.0-cli
+            nts-base: public.ecr.aws/docker/library/debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
     env:
       MACOSX_DEPLOYMENT_TARGET: ${{ matrix.platform.macos_target }}
     steps:
@@ -131,6 +153,7 @@ jobs:
           path: .release-tools
           sparse-checkout: |
             scripts/check-release-binary.sh
+            scripts/build-nts-php-image.sh
             scripts/prebuilt-abi-smoke.sh
             scripts/prebuilt-abi-smoke.php
           sparse-checkout-cone-mode: false
@@ -141,7 +164,7 @@ jobs:
       # setup-php main until a release marks PHP 8.6 stable; return to a tagged release then.
       - name: Setup PHP
         if: runner.os == 'macOS'
-        uses: shivammathur/setup-php@292f25acb388a711c0c758f382e5c3109a391dd7 # main # zizmor: ignore[stale-action-refs,ref-version-mismatch]
+        uses: shivammathur/setup-php@3c21e10268bafaf84c59e8f4e65b39acacb62ca4 # main # zizmor: ignore[stale-action-refs,ref-version-mismatch]
         with:
           php-version: ${{ matrix.php }}
           coverage: none
@@ -254,6 +277,18 @@ jobs:
           docker logs clickhouse 2>&1 | tail -50
           echo "::error::ClickHouse did not accept queries on the native port"
           exit 1
+
+      - name: Build NTS PHP gate image (Linux)
+        if: runner.os == 'Linux' && matrix.nts-base != ''
+        env:
+          PHP_SRC: ${{ matrix.php-src }}
+          PHP_SRC_SHA256: ${{ matrix.php-src-sha256 }}
+          NTS_BASE: ${{ matrix.nts-base }}
+          OLDEST_IMAGE: ${{ matrix.oldest-image }}
+        run: |
+          set -euo pipefail
+          built=$(.release-tools/scripts/build-nts-php-image.sh "$PHP_SRC" "$PHP_SRC_SHA256" "$NTS_BASE")
+          test "$built" = "$OLDEST_IMAGE"
 
       - name: Gate on the oldest and newest patch (Linux)
         if: runner.os == 'Linux'

@@ -27,7 +27,7 @@ jobs:
       - name: Test PHPT summary guard
         run: ./scripts/test-phpt-summary.sh
       # setup-php main until a release marks PHP 8.6 stable; return to a tagged release then.
-      - uses: shivammathur/setup-php@292f25acb388a711c0c758f382e5c3109a391dd7 # main # zizmor: ignore[stale-action-refs,ref-version-mismatch]
+      - uses: shivammathur/setup-php@3c21e10268bafaf84c59e8f4e65b39acacb62ca4 # main # zizmor: ignore[stale-action-refs,ref-version-mismatch]
         with:
           php-version: '8.4'
           tools: composer, phpize
@@ -52,7 +52,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
-      - uses: shivammathur/setup-php@292f25acb388a711c0c758f382e5c3109a391dd7 # main # zizmor: ignore[stale-action-refs,ref-version-mismatch]
+      - uses: shivammathur/setup-php@3c21e10268bafaf84c59e8f4e65b39acacb62ca4 # main # zizmor: ignore[stale-action-refs,ref-version-mismatch]
         with:
           php-version: '8.4'
           tools: phpize, php-config
@@ -109,7 +109,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup PHP
-        uses: shivammathur/setup-php@292f25acb388a711c0c758f382e5c3109a391dd7 # main # zizmor: ignore[stale-action-refs,ref-version-mismatch]
+        uses: shivammathur/setup-php@3c21e10268bafaf84c59e8f4e65b39acacb62ca4 # main # zizmor: ignore[stale-action-refs,ref-version-mismatch]
         with:
           php-version: ${{ matrix.php }}
           tools: phpize, php-config

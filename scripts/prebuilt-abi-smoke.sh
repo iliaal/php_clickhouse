@@ -2,8 +2,10 @@
 # Usage: prebuilt-abi-smoke.sh MODULE.so OLDEST_IMAGE NEWEST_IMAGE
 #
 # Gates a prebuilt Linux module against the oldest and newest patch release
-# of its PHP minor. Each image is a digest-pinned official php:X.Y.Z-cli image;
-# the X.Y.Z in its tag is the PHP_VERSION the image must report.
+# of its PHP minor. Each image is a digest-pinned official php:X.Y.Z-cli image,
+# or local/php:X.Y.Z-cli from build-nts-php-image.sh for minors whose official
+# images are ZTS-only; the X.Y.Z in its tag is the PHP_VERSION the image must
+# report, and its PHP must be NTS.
 #
 # 1. Every undefined (non-weak) dynamic symbol of the module must be exported
 #    by the oldest image's php binary or by a library the module itself links
@@ -36,6 +38,14 @@ image_version() {
 pull_image() {
 	local ref=$1 candidate attempt
 	local path=${ref#public.ecr.aws/docker/library/}
+	if [[ "$ref" == local/php:* ]]; then
+		if ! docker image inspect "$ref" >/dev/null 2>&1; then
+			echo "::error::locally built image $ref does not exist" >&2
+			return 1
+		fi
+		printf '%s\n' "$ref"
+		return 0
+	fi
 	if [[ "$ref" != *@sha256:* ]]; then
 		echo "::error::$ref is not pinned by digest" >&2
 		return 1
@@ -121,6 +131,11 @@ status=0
 for image in "$oldest" "$newest"; do
 	want=$(image_version "$image")
 	echo "== $(basename "$module"): load and smoke on $image (PHP $want)"
+	if ! docker run --rm "$image" php -n -r 'exit(PHP_ZTS ? 1 : 0);'; then
+		echo "::error::$image is not an NTS PHP"
+		status=1
+		continue
+	fi
 	set +e
 	out=$(docker run --rm --network host \
 		-e CLICKHOUSE_HOST -e CLICKHOUSE_PORT -e CLICKHOUSE_USER -e CLICKHOUSE_PASSWD \

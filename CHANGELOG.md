@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Prebuilt PHP 8.6 Windows DLLs; Linux and macOS PHP 8.6 installs build from source.
+- Prebuilt PHP 8.6 binaries for Linux (glibc x86_64, arm64) and Windows; macOS PHP 8.6 installs build from source.
 
 ## [0.13.2] - 2026-10-26
 
