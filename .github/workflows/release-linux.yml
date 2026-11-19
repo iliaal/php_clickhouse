@@ -1,22 +1,22 @@
 name: Release Linux & macOS binaries
 
 # Triggered when a GitHub Release is published. Builds .so binaries for
-# Linux glibc 2.35 (x86_64 + arm64) at PHP 8.4 + 8.5 and macOS 12+ arm64 at
-# PHP 8.4 + 8.5 + 8.6 (NTS binaries; supported Unix ZTS installs build from
-# source), gates them, and
+# Linux glibc 2.35 (x86_64 + arm64) and macOS 12+ arm64 at PHP 8.4 + 8.5 (NTS
+# binaries; supported Unix ZTS installs build from source), gates them, and
 # uploads each as a release asset using PIE's pre-packaged-binary naming
 # convention. Assets upload only after every build and gate passes. PIE's
 # `pie install iliaal/php_clickhouse` then resolves the prebuilt asset
 # matching the host arch/os/libc/PHP-version instead of building
 # clickhouse-cpp from source (~3-5 min compile).
 #
-# Coverage matrix: 3 lanes x 2 PHP + macOS PHP 8.6 = 7 prebuilt assets per
-# release.
+# Coverage matrix: 3 lanes x 2 PHP = 6 prebuilt assets per release.
 #
-# Linux PHP 8.6 is excluded: every official php:8.6 Docker image (cli, fpm,
-# apache; Debian and Alpine) is built with --enable-zts, so the Linux gate
-# has no NTS image to load an 8.6 NTS module on. Linux 8.6 users get
-# source-build via PIE's composer-default fallback.
+# PHP 8.6 is absent from both platforms. Every official php:8.6 Docker image
+# (cli, fpm, apache; Debian and Alpine) is built with --enable-zts, so the
+# Linux gate has no NTS 8.6 image to load the module on. The macOS gate
+# compares against setup-php's PHP, and its Homebrew php@8.6 build predates
+# the php-8.6.0 tag. PHP 8.6 installs here build from source via PIE's
+# composer-default fallback.
 #
 # Each lane compiles against the oldest patch release of its minor, built
 # from the checksum-pinned php.net tarball. Patch releases add ZEND_API
@@ -42,7 +42,7 @@ name: Release Linux & macOS binaries
 # composer-default fallback meanwhile.
 #
 # This workflow + the existing release-windows.yml together produce
-# 7 Linux/macOS + 16 Windows = 23 prebuilt assets per release.
+# 6 Linux/macOS + 16 Windows = 22 prebuilt assets per release.
 
 on:
   release:
@@ -95,20 +95,6 @@ jobs:
         php:
           - '8.4'
           - '8.5'
-          - '8.6'
-        exclude:
-          - platform:
-              os: ubuntu-22.04
-              compat_mode: --linux-glibc
-              compat_maximum: '2.35'
-              macos_target: ''
-            php: '8.6'
-          - platform:
-              os: ubuntu-22.04-arm
-              compat_mode: --linux-glibc
-              compat_maximum: '2.35'
-              macos_target: ''
-            php: '8.6'
         # php-src: the oldest patch release of the minor, which the binaries
         # are built against. Hashes are the php.net-published tar.xz
         # SHA-256s. oldest-image/newest-image: official images the Linux gate
@@ -127,10 +113,6 @@ jobs:
             php-src-sha256: 39cb6e4acd679b574d3d3276f148213e935fc25f90403eb84fb1b836a806ef1e
             oldest-image: public.ecr.aws/docker/library/php:8.5.0-cli@sha256:fb551f94cba4698612c90158aa7d4fe8e1a5355f9c444d0f90929d366fc75b36
             newest-image: public.ecr.aws/docker/library/php:8.5.12-cli@sha256:635a4b998025ab269194639a5549c6fdcd9b4f88ec8cd761b092de8653d40663
-          # macOS only (see the Linux PHP 8.6 note above), so no gate images.
-          - php: '8.6'
-            php-src: '8.6.0'
-            php-src-sha256: 5f84beaa3d763aee1e4feed99bf54ec692c383b322e25626807b589238c3a087
     env:
       MACOSX_DEPLOYMENT_TARGET: ${{ matrix.platform.macos_target }}
     steps:
@@ -156,9 +138,10 @@ jobs:
 
       # macOS only: the current-patch PHP the macOS gate loads the module on.
       # The Linux gate uses the pinned images instead.
+      # setup-php main until a release marks PHP 8.6 stable; return to a tagged release then.
       - name: Setup PHP
         if: runner.os == 'macOS'
-        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        uses: shivammathur/setup-php@292f25acb388a711c0c758f382e5c3109a391dd7 # main # zizmor: ignore[stale-action-refs,ref-version-mismatch]
         with:
           php-version: ${{ matrix.php }}
           coverage: none

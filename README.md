@@ -63,7 +63,7 @@ Add `extension=clickhouse.so` to your `php.ini`. The build needs a C++17-capable
 | Linux NTS | primary | PHP 7.4 through 8.6, CI matrix |
 | Linux ZTS | supported | PHP 7.4 through 8.6, full CI matrix; PIE source builds |
 | Windows (NTS, TS) | supported | PHP 8.3 through 8.6, x86 / x64 release matrix with offline load tests; pre-built `.dll` assets |
-| macOS arm64 NTS | build-verified | PHP 8.4 through 8.6 release lane; pre-built binaries, no ClickHouse runtime test |
+| macOS arm64 NTS | build-verified | PHP 8.4 and 8.5 release lane; pre-built binaries, no ClickHouse runtime test |
 
 Per-Client state lives on the `zend_object` itself (custom `create_object` /
 `free_obj` handlers). Shared ZTS builds also refresh Zend's thread-local TSRM

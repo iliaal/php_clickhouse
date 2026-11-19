@@ -26,7 +26,8 @@ jobs:
         run: ./scripts/test-exported-symbols.sh
       - name: Test PHPT summary guard
         run: ./scripts/test-phpt-summary.sh
-      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+      # setup-php main until a release marks PHP 8.6 stable; return to a tagged release then.
+      - uses: shivammathur/setup-php@292f25acb388a711c0c758f382e5c3109a391dd7 # main # zizmor: ignore[stale-action-refs,ref-version-mismatch]
         with:
           php-version: '8.4'
           tools: composer, phpize
@@ -51,7 +52,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
-      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+      - uses: shivammathur/setup-php@292f25acb388a711c0c758f382e5c3109a391dd7 # main # zizmor: ignore[stale-action-refs,ref-version-mismatch]
         with:
           php-version: '8.4'
           tools: phpize, php-config
@@ -77,7 +78,7 @@ jobs:
           php -n -d extension="$so" -r 'exit(extension_loaded("clickhouse") && class_exists("ClickHouse") ? 0 : 1);'
 
   linux:
-    name: PHP ${{ matrix.php }} - Linux${{ matrix.label }}
+    name: PHP ${{ matrix.php }} - Linux
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: validate
@@ -100,51 +101,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php: ['7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5']
-        # The pinned setup-php release has no PHP 8.6 GA build, so the 8.6
-        # cell builds a release-mode PHP from the php-8.6.0 tag instead.
-        include:
-          - php: '8.6'
-            label: ' (php-8.6.0 source build)'
-            php-src: true
+        php: ['7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5', '8.6']
 
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
 
-      - name: Build PHP from source (release mode)
-        if: matrix.php-src
-        env:
-          PHP_VERSION: ${{ matrix.php }}
-        run: |
-          # Pinned php-src commit: the php-8.6.0 release tag. Update procedure:
-          # run `git ls-remote https://github.com/php/php-src.git 'refs/tags/php-8.6.*'`
-          # and refresh the SHA below with the newest tag's peeled (^{}) commit.
-          case "$PHP_VERSION" in
-            8.6) PHP_SRC_SHA=8aaada3f9605d81a38b8240f93c7389dfbc77ef9 ;;
-            *) echo "::error::no pinned php-src SHA for PHP $PHP_VERSION"; exit 1 ;;
-          esac
-          sudo apt-get update -qq && sudo apt-get install -y re2c bison autoconf
-          rm -rf /tmp/php-src
-          git init -q /tmp/php-src
-          git -C /tmp/php-src remote add origin https://github.com/php/php-src.git
-          git -C /tmp/php-src fetch --depth=1 origin "$PHP_SRC_SHA"
-          git -C /tmp/php-src checkout "$PHP_SRC_SHA"
-          cd /tmp/php-src
-          ./buildconf --force
-          ./configure \
-            --disable-all \
-            --enable-cli \
-            --prefix=/tmp/php-rel
-          make -j$(nproc)
-          make install
-          mkdir -p "$(/tmp/php-rel/bin/php -r 'echo ini_get("extension_dir");')"
-          echo /tmp/php-rel/bin >> "$GITHUB_PATH"
-
       - name: Setup PHP
-        if: ${{ !matrix.php-src }}
-        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        uses: shivammathur/setup-php@292f25acb388a711c0c758f382e5c3109a391dd7 # main # zizmor: ignore[stale-action-refs,ref-version-mismatch]
         with:
           php-version: ${{ matrix.php }}
           tools: phpize, php-config
