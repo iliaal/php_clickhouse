@@ -101,11 +101,11 @@ jobs:
       fail-fast: false
       matrix:
         php: ['7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5']
-        # setup-php's '8.6' tracks php-src master, not the PHP-8.6 branch, so
-        # the 8.6 cell builds a release-mode PHP from the branch instead.
+        # The pinned setup-php release has no PHP 8.6 GA build, so the 8.6
+        # cell builds a release-mode PHP from the php-8.6.0 tag instead.
         include:
           - php: '8.6'
-            label: ' (PHP-8.6 branch)'
+            label: ' (php-8.6.0 source build)'
             php-src: true
 
     steps:
@@ -118,11 +118,11 @@ jobs:
         env:
           PHP_VERSION: ${{ matrix.php }}
         run: |
-          # Pinned php-src commit on the PHP-8.6 branch. Update procedure: run
-          # `git ls-remote https://github.com/php/php-src.git PHP-8.6` and
-          # refresh the SHA below.
+          # Pinned php-src commit: the php-8.6.0 release tag. Update procedure:
+          # run `git ls-remote https://github.com/php/php-src.git 'refs/tags/php-8.6.*'`
+          # and refresh the SHA below with the newest tag's peeled (^{}) commit.
           case "$PHP_VERSION" in
-            8.6) PHP_SRC_SHA=5467b514f00aa9a4646bd82168d85b884f99214c ;;
+            8.6) PHP_SRC_SHA=8aaada3f9605d81a38b8240f93c7389dfbc77ef9 ;;
             *) echo "::error::no pinned php-src SHA for PHP $PHP_VERSION"; exit 1 ;;
           esac
           sudo apt-get update -qq && sudo apt-get install -y re2c bison autoconf
@@ -352,7 +352,8 @@ jobs:
         env:
           PHP_VERSION: ${{ matrix.php }}
         run: |
-          # Pinned php-src commits (one per branch). Update procedure: run
+          # Pinned php-src commits (one per branch; 8.6 pins the php-8.6.0
+          # release tag). Update procedure: run
           # `git ls-remote https://github.com/php/php-src.git PHP-X.Y` and
           # refresh the SHA for that branch.
           case "$PHP_VERSION" in
@@ -363,7 +364,7 @@ jobs:
             8.3) PHP_SRC_SHA=7f3d3de1a280f3fb573bd7976185ea94d11be606 ;;
             8.4) PHP_SRC_SHA=13f5c4bda271d896c6ea4d1b1d2e7dfa046c9694 ;;
             8.5) PHP_SRC_SHA=dab13a022a54f8bc03302f93ccb6484907ec1245 ;;
-            8.6) PHP_SRC_SHA=5467b514f00aa9a4646bd82168d85b884f99214c ;;
+            8.6) PHP_SRC_SHA=8aaada3f9605d81a38b8240f93c7389dfbc77ef9 ;;
             *) echo "::error::no pinned php-src SHA for PHP $PHP_VERSION"; exit 1 ;;
           esac
           rm -rf /tmp/php-src
@@ -469,13 +470,13 @@ jobs:
         with:
           persist-credentials: false
       - id: matrix
-        uses: php/php-windows-builder/extension-matrix@e03e5d39879adaeb61ed2225f0f4eae7db8c1df8 # 1.8.1
+        uses: php/php-windows-builder/extension-matrix@29352c0ef9e8ce65264ea9e287881a6f7758a953 # 1.9.0
         with:
           # Mirror the release-windows.yml matrix so the pre-tag gate builds
           # every toolset we ship: PHP 8.3 uses VS2019 (vs16), 8.4/8.5 use
-          # VS2022 (vs17). Building only 8.4 let a vs17-only construct ship
-          # 0.8.6 without Windows binaries.
-          php-version-list: '8.3, 8.4, 8.5'
+          # VS2022 (vs17), and 8.6 uses VS2026 (vs18). Building only 8.4 let a
+          # vs17-only construct ship 0.8.6 without Windows binaries.
+          php-version-list: '8.3, 8.4, 8.5, 8.6'
 
   windows:
     name: Windows ${{ matrix.php-version }} ${{ matrix.ts }} ${{ matrix.arch }}
@@ -490,7 +491,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Build extension
-        uses: php/php-windows-builder/extension@e03e5d39879adaeb61ed2225f0f4eae7db8c1df8 # 1.8.1
+        uses: php/php-windows-builder/extension@29352c0ef9e8ce65264ea9e287881a6f7758a953 # 1.9.0
         env:
           # 209 is 32-bit-only and needs no server (port-1 refusal proves the
           # bounds), so the x86 lane executes real 32-bit coverage while x64

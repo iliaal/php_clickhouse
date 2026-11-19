@@ -4,7 +4,7 @@ name: Release Windows binaries
 # via /release-ext). Builds the extension on every supported PHP version
 # x architecture x thread-safety variant on Windows runners, then
 # uploads each .dll as a release asset following the PIE-compatible
-# naming convention (php_<ext>-<version>-<php_x.y>-<ts|nts>-vs17-<arch>.zip).
+# naming convention (php_<ext>-<version>-<php_x.y>-<ts|nts>-<vs16|vs17|vs18>-<arch>.zip).
 #
 # Mirrors the Linux test matrix in build_matrix expansion so we ship
 # binaries for every PHP version we claim to support. The offline PHPTs
@@ -16,7 +16,7 @@ on:
   # Manual trigger. Two uses:
   #   - blank release_tag  -> build every lane, skip the upload job. This is the
   #     /release-ext Step 9.5 pre-tag gate: it exercises the exact source on the
-  #     real Windows runners (vs16 for 8.3, vs17 for 8.4/8.5) before the tag is
+  #     real Windows runners (vs16 for 8.3, vs17 for 8.4/8.5, vs18 for 8.6) before the tag is
   #     cut, so a toolset-specific break is caught pre-tag, not after.
   #   - release_tag set    -> build that tag's source and upload to it (backfill,
   #     e.g. when this workflow was added after the tag existed).
@@ -46,9 +46,9 @@ jobs:
         with:
           persist-credentials: false
       - id: matrix
-        uses: php/php-windows-builder/extension-matrix@e03e5d39879adaeb61ed2225f0f4eae7db8c1df8 # 1.8.1
+        uses: php/php-windows-builder/extension-matrix@29352c0ef9e8ce65264ea9e287881a6f7758a953 # 1.9.0
         with:
-          php-version-list: '8.3, 8.4, 8.5'
+          php-version-list: '8.3, 8.4, 8.5, 8.6'
 
   build:
     name: Build ${{ matrix.php-version }} ${{ matrix.ts }} ${{ matrix.arch }}
@@ -65,7 +65,7 @@ jobs:
         with:
           ref: ${{ github.event.release.tag_name || inputs.release_tag }}
           persist-credentials: false
-      - uses: php/php-windows-builder/extension@e03e5d39879adaeb61ed2225f0f4eae7db8c1df8 # 1.8.1
+      - uses: php/php-windows-builder/extension@29352c0ef9e8ce65264ea9e287881a6f7758a953 # 1.9.0
         with:
           php-version: ${{ matrix.php-version }}
           arch: ${{ matrix.arch }}
@@ -83,7 +83,7 @@ jobs:
     # dispatch is build-only (the build job above still ran all lanes).
     if: github.event_name == 'release' || inputs.release_tag != ''
     steps:
-      - uses: php/php-windows-builder/release@e03e5d39879adaeb61ed2225f0f4eae7db8c1df8 # 1.8.1
+      - uses: php/php-windows-builder/release@29352c0ef9e8ce65264ea9e287881a6f7758a953 # 1.9.0
         with:
           release: ${{ github.event.release.tag_name || inputs.release_tag }}
           token: ${{ secrets.GITHUB_TOKEN }}

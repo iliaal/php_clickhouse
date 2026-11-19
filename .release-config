@@ -8,6 +8,7 @@ build_matrix:
   - PHP-8.3
   - PHP-8.4
   - PHP-8.5
+  - PHP-8.6
 configure_base: "--enable-clickhouse"
 
 pre_test:
@@ -27,11 +28,12 @@ extra_build_variants:
 
 # Toggle: ship pre-built Linux/macOS binaries via .github/workflows/release-linux.yml
 # (built against the oldest patch of each PHP minor, PIE asset naming). Linux
-# glibc x86_64+arm64 and macOS arm64, NTS only, PHP 8.4+8.5. musl deferred. Windows binaries handled separately by
-# release-windows.yml.
+# glibc x86_64+arm64 and macOS arm64, NTS only, PHP 8.4+8.5, plus macOS PHP 8.6
+# (the official PHP 8.6 Docker images the Linux gate loads on are ZTS). musl
+# deferred. Windows binaries handled separately by release-windows.yml.
 linux_prebuilt: true
 
-# .github/workflows/release-windows.yml ships 12 DLL zips (8.3/8.4/8.5 x
-# nts/ts x x64/x86, covering the vs16 and vs17 toolsets). The release resolves
+# .github/workflows/release-windows.yml ships 16 DLL zips (8.3/8.4/8.5/8.6 x
+# nts/ts x x64/x86, covering the vs16, vs17, and vs18 toolsets). The release resolves
 # create-vs-upload from the workflow trigger, not from this flag.
 windows_ci: true
