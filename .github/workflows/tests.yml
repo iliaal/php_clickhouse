@@ -649,3 +649,20 @@ jobs:
             unset($c);
             gc_collect_cycles();
           '
+
+      - name: Run fatal-error leak regressions
+        env:
+          LD_LIBRARY_PATH: ${{ steps.clang_rt.outputs.dir }}
+          CLICKHOUSE_HOST: 127.0.0.1
+          CLICKHOUSE_PORT: 9000
+          CLICKHOUSE_USER: test
+          CLICKHOUSE_PASSWD: test
+          ASAN_OPTIONS: exitcode=139:detect_odr_violation=0
+        run: |
+          # These tests pass in the PHPT run above; their leak half needs
+          # LeakSanitizer, which that run disables.
+          ./scripts/test-fatal-leaks.sh /tmp/php-asan/bin/php modules/clickhouse.so \
+            tests/277_select_memory_limit_deferred_oom.phpt \
+            tests/278_fatal_in_row_callback.phpt \
+            tests/285_select_memory_limit_fatal_client_usable.phpt \
+            tests/286_map_memory_limit_fatal_client_usable.phpt

@@ -3297,7 +3297,9 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             throw std::runtime_error("Map column key/value size mismatch");
         }
 
-        /* The map slice is owned here; keep PHP allocation below it. */
+        /* The map slice and the key buffer are owned here; keep PHP
+         * allocation below them. */
+        std::string str_key_buf;
         runPhpCode([&] {
             uint32_t entry_hint = checkedArrayHint(entry_count, "Map read");
 
@@ -3545,7 +3547,6 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             };
 
             /* Reuse key buffer capacity. ColumnMap has no offset accessor to avoid GetAsColumn. */
-            std::string str_key_buf;
             for (size_t i = 0; i < entry_count; ++i) {
                 zend_long long_key = 0;
                 double dbl_key = 0.0;
