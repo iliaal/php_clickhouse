@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accepted for a non-Nullable external column and nested results failed with
   "nested-type depth exceeds limit". The state is per thread, so under
   FrankenPHP and other threaded SAPIs it carried into later requests.
+- PHP 8.5 and later: `select()`, `selectStatement()`, and
+  `selectWithExternalData()` stop converting rows once the result exceeds
+  `memory_limit` and report the "Allowed memory size exhausted" fatal error.
+  Before, conversion continued until PHP hit the hard limit and killed the
+  process (exit 137 under FrankenPHP).
 
 ## [0.13.2] - 2026-10-26
 

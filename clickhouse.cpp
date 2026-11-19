@@ -2498,6 +2498,14 @@ void do_select_into(zval *out, zval *this_obj,
 
             for (size_t row = 0; row < block.GetRowCount(); ++row)
             {
+#ifdef ZEND_HAS_OOM
+                /* PHP 8.5 defers the memory_limit error to the next VM interrupt
+                 * and _exit()s the process at the hard limit. Stop converting so
+                 * the deferred error is raised when the method returns. */
+                if (ZEND_HAS_OOM()) {
+                    throw std::runtime_error("memory limit exhausted while fetching rows");
+                }
+#endif
                 if (fetch_mode & SC_FETCH_KEY_PAIR) {
                     if (col_count < 2) {
                         throw std::runtime_error("Key pair mode requires at least 2 columns to be present");
