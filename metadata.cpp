@@ -225,7 +225,7 @@ void runHelperSelectFirstRow(zval *return_value, zval *this_obj, const std::stri
 }
 /* {{{ proto array databaseSize(?string database)
  */
-PHP_METHOD(ClickHouse, databaseSize)
+CLICKHOUSE_METHOD(databaseSize)
 {
     zend_string *db = NULL;
     ZEND_PARSE_PARAMETERS_START(0, 1)
@@ -248,7 +248,7 @@ PHP_METHOD(ClickHouse, databaseSize)
 
 /* {{{ proto array tablesSize(?string database)
  */
-PHP_METHOD(ClickHouse, tablesSize)
+CLICKHOUSE_METHOD(tablesSize)
 {
     zend_string *db = NULL;
     ZEND_PARSE_PARAMETERS_START(0, 1)
@@ -273,7 +273,7 @@ PHP_METHOD(ClickHouse, tablesSize)
 
 /* {{{ proto array partitions(string table)
  */
-PHP_METHOD(ClickHouse, partitions)
+CLICKHOUSE_METHOD(partitions)
 {
     zend_string *table = NULL;
     ZEND_PARSE_PARAMETERS_START(1, 1)
@@ -310,7 +310,7 @@ PHP_METHOD(ClickHouse, partitions)
 
 /* {{{ proto array showTables(?string database, ?string like)
  */
-PHP_METHOD(ClickHouse, showTables)
+CLICKHOUSE_METHOD(showTables)
 {
     zend_string *db = NULL, *like = NULL;
     ZEND_PARSE_PARAMETERS_START(0, 2)
@@ -331,7 +331,7 @@ PHP_METHOD(ClickHouse, showTables)
 
 /* {{{ proto string showCreateTable(string table)
  */
-PHP_METHOD(ClickHouse, showCreateTable)
+CLICKHOUSE_METHOD(showCreateTable)
 {
     zend_string *table = NULL;
     ZEND_PARSE_PARAMETERS_START(1, 1)
@@ -351,7 +351,7 @@ PHP_METHOD(ClickHouse, showCreateTable)
 
 /* {{{ proto int getServerUptime()
  */
-PHP_METHOD(ClickHouse, getServerUptime)
+CLICKHOUSE_METHOD(getServerUptime)
 {
     if (zend_parse_parameters_none() == FAILURE) {
         return;
@@ -369,7 +369,7 @@ PHP_METHOD(ClickHouse, getServerUptime)
  * are compared as string values, not identifiers.
  */
 
-PHP_METHOD(ClickHouse, isExists)
+CLICKHOUSE_METHOD(isExists)
 {
     zend_string *db = NULL, *table = NULL;
     ZEND_PARSE_PARAMETERS_START(2, 2)
@@ -398,7 +398,7 @@ PHP_METHOD(ClickHouse, isExists)
 
 /* {{{ proto array showDatabases()
  */
-PHP_METHOD(ClickHouse, showDatabases)
+CLICKHOUSE_METHOD(showDatabases)
 {
     if (zend_parse_parameters_none() == FAILURE) {
         return;
@@ -415,7 +415,7 @@ PHP_METHOD(ClickHouse, showDatabases)
  * Map(LowCardinality(String), ...) columns (ProfileEvents, Settings,
  * used_*) that our Map read path doesn't yet decode.
  */
-PHP_METHOD(ClickHouse, showProcesslist)
+CLICKHOUSE_METHOD(showProcesslist)
 {
     if (zend_parse_parameters_none() == FAILURE) {
         return;
@@ -433,7 +433,7 @@ PHP_METHOD(ClickHouse, showProcesslist)
 
 /* {{{ proto string getServerVersion()
  */
-PHP_METHOD(ClickHouse, getServerVersion)
+CLICKHOUSE_METHOD(getServerVersion)
 {
     if (zend_parse_parameters_none() == FAILURE) {
         return;
@@ -460,7 +460,7 @@ PHP_METHOD(ClickHouse, getServerVersion)
  * table. Accepts `db.table` form. Returns the assoc row or an empty
  * array when the table has no active parts.
  */
-PHP_METHOD(ClickHouse, tableSize)
+CLICKHOUSE_METHOD(tableSize)
 {
     zend_string *table = NULL;
     ZEND_PARSE_PARAMETERS_START(1, 1)
@@ -497,7 +497,7 @@ PHP_METHOD(ClickHouse, tableSize)
 
 /* {{{ proto bool truncateTable(string table)
  */
-PHP_METHOD(ClickHouse, truncateTable)
+CLICKHOUSE_METHOD(truncateTable)
 {
     zend_string *table = NULL;
     ZEND_PARSE_PARAMETERS_START(1, 1)
@@ -522,7 +522,7 @@ PHP_METHOD(ClickHouse, truncateTable)
  * integer partitions or partition IDs, fall back to execute() with a
  * hand-built ALTER TABLE statement.
  */
-PHP_METHOD(ClickHouse, dropPartition)
+CLICKHOUSE_METHOD(dropPartition)
 {
     zend_string *table = NULL, *part = NULL;
     ZEND_PARSE_PARAMETERS_START(2, 2)

@@ -17,13 +17,40 @@
 */
 #include <string>
 #include <stdexcept>
+#include <type_traits>
+
+/* Runs fn(ctx), which may execute PHP code, so that a fatal error inside it
+ * unwinds the caller's C++ frames instead of longjmping over them; see
+ * clickhouse.cpp. */
+void clickhouseRunPhpCode(void (*fn)(void *), void *ctx);
+
+template <typename F>
+static inline void runPhpCode(F &&f)
+{
+    using Fn = std::remove_reference_t<F>;
+    clickhouseRunPhpCode([](void *p) { (*static_cast<Fn *>(p))(); },
+                         const_cast<void *>(static_cast<const void *>(&f)));
+}
+
+/* Only objects (__toString) run PHP code during string conversion. */
+static inline zend_string *zvalGetStringRunningPhp(zval *zv)
+{
+    zval *d = zv;
+    ZVAL_DEREF(d);
+    if (Z_TYPE_P(d) != IS_OBJECT) {
+        return zval_get_string(zv);
+    }
+    zend_string *s = nullptr;
+    runPhpCode([&] { s = zval_get_string(zv); });
+    return s;
+}
 
 /* Own zval_get_string output across C++ exceptions. A throwing __toString
  * returns an interned empty string; raise a sentinel C++ exception while
  * preserving EG(exception) for the PHP boundary. */
 struct ZStrGuard {
     zend_string *s;
-    explicit ZStrGuard(zval *zv) : s(zval_get_string(zv)) {
+    explicit ZStrGuard(zval *zv) : s(zvalGetStringRunningPhp(zv)) {
         if (UNEXPECTED(EG(exception))) {
             throw std::runtime_error("exception while converting a value to string");
         }

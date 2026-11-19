@@ -131,6 +131,27 @@ void do_execute_into(zval *this_obj,
                      const char *sql, size_t l_sql,
                      zval *params, const std::string &qid, zval *settings);
 
+/* Defines a ClickHouse method whose body runs between clickhouseMethodEnter()
+ * and clickhouseMethodLeave(); the latter re-raises a bailout that PHP code
+ * deferred until the body's C++ frames had unwound. */
+void clickhouseMethodEnter(int *saved_depth);
+void clickhouseMethodLeave(int saved_depth);
+ZEND_NORETURN void clickhouseMethodBailout(int saved_depth);
+#define CLICKHOUSE_METHOD(name) \
+    static void clickhouse_method_##name(INTERNAL_FUNCTION_PARAMETERS); \
+    PHP_METHOD(ClickHouse, name) \
+    { \
+        int clickhouse_saved_depth; \
+        clickhouseMethodEnter(&clickhouse_saved_depth); \
+        zend_try { \
+            clickhouse_method_##name(INTERNAL_FUNCTION_PARAM_PASSTHRU); \
+        } zend_catch { \
+            clickhouseMethodBailout(clickhouse_saved_depth); \
+        } zend_end_try(); \
+        clickhouseMethodLeave(clickhouse_saved_depth); \
+    } \
+    static void clickhouse_method_##name(INTERNAL_FUNCTION_PARAMETERS)
+
 #endif /* PHP_CLICKHOUSE_INTERNAL_H */
 
 /*

@@ -90,6 +90,12 @@ PHP_CONFIG=/path/to/php-zts/bin/php-config \
   ./scripts/test-zts-request-thread.sh modules/clickhouse.so
 ```
 
+The same cell runs `scripts/test-zts-fatal-state.sh`, which needs the
+ClickHouse server from the CLICKHOUSE_* variables. It runs two requests on
+one worker thread: the first ends in a fatal error inside `insert()`
+conversion, and the second checks that no conversion state carried over.
+Run it locally the same way, with the server variables set.
+
 ## Code style
 
 - Two-space indent for PHP, four-space for C/C++.

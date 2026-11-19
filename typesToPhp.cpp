@@ -2117,7 +2117,14 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
             ZVAL_DEREF(v);
             if (Z_TYPE_P(v) == IS_ARRAY || Z_TYPE_P(v) == IS_OBJECT) {
                 smart_str buf = {0};
-                if (php_json_encode(&buf, v, 0) == FAILURE || EG(exception)) {
+                int encoded = FAILURE;
+                try {
+                    runPhpCode([&] { encoded = php_json_encode(&buf, v, 0); });
+                } catch (...) {
+                    smart_str_free(&buf);
+                    throw;
+                }
+                if (encoded == FAILURE || EG(exception)) {
                     smart_str_free(&buf);
                     /* Preserve any PHP exception from jsonSerialize/__toString for the boundary catch. */
                     if (EG(exception)) {

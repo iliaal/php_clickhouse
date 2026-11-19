@@ -681,7 +681,7 @@ void recordQueryError(clickhouse_object *obj, const std::string &sql, const std:
  * select / insert / execute / writeStart appends an entry. Toggling
  * off does NOT clear; getLogQueries() returns and clears.
  */
-PHP_METHOD(ClickHouse, enableLogQueries)
+CLICKHOUSE_METHOD(enableLogQueries)
 {
     zend_bool enabled = 1;
     ZEND_PARSE_PARAMETERS_START(0, 1)
@@ -701,7 +701,7 @@ PHP_METHOD(ClickHouse, enableLogQueries)
  * bytes_read, error_code (0 = success, server code on server error,
  * -1 on client/network error), error_message.
  */
-PHP_METHOD(ClickHouse, getLogQueries)
+CLICKHOUSE_METHOD(getLogQueries)
 {
     if (zend_parse_parameters_none() == FAILURE) return;
     clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());

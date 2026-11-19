@@ -64,6 +64,93 @@ using namespace std;
 
  zend_class_entry *clickhouse_ce, *clickhouse_exception_ce, *clickhouse_iter_ce, *clickhouse_statement_ce;
 
+/* A fatal error (zend_bailout) inside PHP code that runs under clickhouse-cpp
+ * or conversion frames longjmps over them, skipping destructors: the library's
+ * blocks and buffers leak, and the client stays marked busy mid-query.
+ * clickhouseRunPhpCode turns the bailout into a C++ exception so those frames
+ * unwind; CLICKHOUSE_METHOD re-raises it after the method body returns. While
+ * a bailout is pending no further PHP code runs. Outside a ClickHouse method
+ * there is no re-raise point, so the bailout keeps its native behavior. */
+static thread_local int g_method_depth = 0;
+static thread_local bool g_bailout_pending = false;
+
+struct PhpBailoutPending : std::runtime_error {
+    PhpBailoutPending() : std::runtime_error("PHP fatal error during a ClickHouse operation") {}
+};
+
+void clickhouseMethodEnter(int *saved_depth)
+{
+    *saved_depth = g_method_depth;
+    ++g_method_depth;
+    g_bailout_pending = false;
+}
+
+void clickhouseMethodLeave(int saved_depth)
+{
+    g_method_depth = saved_depth;
+    if (UNEXPECTED(g_bailout_pending)) {
+        g_bailout_pending = false;
+        zend_bailout();
+    }
+}
+
+/* A bailout raised outside clickhouseRunPhpCode (memory_limit in the method
+ * body) still unwinds the method natively; keep the depth exact for the next
+ * caller on this thread. */
+ZEND_NORETURN void clickhouseMethodBailout(int saved_depth)
+{
+    g_method_depth = saved_depth;
+    g_bailout_pending = false;
+    zend_bailout();
+}
+
+/* A C++ exception must not leave the zend_try block: EG(bailout) is restored
+ * only at zend_end_try. _zend_bailout() clears EG(current_execute_data), and
+ * the unwinding that follows still calls Zend APIs. */
+void clickhouseRunPhpCode(void (*fn)(void *), void *ctx)
+{
+    if (g_method_depth == 0) {
+        fn(ctx);
+        return;
+    }
+    if (g_bailout_pending) {
+        throw PhpBailoutPending();
+    }
+    zend_execute_data *saved_execute_data = EG(current_execute_data);
+    std::exception_ptr cxx_error;
+    bool bailed_out = false;
+    zend_try {
+        try {
+            fn(ctx);
+        } catch (...) {
+            cxx_error = std::current_exception();
+        }
+    } zend_catch {
+        bailed_out = true;
+    } zend_end_try();
+    if (bailed_out) {
+        EG(current_execute_data) = saved_execute_data;
+        g_bailout_pending = true;
+        throw PhpBailoutPending();
+    }
+    if (cxx_error) {
+        std::rethrow_exception(cxx_error);
+    }
+}
+
+/* Library callbacks can fire while a pending bailout unwinds through catch
+ * handlers; they must neither run PHP code nor throw there. */
+template <typename F>
+static auto phpCallback(F f)
+{
+    return [f = std::move(f)](const auto &...args) {
+        if (g_bailout_pending) {
+            return;
+        }
+        runPhpCode([&] { f(args...); });
+    };
+}
+
 
 static zend_object_handlers clickhouse_object_handlers;
 
@@ -618,6 +705,8 @@ PHP_RINIT_FUNCTION(clickhouse)
 #if defined(COMPILE_DL_CLICKHOUSE) && defined(ZTS)
     ZEND_TSRMLS_CACHE_UPDATE();
 #endif
+    g_method_depth = 0;
+    g_bailout_pending = false;
     return SUCCESS;
 }
 /* }}} */
@@ -809,7 +898,7 @@ static bool isUnsetTlsPath(const char *key, zval *v)
 
 /* {{{ proto object __construct(array connectParams)
  */
-PHP_METHOD(ClickHouse, __construct)
+CLICKHOUSE_METHOD(__construct)
 {
     zval *connectParams;
 
@@ -1448,7 +1537,7 @@ static Client* getClient(clickhouse_object *obj)
 
 static zend_string *zvalGetStringOrThrow(zval *v)
 {
-    zend_string *s = zval_get_string(v);
+    zend_string *s = zvalGetStringRunningPhp(v);
     if (!s || EG(exception)) {
         if (s) {
             zend_string_release(s);
@@ -1525,6 +1614,9 @@ static bool tryResetConnectionReapplyDatabase(zval *this_obj, clickhouse_object 
 /* Only ServerException supplies structured server code/name fields. */
 void throwClickHouseError(const std::exception &e, const std::string &query_id)
 {
+    if (g_bailout_pending) {
+        return;
+    }
     /* Preserve the original PHP exception behind a sentinel C++ throw. */
     if (EG(exception)) {
         return;
@@ -1823,7 +1915,7 @@ void addAssocUInt64(zval *array, const char *key, uint64_t value)
 
 static void attachProgressAndProfile(Query &q, clickhouse_object *obj)
 {
-    q.OnProgress([obj](const Progress &p) {
+    q.OnProgress(phpCallback([obj](const Progress &p) {
         ClientStats &st = obj->stats;
         st.rows_read += p.rows;
         st.bytes_read += p.bytes;
@@ -1852,8 +1944,8 @@ static void attachProgressAndProfile(Query &q, clickhouse_object *obj)
                 throw std::runtime_error("progress callback aborted query");
             }
         }
-    });
-    q.OnProfile([obj](const Profile &pr) {
+    }));
+    q.OnProfile(phpCallback([obj](const Profile &pr) {
         ClientStats &st = obj->stats;
         st.blocks = pr.blocks;
         if (pr.calculated_rows_before_limit) {
@@ -1886,7 +1978,7 @@ static void attachProgressAndProfile(Query &q, clickhouse_object *obj)
                 throw std::runtime_error("profile callback aborted query");
             }
         }
-    });
+    }));
 }
 
 static inline bool verbose_active(const clickhouse_object *obj)
@@ -1897,7 +1989,7 @@ static inline bool verbose_active(const clickhouse_object *obj)
 /* Consumes ctx, which may be NULL for an event without payload. */
 static void emitVerbose(clickhouse_object *obj, const char *event, zval *ctx)
 {
-    if (!verbose_active(obj)) {
+    if (!verbose_active(obj) || g_bailout_pending) {
         if (ctx) zval_ptr_dtor(ctx);
         return;
     }
@@ -1928,7 +2020,7 @@ static void emitVerbose(clickhouse_object *obj, const char *event, zval *ctx)
         /* A sink may unregister itself; pin its callable and bound object. */
         zval cb_copy;
         ZVAL_COPY(&cb_copy, &obj->verbose_callback);
-        call_user_function(NULL, NULL, &cb_copy, &retval, 2, args);
+        runPhpCode([&] { call_user_function(NULL, NULL, &cb_copy, &retval, 2, args); });
         zval_ptr_dtor(&cb_copy);
         zval_ptr_dtor(&args[0]);
         zval_ptr_dtor(&args[1]);
@@ -1948,7 +2040,7 @@ static void attachVerbose(Query &q, clickhouse_object *obj)
 {
     if (!verbose_active(obj)) return;
 
-    q.OnException([obj](const Exception &e) {
+    q.OnException(phpCallback([obj](const Exception &e) {
         zval ctx;
         array_init(&ctx);
         add_assoc_long(&ctx, "code", (zend_long)e.code);
@@ -1957,7 +2049,7 @@ static void attachVerbose(Query &q, clickhouse_object *obj)
         std::string vmsg = sanitizeError(e.display_text.c_str());
         add_assoc_stringl(&ctx, "message", (char*)vmsg.data(), vmsg.size());
         emitVerbose(obj, "server_exception", &ctx);
-    });
+    }));
 }
 
 static void resetStats(clickhouse_object *obj)
@@ -2386,7 +2478,7 @@ static void runExecuteWithRecovery(Client *client,
 
 /* {{{ proto bool ping()
  */
-PHP_METHOD(ClickHouse, ping)
+CLICKHOUSE_METHOD(ping)
 {
     if (zend_parse_parameters_none() == FAILURE) return;
     try {
@@ -2453,7 +2545,7 @@ void do_select_into(zval *out, zval *this_obj,
          * for that case; otherwise Statement can use the assoc rows directly. */
         bool pos_decided = false;
         bool pos_active = false;
-        query.OnData([out, positional_out, fetch_mode, &fetched_one, obj, &verbose_block_idx,
+        query.OnData(phpCallback([out, positional_out, fetch_mode, &fetched_one, obj, &verbose_block_idx,
                       &pos_decided, &pos_active](const Block &block) {
             if (verbose_active(obj)) {
                 zval ctx;
@@ -2594,7 +2686,7 @@ void do_select_into(zval *out, zval *this_obj,
                 }
                 add_next_index_zval(out, &row_tmp);
             }
-        });
+        }));
 
         runSelectWithRecovery(client, query, this_obj, obj, external_tables,
                               /*detach_callbacks=*/true);
@@ -2633,7 +2725,7 @@ static void buildStatsArray(zval *out, const ClientStats &st)
 
 /* {{{ proto array select(string sql, array params, int mode, string query_id, array settings)
  */
-PHP_METHOD(ClickHouse, select)
+CLICKHOUSE_METHOD(select)
 {
     zend_string *sql = NULL;
     zval* params = NULL;
@@ -2777,7 +2869,7 @@ static Block buildExternalTableBlock(zval *entry, std::string &name_out)
  * in the query body. Empty `externals` is rejected; use select()
  * when no external data is needed.
  */
-PHP_METHOD(ClickHouse, selectWithExternalData)
+CLICKHOUSE_METHOD(selectWithExternalData)
 {
     zend_string *sql = NULL;
     zval *externals = NULL;
@@ -3119,7 +3211,7 @@ static zend_long do_select_to_stream(zval *this_obj,
         const size_t row_term_len = streamFormatIsCSV(fmt) ? 2 : 1;
         const char  cell_sep  = streamFormatIsCSV(fmt) ? ','  : '\t';
 
-        query.OnData([&](const Block &block) {
+        query.OnData(phpCallback([&](const Block &block) {
             const size_t col_count = block.GetColumnCount();
             const size_t row_count = block.GetRowCount();
             if (col_count == 0) return;
@@ -3180,7 +3272,7 @@ static zend_long do_select_to_stream(zval *this_obj,
             }
 
             flushStreamBuf(&buf, stream_zv);
-        });
+        }));
 
         runSelectWithRecovery(client, query, this_obj, obj, nullptr,
                               /*detach_callbacks=*/false);
@@ -3225,7 +3317,7 @@ static zend_long do_select_to_stream(zval *this_obj,
  * reads. FIXEDSTRING_BINARY is not settable here, so binary payloads
  * ending in NUL lose the pad on export.
  */
-PHP_METHOD(ClickHouse, selectToStream)
+CLICKHOUSE_METHOD(selectToStream)
 {
     zend_string *sql = NULL;
     zval *params = NULL;
@@ -3279,7 +3371,7 @@ PHP_METHOD(ClickHouse, selectToStream)
  * Statement carries a per-call stats snapshot so it survives the
  * Client running other queries afterwards.
  */
-PHP_METHOD(ClickHouse, selectStatement)
+CLICKHOUSE_METHOD(selectStatement)
 {
     zend_string *sql = NULL;
     zval *params = NULL;
@@ -3494,7 +3586,7 @@ static void do_insert_into(zval *this_obj, zend_string *table,
     }
 }
 
-PHP_METHOD(ClickHouse, insert)
+CLICKHOUSE_METHOD(insert)
 {
     zend_string *table = NULL;
     zval *columns;
@@ -3868,7 +3960,7 @@ struct InsertStreamParser {
  *
  * Returns the total number of rows inserted.
  */
-PHP_METHOD(ClickHouse, insertFromStream)
+CLICKHOUSE_METHOD(insertFromStream)
 {
     zend_string *table = NULL;
     zval *columns = NULL;
@@ -4052,7 +4144,9 @@ PHP_METHOD(ClickHouse, insertFromStream)
             constexpr size_t CHUNK = 64 * 1024;
             char buf[CHUNK];
             while (true) {
-                ssize_t n = php_stream_read(stream, buf, CHUNK);
+                ssize_t n = 0;
+                /* Userland stream wrappers run PHP code here. */
+                runPhpCode([&] { n = php_stream_read(stream, buf, CHUNK); });
                 if (n < 0) {
                     /* Read errors must trigger recovery, not finalize partially parsed input as EOF. */
                     throw std::runtime_error(
@@ -4110,7 +4204,7 @@ PHP_METHOD(ClickHouse, insertFromStream)
 
 /* {{{ proto bool writeStart(string table, array columns, string query_id, array settings)
  */
-PHP_METHOD(ClickHouse, writeStart)
+CLICKHOUSE_METHOD(writeStart)
 {
     zend_string *table = NULL;
     zval *columns;
@@ -4181,7 +4275,7 @@ PHP_METHOD(ClickHouse, writeStart)
 
 /* {{{ proto bool write(array values)
  */
-PHP_METHOD(ClickHouse, write)
+CLICKHOUSE_METHOD(write)
 {
     zval *values;
 
@@ -4282,7 +4376,7 @@ PHP_METHOD(ClickHouse, write)
 
 /* {{{ proto bool writeEnd()
  */
-PHP_METHOD(ClickHouse, writeEnd)
+CLICKHOUSE_METHOD(writeEnd)
 {
     if (zend_parse_parameters_none() == FAILURE) return;
     clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
@@ -4374,7 +4468,7 @@ void do_execute_into(zval *this_obj,
     }
 }
 
-PHP_METHOD(ClickHouse, execute)
+CLICKHOUSE_METHOD(execute)
 {
     zend_string *sql = NULL;
     zval* params = NULL;
@@ -4404,7 +4498,7 @@ PHP_METHOD(ClickHouse, execute)
  * select/insert/execute/writeStart override these. Pass an empty array
  * to clear. Returns $this so callers can chain.
  */
-PHP_METHOD(ClickHouse, setSettings)
+CLICKHOUSE_METHOD(setSettings)
 {
     zval *arr;
     ZEND_PARSE_PARAMETERS_START(1, 1)
@@ -4446,7 +4540,7 @@ PHP_METHOD(ClickHouse, setSettings)
  * Set a single client-wide setting. Equivalent to calling setSettings()
  * with a one-key array merged onto the existing map. Returns $this.
  */
-PHP_METHOD(ClickHouse, setSetting)
+CLICKHOUSE_METHOD(setSetting)
 {
     zend_string *key = NULL;
     zval *value = NULL;
@@ -4475,7 +4569,7 @@ PHP_METHOD(ClickHouse, setSetting)
  * Switch the connection and cached default database for subsequent queries.
  * Returns $this.
  */
-PHP_METHOD(ClickHouse, setDatabase)
+CLICKHOUSE_METHOD(setDatabase)
 {
     zend_string *db = NULL;
     ZEND_PARSE_PARAMETERS_START(1, 1)
@@ -4541,7 +4635,7 @@ static bool setCallbackField(zval *target, zval *cb, const char *err_name)
     return true;
 }
 
-PHP_METHOD(ClickHouse, setProgressCallback)
+CLICKHOUSE_METHOD(setProgressCallback)
 {
     zval *cb;
     ZEND_PARSE_PARAMETERS_START(1, 1)
@@ -4562,7 +4656,7 @@ PHP_METHOD(ClickHouse, setProgressCallback)
  * Callback receives a single associative array: rows, blocks, bytes,
  * rows_before_limit, applied_limit, calculated_rows_before_limit.
  */
-PHP_METHOD(ClickHouse, setProfileCallback)
+CLICKHOUSE_METHOD(setProfileCallback)
 {
     zval *cb;
     ZEND_PARSE_PARAMETERS_START(1, 1)
@@ -4585,7 +4679,7 @@ PHP_METHOD(ClickHouse, setProfileCallback)
  * server_exception (plus the existing progress / profile callbacks
  * are unaffected). Returns $this so callers can chain.
  */
-PHP_METHOD(ClickHouse, setVerbose)
+CLICKHOUSE_METHOD(setVerbose)
 {
     zval *sink;
     ZEND_PARSE_PARAMETERS_START(1, 1)
@@ -4626,7 +4720,7 @@ PHP_METHOD(ClickHouse, setVerbose)
  * long-lived workers that want a clean socket after an idle period or
  * after a server-side restart.
  */
-PHP_METHOD(ClickHouse, resetConnection)
+CLICKHOUSE_METHOD(resetConnection)
 {
     if (zend_parse_parameters_none() == FAILURE) return;
     try {
@@ -4647,7 +4741,7 @@ PHP_METHOD(ClickHouse, resetConnection)
  * name, display_name, version_major, version_minor, version_patch,
  * revision, timezone.
  */
-PHP_METHOD(ClickHouse, getServerInfo)
+CLICKHOUSE_METHOD(getServerInfo)
 {
     if (zend_parse_parameters_none() == FAILURE) return;
     try {
@@ -4679,7 +4773,7 @@ PHP_METHOD(ClickHouse, getServerInfo)
  * list, so this is non-null in normal operation. Returns null only if
  * the underlying client has no endpoint resolved yet.
  */
-PHP_METHOD(ClickHouse, getCurrentEndpoint)
+CLICKHOUSE_METHOD(getCurrentEndpoint)
 {
     if (zend_parse_parameters_none() == FAILURE) return;
     try {
@@ -4704,7 +4798,7 @@ PHP_METHOD(ClickHouse, getCurrentEndpoint)
  * Return the rows / bytes / time recorded for the last completed
  * select / execute / insert. Reset on every query.
  */
-PHP_METHOD(ClickHouse, getStatistics)
+CLICKHOUSE_METHOD(getStatistics)
 {
     if (zend_parse_parameters_none() == FAILURE) return;
     clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
@@ -4718,7 +4812,7 @@ PHP_METHOD(ClickHouse, getStatistics)
  * keys of the first row, then forwards to insert(). All rows must share
  * the same key set (positional alignment is by first-row key order).
  */
-PHP_METHOD(ClickHouse, insertAssoc)
+CLICKHOUSE_METHOD(insertAssoc)
 {
     zend_string *table = NULL;
     zval *rows;
@@ -4833,7 +4927,7 @@ PHP_METHOD(ClickHouse, insertAssoc)
  * are buffered before returning; rows become PHP arrays lazily during
  * iteration. For unbounded streaming, use selectStreamCallback().
  */
-PHP_METHOD(ClickHouse, selectStream)
+CLICKHOUSE_METHOD(selectStream)
 {
     zend_string *sql = NULL;
     zval *params = NULL;
@@ -4878,7 +4972,7 @@ PHP_METHOD(ClickHouse, selectStream)
         }
 
         size_t verbose_block_idx = 0;
-        query.OnData([iter, obj, &verbose_block_idx](const Block &block) {
+        query.OnData(phpCallback([iter, obj, &verbose_block_idx](const Block &block) {
             if (block.GetRowCount() == 0 || block.GetColumnCount() == 0) return;
             if (verbose_active(obj)) {
                 zval ctx;
@@ -4914,7 +5008,7 @@ PHP_METHOD(ClickHouse, selectStream)
                 saturatingAddSize(iter->buffered_estimate, incoming);
             iter->total_rows += block.GetRowCount();
             iter->blocks.push_back(block);
-        });
+        }));
 
         runSelectWithRecovery(client, query, getThis(), obj, nullptr,
                               /*detach_callbacks=*/true);
@@ -4945,7 +5039,7 @@ PHP_METHOD(ClickHouse, selectStream)
  * in memory. The callback receives a single argument, the row as an
  * associative array keyed by column name. Returns true on success.
  */
-PHP_METHOD(ClickHouse, selectStreamCallback)
+CLICKHOUSE_METHOD(selectStreamCallback)
 {
     zend_string *sql = NULL;
     zval *cb = NULL;
@@ -4996,7 +5090,7 @@ PHP_METHOD(ClickHouse, selectStreamCallback)
         size_t verbose_block_idx = 0;
         /* Callback false requests cancellation and counts as success. */
         bool stop_requested = false;
-        query.OnData([cb, obj, &verbose_block_idx, &stop_requested, fetch_mode](const Block &block) {
+        query.OnData(phpCallback([cb, obj, &verbose_block_idx, &stop_requested, fetch_mode](const Block &block) {
             /* In-flight blocks the server sent before processing the
              * Cancel must not invoke user code again. */
             if (stop_requested) return;
@@ -5044,7 +5138,7 @@ PHP_METHOD(ClickHouse, selectStreamCallback)
                     break;
                 }
             }
-        });
+        }));
         query.OnDataCancelable([&stop_requested](const Block &) {
             return !stop_requested;
         });
@@ -5159,7 +5253,7 @@ PHP_METHOD(ClickHouseRowIterator, count)
  * progress callback release, settings/log destruction) lives in the
  * free_obj handler so it fires even on bailout.
  */
-PHP_METHOD(ClickHouse, __destruct)
+CLICKHOUSE_METHOD(__destruct)
 {
 }
 /* }}} */

@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A fatal error during a query no longer leaves the client stuck or leaks
+  native memory. Affected fatal errors happen inside a row, progress,
+  profile, or verbose callback, inside `__toString()` or `jsonSerialize()`
+  while `insert()`, `insertAssoc()`, `write()`, or
+  `selectWithExternalData()` convert values, or inside a userland stream
+  wrapper that `insertFromStream()` reads. Before, every later call on that
+  client, such as calls from shutdown functions, threw "Reentrant operation:
+  another query is already in progress". A fatal error in `insert()`
+  conversion of 200,000 rows also leaked about 5.9 MB.
 - `selectWithExternalData()` and `selectStream()` iteration no longer inherit
   NULL or nesting-depth state from a conversion that a fatal error, or a
   reentrant call from `__toString()`, left unfinished. Before, `NULL` was

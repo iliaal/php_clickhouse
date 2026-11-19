@@ -385,6 +385,16 @@ jobs:
           PHP_CONFIG: /tmp/php-zts/bin/php-config
         run: ./scripts/test-zts-request-thread.sh modules/clickhouse.so
 
+      - name: Test fatal-error state across requests on one thread
+        if: matrix.php == '8.4'
+        env:
+          PHP_CONFIG: /tmp/php-zts/bin/php-config
+          CLICKHOUSE_HOST: 127.0.0.1
+          CLICKHOUSE_PORT: 9000
+          CLICKHOUSE_USER: test
+          CLICKHOUSE_PASSWD: test
+        run: ./scripts/test-zts-fatal-state.sh modules/clickhouse.so
+
       - name: Run test suite under ZTS
         env:
           CLICKHOUSE_HOST: 127.0.0.1
