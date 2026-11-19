@@ -118,6 +118,18 @@ static inline std::shared_ptr<TCol> as_or_throw(const ColumnRef &c, const char *
     return p;
 }
 
+/* Read paths borrow the column from a ColumnRef their caller owns. A raw
+ * pointer holds no reference that a memory_limit bailout could leak. */
+template <typename TCol>
+static inline TCol *view_or_throw(const ColumnRef &c, const char *what)
+{
+    auto *p = dynamic_cast<TCol *>(c.get());
+    if (!p) {
+        throw std::runtime_error(std::string(what) + ": column type mismatch");
+    }
+    return p;
+}
+
 /* Avoid per-cell RTTI/refcount work only for stable, one-to-one Type::Code
  * mappings: numeric ColumnVector<T> and ColumnString. Representation-changing
  * types (IP, FixedString, geo, Enum, nested wrappers) need as_or_throw. */
@@ -2117,7 +2129,14 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
             ZVAL_DEREF(v);
             if (Z_TYPE_P(v) == IS_ARRAY || Z_TYPE_P(v) == IS_OBJECT) {
                 smart_str buf = {0};
-                if (php_json_encode(&buf, v, 0) == FAILURE || EG(exception)) {
+                int encoded = FAILURE;
+                try {
+                    runPhpCode([&] { encoded = php_json_encode(&buf, v, 0); });
+                } catch (...) {
+                    smart_str_free(&buf);
+                    throw;
+                }
+                if (encoded == FAILURE || EG(exception)) {
                     smart_str_free(&buf);
                     /* Preserve any PHP exception from jsonSerialize/__toString for the boundary catch. */
                     if (EG(exception)) {
@@ -2725,7 +2744,7 @@ static void emitEnumColumn(zval *arr, const ColumnRef& columnRef, int row,
                            const string& column_name, int8_t is_array, long fetch_mode,
                            const char *what)
 {
-    auto col = as_or_throw<TCol>(columnRef, what);
+    auto col = view_or_throw<TCol>(columnRef, what);
     std::string_view name = col->NameAt(row);
     emitStringCell(arr, name.data(), name.length(), column_name, is_array, fetch_mode);
 }
@@ -2784,18 +2803,21 @@ static uint32_t checkedArrayHint(size_t n, const char *what)
 void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string& column_name, int8_t is_array, long fetch_mode)
 {
     ConvertDepthGuard depth_guard;
-    switch (columnRef->Type()->GetCode())
+    /* A TypeRef temporary in a call argument lives until the call returns;
+     * a memory_limit bailout inside the call would leak its reference. */
+    const Type::Code type_code = columnRef->Type()->GetCode();
+    switch (type_code)
     {
     case Type::Code::UInt64:
     case Type::Code::UInt8:
     case Type::Code::UInt16:
     case Type::Code::UInt32:
-        readNumericCell(columnRef->Type()->GetCode(), arr, columnRef, row, column_name, is_array, fetch_mode);
+        readNumericCell(type_code, arr, columnRef, row, column_name, is_array, fetch_mode);
         break;
     case Type::Code::IPv4:
     {
         /* IPv4 no longer inherits ColumnUInt32; render via a stack buffer to avoid AsString allocation. */
-        auto col_ip = as_or_throw<ColumnIPv4>(columnRef, "IPv4 read");
+        auto col_ip = view_or_throw<ColumnIPv4>(columnRef, "IPv4 read");
         in_addr addr = col_ip->At(row);
         char buf[INET_ADDRSTRLEN];
         if (!inet_ntop(AF_INET, &addr, buf, sizeof(buf))) {
@@ -2810,11 +2832,11 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     case Type::Code::Int16:
     case Type::Code::Int32:
     case Type::Code::Int64:
-        readNumericCell(columnRef->Type()->GetCode(), arr, columnRef, row, column_name, is_array, fetch_mode);
+        readNumericCell(type_code, arr, columnRef, row, column_name, is_array, fetch_mode);
         break;
     case Type::Code::UUID:
     {
-        auto uuid_col = as_or_throw<ColumnUUID>(columnRef, "UUID read");
+        auto uuid_col = view_or_throw<ColumnUUID>(columnRef, "UUID read");
         auto col = (*uuid_col)[row];
         char buf[37];
         int blen = format_uuid(col, (fetch_mode & SC_FETCH_UUID_WITH_DASHES) != 0,
@@ -2824,14 +2846,14 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     }
     case Type::Code::Float32:
     case Type::Code::Float64:
-        readNumericCell(columnRef->Type()->GetCode(), arr, columnRef, row, column_name, is_array, fetch_mode);
+        readNumericCell(type_code, arr, columnRef, row, column_name, is_array, fetch_mode);
         break;
     case Type::Code::Decimal:
     case Type::Code::Decimal32:
     case Type::Code::Decimal64:
     case Type::Code::Decimal128:
     {
-        auto col = as_or_throw<ColumnDecimal>(columnRef, "Decimal read");
+        auto col = view_or_throw<ColumnDecimal>(columnRef, "Decimal read");
         // Worst case: sign + 39 digits + decimal point = 41 bytes.
         size_t scale = decimalScale(columnRef->Type());
         Int128 raw = col->At(row);
@@ -2859,7 +2881,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     }
     case Type::Code::Bool:
     {
-        auto b_col = as_or_throw<ColumnBool>(columnRef, "Bool read");
+        auto b_col = view_or_throw<ColumnBool>(columnRef, "Bool read");
         bool v = b_col->At(row);
         if (is_array)
         {
@@ -2886,7 +2908,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     {
         /* Native JSON reads require output_format_native_write_json_as_string=1.
          * JSON_AS_ARRAY wins when both decode flags are set. */
-        auto j_col = as_or_throw<ColumnJSON>(columnRef, "JSON read");
+        auto j_col = view_or_throw<ColumnJSON>(columnRef, "JSON read");
         auto sv = j_col->At(row);
         if (fetch_mode & (SC_FETCH_JSON_AS_ARRAY | SC_FETCH_JSON_AS_OBJECT))
         {
@@ -2928,7 +2950,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     case Type::Code::FixedString:
     {
         // FIXEDSTRING_BINARY preserves trailing NULs that may be payload rather than padding.
-        auto fs_col = as_or_throw<ColumnFixedString>(columnRef, "FixedString read");
+        auto fs_col = view_or_throw<ColumnFixedString>(columnRef, "FixedString read");
         /* At() bounds only the first byte; a width x rows product that wrapped
          * on load leaves fewer whole cells than the enclosing column claims. */
         if ((size_t)row >= fs_col->Size()) {
@@ -2947,7 +2969,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     case Type::Code::IPv6:
     {
         /* IPv6 uses composition since v2.6.1; render directly to avoid AsString allocation. */
-        auto col_ip = as_or_throw<ColumnIPv6>(columnRef, "IPv6 read");
+        auto col_ip = view_or_throw<ColumnIPv6>(columnRef, "IPv6 read");
         in6_addr addr = col_ip->At(row);
         char buf[INET6_ADDRSTRLEN];
         if (!inet_ntop(AF_INET6, &addr, buf, sizeof(buf))) {
@@ -2961,14 +2983,14 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
 
     case Type::Code::DateTime:
     {
-        auto col = as_or_throw<ColumnDateTime>(columnRef, "DateTime read");
+        auto col = view_or_throw<ColumnDateTime>(columnRef, "DateTime read");
         emitEpoch(arr, (int64_t)col->RawAt(row), "%Y-%m-%d %H:%M:%S",
                   column_name, is_array, fetch_mode);
         break;
     }
     case Type::Code::DateTime64:
     {
-        auto col = as_or_throw<ColumnDateTime64>(columnRef, "DateTime64 read");
+        auto col = view_or_throw<ColumnDateTime64>(columnRef, "DateTime64 read");
         size_t precision = dateTime64Precision(columnRef->Type());
         int64_t scale = pow10_i64(precision);
         int64_t raw = col->At(row);
@@ -2994,21 +3016,21 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     }
     case Type::Code::Date:
     {
-        auto col = as_or_throw<ColumnDate>(columnRef, "Date read");
+        auto col = view_or_throw<ColumnDate>(columnRef, "Date read");
         emitEpoch(arr, (int64_t)col->RawAt(row) * 86400, "%Y-%m-%d",
                   column_name, is_array, fetch_mode);
         break;
     }
     case Type::Code::Date32:
     {
-        auto col = as_or_throw<ColumnDate32>(columnRef, "Date32 read");
+        auto col = view_or_throw<ColumnDate32>(columnRef, "Date32 read");
         emitEpoch(arr, (int64_t)col->RawAt(row) * 86400, "%Y-%m-%d",
                   column_name, is_array, fetch_mode);
         break;
     }
     case Type::Code::Time:
     {
-        auto col = as_or_throw<ColumnTime>(columnRef, "Time read");
+        auto col = view_or_throw<ColumnTime>(columnRef, "Time read");
         int32_t v = col->At(row);
         if (fetch_mode & SC_FETCH_DATE_AS_STRINGS) {
             uint32_t abs_v = v < 0 ? uint32_t(0) - uint32_t(v) : uint32_t(v);
@@ -3029,7 +3051,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     }
     case Type::Code::Time64:
     {
-        auto col = as_or_throw<ColumnTime64>(columnRef, "Time64 read");
+        auto col = view_or_throw<ColumnTime64>(columnRef, "Time64 read");
         size_t precision = time64Precision(columnRef->Type());
         int64_t scale = pow10_i64(precision);
         int64_t raw = col->At(row);
@@ -3059,7 +3081,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     }
     case Type::Code::Int128:
     {
-        auto col = as_or_throw<ColumnInt128>(columnRef, "Int128 read");
+        auto col = view_or_throw<ColumnInt128>(columnRef, "Int128 read");
         char buf[41];
         size_t l = format_int128_dec(col->At(row), buf);
         emitStringCell(arr, buf, l, column_name, is_array, fetch_mode);
@@ -3067,7 +3089,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     }
     case Type::Code::UInt128:
     {
-        auto col = as_or_throw<ColumnUInt128>(columnRef, "UInt128 read");
+        auto col = view_or_throw<ColumnUInt128>(columnRef, "UInt128 read");
         char buf[40];
         size_t l = format_uint128_dec(col->At(row), buf);
         emitStringCell(arr, buf, l, column_name, is_array, fetch_mode);
@@ -3075,7 +3097,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     }
     case Type::Code::Array:
     {
-        auto array = as_or_throw<ColumnArray>(columnRef, "Array read");
+        auto array = view_or_throw<ColumnArray>(columnRef, "Array read");
         if ((size_t)row >= array->Size()) {
             throw std::runtime_error("Array read: row is outside the column data");
         }
@@ -3090,35 +3112,38 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         uint32_t elem_hint = checkedArrayHint(col->Size(), "Array read");
         /* Nested cells accept value-shaping flags only, never result-shape flags. */
         long nested_mode = fetch_mode & SC_FETCH_VALUE_FLAGS;
-        if (fetch_mode & SC_FETCH_ONE) {
-            array_init_size(arr, elem_hint);
-            for (size_t i = 0; i < col->Size(); ++i)
-            {
-                convertToZval(arr, col, i, "array", 1, nested_mode);
-            }
-        } else {
-            zval *return_tmp;
-            SC_MAKE_STD_ZVAL(return_tmp);
-            array_init_size(return_tmp, elem_hint);
-            /* Free partial nested output on throw before ownership transfers to arr. */
-            try {
+        /* The slice is owned here; keep PHP allocation below it. */
+        runPhpCode([&] {
+            if (fetch_mode & SC_FETCH_ONE) {
+                array_init_size(arr, elem_hint);
                 for (size_t i = 0; i < col->Size(); ++i)
                 {
-                    convertToZval(return_tmp, col, i, "array", 1, nested_mode);
+                    convertToZval(arr, col, i, "array", 1, nested_mode);
                 }
-            } catch (...) {
-                zval_ptr_dtor(return_tmp);
-                throw;
+            } else {
+                zval *return_tmp;
+                SC_MAKE_STD_ZVAL(return_tmp);
+                array_init_size(return_tmp, elem_hint);
+                /* Free partial nested output on throw before ownership transfers to arr. */
+                try {
+                    for (size_t i = 0; i < col->Size(); ++i)
+                    {
+                        convertToZval(return_tmp, col, i, "array", 1, nested_mode);
+                    }
+                } catch (...) {
+                    zval_ptr_dtor(return_tmp);
+                    throw;
+                }
+                if (is_array)
+                {
+                    add_next_index_zval(arr, return_tmp);
+                }
+                else
+                {
+                    add_assoc_zval_ex(arr, column_name.c_str(), column_name.length(), return_tmp);
+                }
             }
-            if (is_array)
-            {
-                add_next_index_zval(arr, return_tmp);
-            }
-            else
-            {
-                add_assoc_zval_ex(arr, column_name.c_str(), column_name.length(), return_tmp);
-            }
-        }
+        });
         break;
     }
 
@@ -3131,7 +3156,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
 
     case Type::Code::Nullable:
     {
-        auto nullable = as_or_throw<ColumnNullable>(columnRef, "Nullable read");
+        auto nullable = view_or_throw<ColumnNullable>(columnRef, "Nullable read");
         if (nullable->IsNull(row))
         {
             if (is_array)
@@ -3149,20 +3174,22 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         }
         else
         {
-            convertToZval(arr, nullable->Nested(), row, column_name, is_array, fetch_mode);
+            ColumnRef nested = nullable->Nested();
+            runPhpCode([&] { convertToZval(arr, nested, row, column_name, is_array, fetch_mode); });
         }
         break;
     }
 
     case Type::Code::Tuple:
     {
-        auto tuple = as_or_throw<ColumnTuple>(columnRef, "Tuple read");
+        auto tuple = view_or_throw<ColumnTuple>(columnRef, "Tuple read");
         long nested_mode = fetch_mode & SC_FETCH_VALUE_FLAGS;
         if (fetch_mode & SC_FETCH_ONE) {
             array_init_size(arr, (uint32_t)tuple->TupleSize());
             for (size_t i = 0; i < tuple->TupleSize(); ++i)
             {
-                convertToZval(arr, (*tuple)[i], row, "tuple", 1, nested_mode);
+                ColumnRef element = (*tuple)[i];
+                runPhpCode([&] { convertToZval(arr, element, row, "tuple", 1, nested_mode); });
             }
         } else {
             zval *return_tmp;
@@ -3172,7 +3199,8 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             try {
                 for (size_t i = 0; i < tuple->TupleSize(); ++i)
                 {
-                    convertToZval(return_tmp, (*tuple)[i], row, "tuple", 1, nested_mode);
+                    ColumnRef element = (*tuple)[i];
+                    runPhpCode([&] { convertToZval(return_tmp, element, row, "tuple", 1, nested_mode); });
                 }
             } catch (...) {
                 zval_ptr_dtor(return_tmp);
@@ -3195,17 +3223,23 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         // ColumnLowCardinality::GetItem covers LC(String), LC(FixedString),
         // LC(Nullable(String)), and LC(Nullable(FixedString)). A NULL entry
         // returns an ItemView with type Void regardless of the nested column.
-        auto lc = columnRef->As<ColumnLowCardinality>();
+        auto *lc = dynamic_cast<ColumnLowCardinality *>(columnRef.get());
         if (!lc) {
             throw std::runtime_error("LowCardinality column downcast failed");
         }
-        TypeRef nested = type_as_or_throw<LowCardinalityType>(columnRef->Type(), "LowCardinality")->GetNestedType();
-        bool is_nullable = (nested->GetCode() == Type::Code::Nullable);
-        TypeRef inner = is_nullable
-            ? type_as_or_throw<NullableType>(nested, "Nullable")->GetNestedType()
-            : nested;
-        if (inner->GetCode() != Type::Code::String &&
-            inner->GetCode() != Type::Code::FixedString) {
+        /* Release the TypeRefs before PHP allocation below. */
+        bool is_nullable;
+        Type::Code inner_code;
+        {
+            TypeRef nested = type_as_or_throw<LowCardinalityType>(columnRef->Type(), "LowCardinality")->GetNestedType();
+            is_nullable = (nested->GetCode() == Type::Code::Nullable);
+            TypeRef inner = is_nullable
+                ? type_as_or_throw<NullableType>(nested, "Nullable")->GetNestedType()
+                : nested;
+            inner_code = inner->GetCode();
+        }
+        if (inner_code != Type::Code::String &&
+            inner_code != Type::Code::FixedString) {
             throw std::runtime_error("LowCardinality read only supports String / FixedString");
         }
 
@@ -3226,7 +3260,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         // trim them so the round-trip preserves the original input, unless
         // FIXEDSTRING_BINARY asks for the raw padded width (see the standalone
         // FixedString case above).
-        if (inner->GetCode() == Type::Code::FixedString &&
+        if (inner_code == Type::Code::FixedString &&
             !(fetch_mode & SC_FETCH_FIXEDSTRING_BINARY)) {
             size_t len = sv.length();
             while (len > 0 && sv[len - 1] == '\0') {
@@ -3249,7 +3283,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         TypeRef value_type_ref = map_type_ref->GetValueType();
         Type::Code key_code = key_type_ref->GetCode();
         Type::Code value_code = value_type_ref->GetCode();
-        auto map_col = as_or_throw<ColumnMap>(columnRef, "Map read");
+        auto map_col = view_or_throw<ColumnMap>(columnRef, "Map read");
         ColumnRef tuple_col = map_col->GetAsColumn(row);
         auto tup = tuple_col->As<ColumnTuple>();
         if (!tup) {
@@ -3263,39 +3297,319 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             throw std::runtime_error("Map column key/value size mismatch");
         }
 
-        uint32_t entry_hint = checkedArrayHint(entry_count, "Map read");
+        /* The map slice and the key buffer are owned here; keep PHP
+         * allocation below them. */
+        std::string str_key_buf;
+        runPhpCode([&] {
+            uint32_t entry_hint = checkedArrayHint(entry_count, "Map read");
 
-        zval *map_zv;
-        SC_MAKE_STD_ZVAL(map_zv);
-        array_init_size(map_zv, entry_hint);
-        /* Free partial map output on throw before ownership transfers to the parent. */
-        struct MapZvGuard {
-            zval *z;
-            ~MapZvGuard() { if (z) zval_ptr_dtor(z); }
-        } map_guard{map_zv};
+            zval *map_zv;
+            SC_MAKE_STD_ZVAL(map_zv);
+            array_init_size(map_zv, entry_hint);
+            /* Free partial map output on throw before ownership transfers to the parent. */
+            struct MapZvGuard {
+                zval *z;
+                ~MapZvGuard() { if (z) zval_ptr_dtor(z); }
+            } map_guard{map_zv};
 
-        if (fetch_mode & SC_FETCH_MAP_AS_PAIRS) {
-            long nested_mode = fetch_mode & SC_FETCH_VALUE_FLAGS;
-            for (size_t i = 0; i < entry_count; ++i) {
-                zval pair;
-                array_init_size(&pair, 2);
-                try {
-                    zval key;
-                    convertToZval(&key, keys_any, (int)i, "", 0,
-                                  nested_mode | SC_FETCH_ONE);
-                    add_next_index_zval(&pair, &key);
+            if (fetch_mode & SC_FETCH_MAP_AS_PAIRS) {
+                long nested_mode = fetch_mode & SC_FETCH_VALUE_FLAGS;
+                for (size_t i = 0; i < entry_count; ++i) {
+                    zval pair;
+                    array_init_size(&pair, 2);
+                    try {
+                        zval key;
+                        convertToZval(&key, keys_any, (int)i, "", 0,
+                                      nested_mode | SC_FETCH_ONE);
+                        add_next_index_zval(&pair, &key);
 
-                    zval value;
-                    convertToZval(&value, values_any, (int)i, "", 0,
-                                  nested_mode | SC_FETCH_ONE);
-                    add_next_index_zval(&pair, &value);
-                } catch (...) {
-                    zval_ptr_dtor(&pair);
-                    throw;
+                        zval value;
+                        convertToZval(&value, values_any, (int)i, "", 0,
+                                      nested_mode | SC_FETCH_ONE);
+                        add_next_index_zval(&pair, &value);
+                    } catch (...) {
+                        zval_ptr_dtor(&pair);
+                        throw;
+                    }
+                    add_next_index_zval(map_zv, &pair);
                 }
-                add_next_index_zval(map_zv, &pair);
+
+                map_guard.z = nullptr;
+                if (is_array) {
+                    add_next_index_zval(arr, map_zv);
+                    ZVAL_UNDEF(map_zv);
+                } else if (fetch_mode & SC_FETCH_ONE) {
+                    ZVAL_COPY_VALUE(arr, map_zv);
+                    ZVAL_UNDEF(map_zv);
+                } else {
+                    add_assoc_zval_ex(arr, column_name.c_str(), column_name.length(), map_zv);
+                    ZVAL_UNDEF(map_zv);
+                }
+                return;
             }
 
+            /* Cast once per Map cell; the entry loop only changes the index. */
+            ColumnString *  k_str_col = nullptr;
+            ColumnInt64 *   k_i64_col = nullptr;
+            ColumnUInt64 *  k_u64_col = nullptr;
+            ColumnInt32 *   k_i32_col = nullptr;
+            ColumnUInt32 *  k_u32_col = nullptr;
+            ColumnInt16 *   k_i16_col = nullptr;
+            ColumnUInt16 *  k_u16_col = nullptr;
+            ColumnInt8 *    k_i8_col = nullptr;
+            ColumnUInt8 *   k_u8_col = nullptr;
+            ColumnFloat32 * k_f32_col = nullptr;
+            ColumnFloat64 * k_f64_col = nullptr;
+            ColumnUUID *    k_uuid_col = nullptr;
+            switch (key_code) {
+                case Type::Code::String:  k_str_col  = view_or_throw<ColumnString>(keys_any, "Map key String"); break;
+                case Type::Code::Int64:   k_i64_col  = view_or_throw<ColumnInt64>(keys_any, "Map key Int64"); break;
+                case Type::Code::UInt64:  k_u64_col  = view_or_throw<ColumnUInt64>(keys_any, "Map key UInt64"); break;
+                case Type::Code::Int32:   k_i32_col  = view_or_throw<ColumnInt32>(keys_any, "Map key Int32"); break;
+                case Type::Code::UInt32:  k_u32_col  = view_or_throw<ColumnUInt32>(keys_any, "Map key UInt32"); break;
+                case Type::Code::Int16:   k_i16_col  = view_or_throw<ColumnInt16>(keys_any, "Map key Int16"); break;
+                case Type::Code::UInt16:  k_u16_col  = view_or_throw<ColumnUInt16>(keys_any, "Map key UInt16"); break;
+                case Type::Code::Int8:    k_i8_col   = view_or_throw<ColumnInt8>(keys_any, "Map key Int8"); break;
+                case Type::Code::UInt8:   k_u8_col   = view_or_throw<ColumnUInt8>(keys_any, "Map key UInt8"); break;
+                case Type::Code::Float32: k_f32_col  = view_or_throw<ColumnFloat32>(keys_any, "Map key Float32"); break;
+                case Type::Code::Float64: k_f64_col  = view_or_throw<ColumnFloat64>(keys_any, "Map key Float64"); break;
+                case Type::Code::UUID:    k_uuid_col = view_or_throw<ColumnUUID>(keys_any, "Map key UUID"); break;
+                default:
+                    throw std::runtime_error("Map read: unsupported key type " + key_type_ref->GetName());
+            }
+
+            ColumnString *  v_str_col = nullptr;
+            ColumnInt64 *   v_i64_col = nullptr;
+            ColumnUInt64 *  v_u64_col = nullptr;
+            ColumnInt32 *   v_i32_col = nullptr;
+            ColumnUInt32 *  v_u32_col = nullptr;
+            ColumnInt16 *   v_i16_col = nullptr;
+            ColumnUInt16 *  v_u16_col = nullptr;
+            ColumnInt8 *    v_i8_col = nullptr;
+            ColumnUInt8 *   v_u8_col = nullptr;
+            ColumnFloat32 * v_f32_col = nullptr;
+            ColumnFloat64 * v_f64_col = nullptr;
+            ColumnUUID *    v_uuid_col = nullptr;
+            switch (value_code) {
+                case Type::Code::String:  v_str_col  = view_or_throw<ColumnString>(values_any, "Map value String"); break;
+                case Type::Code::Int64:   v_i64_col  = view_or_throw<ColumnInt64>(values_any, "Map value Int64"); break;
+                case Type::Code::UInt64:  v_u64_col  = view_or_throw<ColumnUInt64>(values_any, "Map value UInt64"); break;
+                case Type::Code::Int32:   v_i32_col  = view_or_throw<ColumnInt32>(values_any, "Map value Int32"); break;
+                case Type::Code::UInt32:  v_u32_col  = view_or_throw<ColumnUInt32>(values_any, "Map value UInt32"); break;
+                case Type::Code::Int16:   v_i16_col  = view_or_throw<ColumnInt16>(values_any, "Map value Int16"); break;
+                case Type::Code::UInt16:  v_u16_col  = view_or_throw<ColumnUInt16>(values_any, "Map value UInt16"); break;
+                case Type::Code::Int8:    v_i8_col   = view_or_throw<ColumnInt8>(values_any, "Map value Int8"); break;
+                case Type::Code::UInt8:   v_u8_col   = view_or_throw<ColumnUInt8>(values_any, "Map value UInt8"); break;
+                case Type::Code::Float32: v_f32_col  = view_or_throw<ColumnFloat32>(values_any, "Map value Float32"); break;
+                case Type::Code::Float64: v_f64_col  = view_or_throw<ColumnFloat64>(values_any, "Map value Float64"); break;
+                case Type::Code::UUID:    v_uuid_col = view_or_throw<ColumnUUID>(values_any, "Map value UUID"); break;
+                default:
+                    throw std::runtime_error("Map read: unsupported value type " + value_type_ref->GetName());
+            }
+
+            // PHP keys are strings/integers; render floating keys as canonical strings.
+            auto signedKey = [](int64_t value, std::string &str_buf,
+                                zend_long &long_out) -> int {
+                if (value >= (int64_t)ZEND_LONG_MIN &&
+                    value <= (int64_t)ZEND_LONG_MAX) {
+                    long_out = (zend_long)value;
+                    return 1;
+                }
+                char buf[32];
+                int len = snprintf(buf, sizeof(buf), "%" PRId64, value);
+                str_buf.assign(buf, len);
+                return 0;
+            };
+            auto unsignedKey = [](uint64_t value, std::string &str_buf,
+                                  zend_long &long_out) -> int {
+                if (value <= (uint64_t)ZEND_LONG_MAX) {
+                    long_out = (zend_long)value;
+                    return 1;
+                }
+                char buf[32];
+                int len = snprintf(buf, sizeof(buf), "%" PRIu64, value);
+                str_buf.assign(buf, len);
+                return 0;
+            };
+            auto decodeKey = [&](size_t i, std::string &str_buf, zend_long &long_out, double &dbl_out) -> int {
+                // Returns 0 = string, 1 = long, 2 = double-as-string.
+                switch (key_code) {
+                    case Type::Code::String: {
+                        std::string_view kv = (*k_str_col)[i];
+                        str_buf.assign(kv.data(), kv.length());
+                        return 0;
+                    }
+                    case Type::Code::Int64:
+                        return signedKey((int64_t)k_i64_col->At(i), str_buf, long_out);
+                    case Type::Code::UInt64:
+                        return unsignedKey((uint64_t)k_u64_col->At(i), str_buf, long_out);
+                    case Type::Code::Int32:
+                        return signedKey((int64_t)k_i32_col->At(i), str_buf, long_out);
+                    case Type::Code::UInt32:
+                        return unsignedKey((uint64_t)k_u32_col->At(i), str_buf, long_out);
+                    case Type::Code::Int16:   long_out = (zend_long)k_i16_col->At(i);  return 1;
+                    case Type::Code::UInt16:  long_out = (zend_long)k_u16_col->At(i);  return 1;
+                    case Type::Code::Int8:    long_out = (zend_long)k_i8_col->At(i);   return 1;
+                    case Type::Code::UInt8:   long_out = (zend_long)k_u8_col->At(i);   return 1;
+                    case Type::Code::Float32: dbl_out  = (double)k_f32_col->At(i);     return 2;
+                    case Type::Code::Float64: dbl_out  = (double)k_f64_col->At(i);     return 2;
+                    case Type::Code::UUID: {
+                        UUID u = k_uuid_col->At(i);
+                        char buf[37];
+                        int blen = format_uuid(u, (fetch_mode & SC_FETCH_UUID_WITH_DASHES) != 0,
+                                               buf, sizeof(buf));
+                        str_buf.assign(buf, blen);
+                        return 0;
+                    }
+                    default:
+                        throw std::runtime_error("Map read: unsupported key type " + key_type_ref->GetName());
+                }
+            };
+
+            /* Keep floating map keys stable across LC_NUMERIC locales. */
+            auto fmtFloatKey = [](double dk, char *buf, size_t bufsz) -> int {
+                php_gcvt(dk, 17, '.', 'e', buf);
+                (void)bufsz;
+                return (int)strlen(buf);
+            };
+
+            auto rejectLossyKey = [&]() {
+                throw std::runtime_error(
+                    "Map decoding would collapse two entries onto the same PHP "
+                    "array key; pass ClickHouse::MAP_AS_PAIRS for an ordered "
+                    "lossless result");
+            };
+            /* Canonical decimal strings become integer keys. Use _add: _add_new
+             * bypasses duplicate checks and can create multiple buckets for one key. */
+            auto symtableAdd = [](HashTable *ht, const char *key, size_t len,
+                                  zval *value) -> zval * {
+                zend_ulong numeric_index;
+                if (ZEND_HANDLE_NUMERIC_STR(key, len, numeric_index)) {
+                    return zend_hash_index_add(ht, numeric_index, value);
+                }
+                return zend_hash_str_add(ht, key, len, value);
+            };
+            auto insertValue = [&](int kkind, const std::string &sb,
+                                   zend_long lk, double dk, zval *value) {
+                HashTable *map_ht = Z_ARRVAL_P(map_zv);
+                zval *inserted = nullptr;
+                if (kkind == 0) {
+                    inserted = symtableAdd(map_ht, sb.data(), sb.size(), value);
+                } else if (kkind == 1) {
+                    inserted = zend_hash_index_add(map_ht, (zend_ulong)lk, value);
+                } else {
+                    char kbuf[64];
+                    int klen = fmtFloatKey(dk, kbuf, sizeof(kbuf));
+                    inserted = symtableAdd(map_ht, kbuf, (size_t)klen, value);
+                }
+                if (!inserted) {
+                    zval_ptr_dtor(value);
+                    rejectLossyKey();
+                }
+            };
+
+            auto addStrL = [&](int kkind, const std::string &sb, zend_long lk, double dk,
+                               const char *vptr, size_t vlen) {
+                zval value;
+                ZVAL_STRINGL(&value, vptr, vlen);
+                insertValue(kkind, sb, lk, dk, &value);
+            };
+            auto addLong = [&](int kkind, const std::string &sb, zend_long lk, double dk, zend_long lv) {
+                zval value;
+                ZVAL_LONG(&value, lv);
+                insertValue(kkind, sb, lk, dk, &value);
+            };
+            auto addDbl = [&](int kkind, const std::string &sb, zend_long lk, double dk, double dv) {
+                zval value;
+                ZVAL_DOUBLE(&value, dv);
+                insertValue(kkind, sb, lk, dk, &value);
+            };
+            auto addSigned = [&](int kkind, const std::string &sb, zend_long lk,
+                                 double dk, int64_t value) {
+                if (value >= (int64_t)ZEND_LONG_MIN &&
+                    value <= (int64_t)ZEND_LONG_MAX) {
+                    addLong(kkind, sb, lk, dk, (zend_long)value);
+                    return;
+                }
+                char buf[32];
+                int len = snprintf(buf, sizeof(buf), "%" PRId64, value);
+                addStrL(kkind, sb, lk, dk, buf, len);
+            };
+            auto addUnsigned = [&](int kkind, const std::string &sb, zend_long lk,
+                                   double dk, uint64_t value) {
+                if (value <= (uint64_t)ZEND_LONG_MAX) {
+                    addLong(kkind, sb, lk, dk, (zend_long)value);
+                    return;
+                }
+                char buf[32];
+                int len = snprintf(buf, sizeof(buf), "%" PRIu64, value);
+                addStrL(kkind, sb, lk, dk, buf, len);
+            };
+
+            /* Reuse key buffer capacity. ColumnMap has no offset accessor to avoid GetAsColumn. */
+            for (size_t i = 0; i < entry_count; ++i) {
+                zend_long long_key = 0;
+                double dbl_key = 0.0;
+                int kkind = decodeKey(i, str_key_buf, long_key, dbl_key);
+
+                if (value_code == Type::Code::String) {
+                    std::string_view vv = (*v_str_col)[i];
+                    addStrL(kkind, str_key_buf, long_key, dbl_key, vv.data(), vv.length());
+                } else if (value_code == Type::Code::UInt64) {
+                    addUnsigned(kkind, str_key_buf, long_key, dbl_key,
+                                (uint64_t)v_u64_col->At(i));
+                } else if (value_code == Type::Code::Int64
+                        || value_code == Type::Code::Int32 || value_code == Type::Code::UInt32
+                        || value_code == Type::Code::Int16 || value_code == Type::Code::UInt16
+                        || value_code == Type::Code::Int8  || value_code == Type::Code::UInt8) {
+                    switch (value_code) {
+                        case Type::Code::Int64:
+                            addSigned(kkind, str_key_buf, long_key, dbl_key,
+                                      (int64_t)v_i64_col->At(i));
+                            break;
+                        case Type::Code::Int32:
+                            addSigned(kkind, str_key_buf, long_key, dbl_key,
+                                      (int64_t)v_i32_col->At(i));
+                            break;
+                        case Type::Code::UInt32:
+                            addUnsigned(kkind, str_key_buf, long_key, dbl_key,
+                                        (uint64_t)v_u32_col->At(i));
+                            break;
+                        case Type::Code::Int16:
+                            addLong(kkind, str_key_buf, long_key, dbl_key,
+                                    (zend_long)v_i16_col->At(i));
+                            break;
+                        case Type::Code::UInt16:
+                            addLong(kkind, str_key_buf, long_key, dbl_key,
+                                    (zend_long)v_u16_col->At(i));
+                            break;
+                        case Type::Code::Int8:
+                            addLong(kkind, str_key_buf, long_key, dbl_key,
+                                    (zend_long)v_i8_col->At(i));
+                            break;
+                        case Type::Code::UInt8:
+                            addLong(kkind, str_key_buf, long_key, dbl_key,
+                                    (zend_long)v_u8_col->At(i));
+                            break;
+                        default: break;
+                    }
+                } else if (value_code == Type::Code::Float64 || value_code == Type::Code::Float32) {
+                    double dv = (value_code == Type::Code::Float64)
+                        ? (double)v_f64_col->At(i)
+                        : (double)v_f32_col->At(i);
+                    addDbl(kkind, str_key_buf, long_key, dbl_key, dv);
+                } else if (value_code == Type::Code::UUID) {
+                    UUID u = v_uuid_col->At(i);
+                    char buf[37];
+                    int blen = format_uuid(u, (fetch_mode & SC_FETCH_UUID_WITH_DASHES) != 0,
+                                           buf, sizeof(buf));
+                    addStrL(kkind, str_key_buf, long_key, dbl_key, buf, blen);
+                } else {
+                    throw std::runtime_error("Map read: unsupported value type " + value_type_ref->GetName());
+                }
+            }
+
+            /* Past every throwing step; ownership transfers to arr below. */
             map_guard.z = nullptr;
             if (is_array) {
                 add_next_index_zval(arr, map_zv);
@@ -3307,283 +3621,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
                 add_assoc_zval_ex(arr, column_name.c_str(), column_name.length(), map_zv);
                 ZVAL_UNDEF(map_zv);
             }
-            break;
-        }
-
-        /* Cast once per Map cell; the entry loop only changes the index. */
-        std::shared_ptr<ColumnString>  k_str_col;
-        std::shared_ptr<ColumnInt64>   k_i64_col;
-        std::shared_ptr<ColumnUInt64>  k_u64_col;
-        std::shared_ptr<ColumnInt32>   k_i32_col;
-        std::shared_ptr<ColumnUInt32>  k_u32_col;
-        std::shared_ptr<ColumnInt16>   k_i16_col;
-        std::shared_ptr<ColumnUInt16>  k_u16_col;
-        std::shared_ptr<ColumnInt8>    k_i8_col;
-        std::shared_ptr<ColumnUInt8>   k_u8_col;
-        std::shared_ptr<ColumnFloat32> k_f32_col;
-        std::shared_ptr<ColumnFloat64> k_f64_col;
-        std::shared_ptr<ColumnUUID>    k_uuid_col;
-        switch (key_code) {
-            case Type::Code::String:  k_str_col  = as_or_throw<ColumnString>(keys_any, "Map key String"); break;
-            case Type::Code::Int64:   k_i64_col  = as_or_throw<ColumnInt64>(keys_any, "Map key Int64"); break;
-            case Type::Code::UInt64:  k_u64_col  = as_or_throw<ColumnUInt64>(keys_any, "Map key UInt64"); break;
-            case Type::Code::Int32:   k_i32_col  = as_or_throw<ColumnInt32>(keys_any, "Map key Int32"); break;
-            case Type::Code::UInt32:  k_u32_col  = as_or_throw<ColumnUInt32>(keys_any, "Map key UInt32"); break;
-            case Type::Code::Int16:   k_i16_col  = as_or_throw<ColumnInt16>(keys_any, "Map key Int16"); break;
-            case Type::Code::UInt16:  k_u16_col  = as_or_throw<ColumnUInt16>(keys_any, "Map key UInt16"); break;
-            case Type::Code::Int8:    k_i8_col   = as_or_throw<ColumnInt8>(keys_any, "Map key Int8"); break;
-            case Type::Code::UInt8:   k_u8_col   = as_or_throw<ColumnUInt8>(keys_any, "Map key UInt8"); break;
-            case Type::Code::Float32: k_f32_col  = as_or_throw<ColumnFloat32>(keys_any, "Map key Float32"); break;
-            case Type::Code::Float64: k_f64_col  = as_or_throw<ColumnFloat64>(keys_any, "Map key Float64"); break;
-            case Type::Code::UUID:    k_uuid_col = as_or_throw<ColumnUUID>(keys_any, "Map key UUID"); break;
-            default:
-                throw std::runtime_error("Map read: unsupported key type " + key_type_ref->GetName());
-        }
-
-        std::shared_ptr<ColumnString>  v_str_col;
-        std::shared_ptr<ColumnInt64>   v_i64_col;
-        std::shared_ptr<ColumnUInt64>  v_u64_col;
-        std::shared_ptr<ColumnInt32>   v_i32_col;
-        std::shared_ptr<ColumnUInt32>  v_u32_col;
-        std::shared_ptr<ColumnInt16>   v_i16_col;
-        std::shared_ptr<ColumnUInt16>  v_u16_col;
-        std::shared_ptr<ColumnInt8>    v_i8_col;
-        std::shared_ptr<ColumnUInt8>   v_u8_col;
-        std::shared_ptr<ColumnFloat32> v_f32_col;
-        std::shared_ptr<ColumnFloat64> v_f64_col;
-        std::shared_ptr<ColumnUUID>    v_uuid_col;
-        switch (value_code) {
-            case Type::Code::String:  v_str_col  = as_or_throw<ColumnString>(values_any, "Map value String"); break;
-            case Type::Code::Int64:   v_i64_col  = as_or_throw<ColumnInt64>(values_any, "Map value Int64"); break;
-            case Type::Code::UInt64:  v_u64_col  = as_or_throw<ColumnUInt64>(values_any, "Map value UInt64"); break;
-            case Type::Code::Int32:   v_i32_col  = as_or_throw<ColumnInt32>(values_any, "Map value Int32"); break;
-            case Type::Code::UInt32:  v_u32_col  = as_or_throw<ColumnUInt32>(values_any, "Map value UInt32"); break;
-            case Type::Code::Int16:   v_i16_col  = as_or_throw<ColumnInt16>(values_any, "Map value Int16"); break;
-            case Type::Code::UInt16:  v_u16_col  = as_or_throw<ColumnUInt16>(values_any, "Map value UInt16"); break;
-            case Type::Code::Int8:    v_i8_col   = as_or_throw<ColumnInt8>(values_any, "Map value Int8"); break;
-            case Type::Code::UInt8:   v_u8_col   = as_or_throw<ColumnUInt8>(values_any, "Map value UInt8"); break;
-            case Type::Code::Float32: v_f32_col  = as_or_throw<ColumnFloat32>(values_any, "Map value Float32"); break;
-            case Type::Code::Float64: v_f64_col  = as_or_throw<ColumnFloat64>(values_any, "Map value Float64"); break;
-            case Type::Code::UUID:    v_uuid_col = as_or_throw<ColumnUUID>(values_any, "Map value UUID"); break;
-            default:
-                throw std::runtime_error("Map read: unsupported value type " + value_type_ref->GetName());
-        }
-
-        // PHP keys are strings/integers; render floating keys as canonical strings.
-        auto signedKey = [](int64_t value, std::string &str_buf,
-                            zend_long &long_out) -> int {
-            if (value >= (int64_t)ZEND_LONG_MIN &&
-                value <= (int64_t)ZEND_LONG_MAX) {
-                long_out = (zend_long)value;
-                return 1;
-            }
-            char buf[32];
-            int len = snprintf(buf, sizeof(buf), "%" PRId64, value);
-            str_buf.assign(buf, len);
-            return 0;
-        };
-        auto unsignedKey = [](uint64_t value, std::string &str_buf,
-                              zend_long &long_out) -> int {
-            if (value <= (uint64_t)ZEND_LONG_MAX) {
-                long_out = (zend_long)value;
-                return 1;
-            }
-            char buf[32];
-            int len = snprintf(buf, sizeof(buf), "%" PRIu64, value);
-            str_buf.assign(buf, len);
-            return 0;
-        };
-        auto decodeKey = [&](size_t i, std::string &str_buf, zend_long &long_out, double &dbl_out) -> int {
-            // Returns 0 = string, 1 = long, 2 = double-as-string.
-            switch (key_code) {
-                case Type::Code::String: {
-                    std::string_view kv = (*k_str_col)[i];
-                    str_buf.assign(kv.data(), kv.length());
-                    return 0;
-                }
-                case Type::Code::Int64:
-                    return signedKey((int64_t)k_i64_col->At(i), str_buf, long_out);
-                case Type::Code::UInt64:
-                    return unsignedKey((uint64_t)k_u64_col->At(i), str_buf, long_out);
-                case Type::Code::Int32:
-                    return signedKey((int64_t)k_i32_col->At(i), str_buf, long_out);
-                case Type::Code::UInt32:
-                    return unsignedKey((uint64_t)k_u32_col->At(i), str_buf, long_out);
-                case Type::Code::Int16:   long_out = (zend_long)k_i16_col->At(i);  return 1;
-                case Type::Code::UInt16:  long_out = (zend_long)k_u16_col->At(i);  return 1;
-                case Type::Code::Int8:    long_out = (zend_long)k_i8_col->At(i);   return 1;
-                case Type::Code::UInt8:   long_out = (zend_long)k_u8_col->At(i);   return 1;
-                case Type::Code::Float32: dbl_out  = (double)k_f32_col->At(i);     return 2;
-                case Type::Code::Float64: dbl_out  = (double)k_f64_col->At(i);     return 2;
-                case Type::Code::UUID: {
-                    UUID u = k_uuid_col->At(i);
-                    char buf[37];
-                    int blen = format_uuid(u, (fetch_mode & SC_FETCH_UUID_WITH_DASHES) != 0,
-                                           buf, sizeof(buf));
-                    str_buf.assign(buf, blen);
-                    return 0;
-                }
-                default:
-                    throw std::runtime_error("Map read: unsupported key type " + key_type_ref->GetName());
-            }
-        };
-
-        /* Keep floating map keys stable across LC_NUMERIC locales. */
-        auto fmtFloatKey = [](double dk, char *buf, size_t bufsz) -> int {
-            php_gcvt(dk, 17, '.', 'e', buf);
-            (void)bufsz;
-            return (int)strlen(buf);
-        };
-
-        auto rejectLossyKey = [&]() {
-            throw std::runtime_error(
-                "Map decoding would collapse two entries onto the same PHP "
-                "array key; pass ClickHouse::MAP_AS_PAIRS for an ordered "
-                "lossless result");
-        };
-        /* Canonical decimal strings become integer keys. Use _add: _add_new
-         * bypasses duplicate checks and can create multiple buckets for one key. */
-        auto symtableAdd = [](HashTable *ht, const char *key, size_t len,
-                              zval *value) -> zval * {
-            zend_ulong numeric_index;
-            if (ZEND_HANDLE_NUMERIC_STR(key, len, numeric_index)) {
-                return zend_hash_index_add(ht, numeric_index, value);
-            }
-            return zend_hash_str_add(ht, key, len, value);
-        };
-        auto insertValue = [&](int kkind, const std::string &sb,
-                               zend_long lk, double dk, zval *value) {
-            HashTable *map_ht = Z_ARRVAL_P(map_zv);
-            zval *inserted = nullptr;
-            if (kkind == 0) {
-                inserted = symtableAdd(map_ht, sb.data(), sb.size(), value);
-            } else if (kkind == 1) {
-                inserted = zend_hash_index_add(map_ht, (zend_ulong)lk, value);
-            } else {
-                char kbuf[64];
-                int klen = fmtFloatKey(dk, kbuf, sizeof(kbuf));
-                inserted = symtableAdd(map_ht, kbuf, (size_t)klen, value);
-            }
-            if (!inserted) {
-                zval_ptr_dtor(value);
-                rejectLossyKey();
-            }
-        };
-
-        auto addStrL = [&](int kkind, const std::string &sb, zend_long lk, double dk,
-                           const char *vptr, size_t vlen) {
-            zval value;
-            ZVAL_STRINGL(&value, vptr, vlen);
-            insertValue(kkind, sb, lk, dk, &value);
-        };
-        auto addLong = [&](int kkind, const std::string &sb, zend_long lk, double dk, zend_long lv) {
-            zval value;
-            ZVAL_LONG(&value, lv);
-            insertValue(kkind, sb, lk, dk, &value);
-        };
-        auto addDbl = [&](int kkind, const std::string &sb, zend_long lk, double dk, double dv) {
-            zval value;
-            ZVAL_DOUBLE(&value, dv);
-            insertValue(kkind, sb, lk, dk, &value);
-        };
-        auto addSigned = [&](int kkind, const std::string &sb, zend_long lk,
-                             double dk, int64_t value) {
-            if (value >= (int64_t)ZEND_LONG_MIN &&
-                value <= (int64_t)ZEND_LONG_MAX) {
-                addLong(kkind, sb, lk, dk, (zend_long)value);
-                return;
-            }
-            char buf[32];
-            int len = snprintf(buf, sizeof(buf), "%" PRId64, value);
-            addStrL(kkind, sb, lk, dk, buf, len);
-        };
-        auto addUnsigned = [&](int kkind, const std::string &sb, zend_long lk,
-                               double dk, uint64_t value) {
-            if (value <= (uint64_t)ZEND_LONG_MAX) {
-                addLong(kkind, sb, lk, dk, (zend_long)value);
-                return;
-            }
-            char buf[32];
-            int len = snprintf(buf, sizeof(buf), "%" PRIu64, value);
-            addStrL(kkind, sb, lk, dk, buf, len);
-        };
-
-        /* Reuse key buffer capacity. ColumnMap has no offset accessor to avoid GetAsColumn. */
-        std::string str_key_buf;
-        for (size_t i = 0; i < entry_count; ++i) {
-            zend_long long_key = 0;
-            double dbl_key = 0.0;
-            int kkind = decodeKey(i, str_key_buf, long_key, dbl_key);
-
-            if (value_code == Type::Code::String) {
-                std::string_view vv = (*v_str_col)[i];
-                addStrL(kkind, str_key_buf, long_key, dbl_key, vv.data(), vv.length());
-            } else if (value_code == Type::Code::UInt64) {
-                addUnsigned(kkind, str_key_buf, long_key, dbl_key,
-                            (uint64_t)v_u64_col->At(i));
-            } else if (value_code == Type::Code::Int64
-                    || value_code == Type::Code::Int32 || value_code == Type::Code::UInt32
-                    || value_code == Type::Code::Int16 || value_code == Type::Code::UInt16
-                    || value_code == Type::Code::Int8  || value_code == Type::Code::UInt8) {
-                switch (value_code) {
-                    case Type::Code::Int64:
-                        addSigned(kkind, str_key_buf, long_key, dbl_key,
-                                  (int64_t)v_i64_col->At(i));
-                        break;
-                    case Type::Code::Int32:
-                        addSigned(kkind, str_key_buf, long_key, dbl_key,
-                                  (int64_t)v_i32_col->At(i));
-                        break;
-                    case Type::Code::UInt32:
-                        addUnsigned(kkind, str_key_buf, long_key, dbl_key,
-                                    (uint64_t)v_u32_col->At(i));
-                        break;
-                    case Type::Code::Int16:
-                        addLong(kkind, str_key_buf, long_key, dbl_key,
-                                (zend_long)v_i16_col->At(i));
-                        break;
-                    case Type::Code::UInt16:
-                        addLong(kkind, str_key_buf, long_key, dbl_key,
-                                (zend_long)v_u16_col->At(i));
-                        break;
-                    case Type::Code::Int8:
-                        addLong(kkind, str_key_buf, long_key, dbl_key,
-                                (zend_long)v_i8_col->At(i));
-                        break;
-                    case Type::Code::UInt8:
-                        addLong(kkind, str_key_buf, long_key, dbl_key,
-                                (zend_long)v_u8_col->At(i));
-                        break;
-                    default: break;
-                }
-            } else if (value_code == Type::Code::Float64 || value_code == Type::Code::Float32) {
-                double dv = (value_code == Type::Code::Float64)
-                    ? (double)v_f64_col->At(i)
-                    : (double)v_f32_col->At(i);
-                addDbl(kkind, str_key_buf, long_key, dbl_key, dv);
-            } else if (value_code == Type::Code::UUID) {
-                UUID u = v_uuid_col->At(i);
-                char buf[37];
-                int blen = format_uuid(u, (fetch_mode & SC_FETCH_UUID_WITH_DASHES) != 0,
-                                       buf, sizeof(buf));
-                addStrL(kkind, str_key_buf, long_key, dbl_key, buf, blen);
-            } else {
-                throw std::runtime_error("Map read: unsupported value type " + value_type_ref->GetName());
-            }
-        }
-
-        /* Past every throwing step; ownership transfers to arr below. */
-        map_guard.z = nullptr;
-        if (is_array) {
-            add_next_index_zval(arr, map_zv);
-            ZVAL_UNDEF(map_zv);
-        } else if (fetch_mode & SC_FETCH_ONE) {
-            ZVAL_COPY_VALUE(arr, map_zv);
-            ZVAL_UNDEF(map_zv);
-        } else {
-            add_assoc_zval_ex(arr, column_name.c_str(), column_name.length(), map_zv);
-            ZVAL_UNDEF(map_zv);
-        }
+        });
         break;
     }
 

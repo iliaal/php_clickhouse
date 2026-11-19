@@ -90,6 +90,28 @@ PHP_CONFIG=/path/to/php-zts/bin/php-config \
   ./scripts/test-zts-request-thread.sh modules/clickhouse.so
 ```
 
+The same cell runs `scripts/test-zts-fatal-state.sh`, which needs the
+ClickHouse server from the CLICKHOUSE_* variables. It runs two requests on
+one worker thread: the first ends in a fatal error inside `insert()`
+conversion, and the second checks that no conversion state carried over.
+Run it locally the same way, with the server variables set.
+
+### Fatal-error leak regressions
+
+Some tests guard against native memory leaked by a fatal error. Their output
+matches either way, so the ASan CI job also runs them through
+`scripts/test-fatal-leaks.sh` with LeakSanitizer enabled:
+
+```sh
+./scripts/test-fatal-leaks.sh /path/to/asan/php modules/clickhouse.so \
+  tests/277_select_memory_limit_deferred_oom.phpt tests/278_fatal_in_row_callback.phpt \
+  tests/285_select_memory_limit_fatal_client_usable.phpt \
+  tests/286_map_memory_limit_fatal_client_usable.phpt
+```
+
+Add a test to that list in `.github/workflows/tests.yml` when its regression
+is a leak.
+
 ## Code style
 
 - Two-space indent for PHP, four-space for C/C++.

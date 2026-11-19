@@ -11,6 +11,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Prebuilt PHP 8.6 binaries for Linux (glibc x86_64, arm64) and Windows; macOS PHP 8.6 installs build from source.
 
+### Fixed
+
+- A fatal error during a query no longer leaves the client stuck or leaks
+  native memory. Affected fatal errors happen inside a row, progress,
+  profile, or verbose callback, inside `__toString()` or `jsonSerialize()`
+  while `insert()`, `insertAssoc()`, `write()`, or
+  `selectWithExternalData()` convert values, or inside a userland stream
+  wrapper that `insertFromStream()` reads. Before, every later call on that
+  client, such as calls from shutdown functions, threw "Reentrant operation:
+  another query is already in progress". A fatal error in `insert()`
+  conversion of 200,000 rows also leaked about 5.9 MB. Before PHP 8.5, a
+  `memory_limit` fatal error while `select()` and the streaming readers
+  converted rows leaked up to about 1.9 MB of native result data.
+- `selectWithExternalData()` and `selectStream()` iteration no longer inherit
+  NULL or nesting-depth state from a conversion that a fatal error, or a
+  reentrant call from `__toString()`, left unfinished. Before, `NULL` was
+  accepted for a non-Nullable external column and nested results failed with
+  "nested-type depth exceeds limit". The state is per thread, so under
+  FrankenPHP and other threaded SAPIs it carried into later requests.
+- PHP 8.5 and later: `select()`, `selectStatement()`, and
+  `selectWithExternalData()` stop converting rows once the result exceeds
+  `memory_limit` and report the "Allowed memory size exhausted" fatal error.
+  Before, conversion continued until PHP hit the hard limit and killed the
+  process (exit 137 under FrankenPHP).
+
 ## [0.13.2] - 2026-10-26
 
 ### Fixed
