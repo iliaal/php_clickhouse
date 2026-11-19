@@ -2806,6 +2806,7 @@ PHP_METHOD(ClickHouse, selectWithExternalData)
     ext_tables.reserve(externals_count);
 
     try {
+        InsertConversionScopeGuard conversion_scope;
         zval *entry;
         ZEND_HASH_FOREACH_VAL(externals_ht, entry) {
             std::string nm;
@@ -5099,6 +5100,7 @@ PHP_METHOD(ClickHouseRowIterator, current)
     /* convertToZval throws on unsupported or malformed server-side types;
      * letting the exception cross the C Zend dispatcher is UB. */
     static const std::string empty_name;
+    ConvertDepthScopeGuard depth_scope;
     try {
         for (size_t col = 0; col < col_count; ++col) {
             const std::string &name = (col < iter->column_names.size())

@@ -11,6 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Prebuilt PHP 8.6 binaries for Linux (glibc x86_64, arm64) and Windows; macOS PHP 8.6 installs build from source.
 
+### Fixed
+
+- `selectWithExternalData()` and `selectStream()` iteration no longer inherit
+  NULL or nesting-depth state from a conversion that a fatal error, or a
+  reentrant call from `__toString()`, left unfinished. Before, `NULL` was
+  accepted for a non-Nullable external column and nested results failed with
+  "nested-type depth exceeds limit". The state is per thread, so under
+  FrankenPHP and other threaded SAPIs it carried into later requests.
+
 ## [0.13.2] - 2026-10-26
 
 ### Fixed
