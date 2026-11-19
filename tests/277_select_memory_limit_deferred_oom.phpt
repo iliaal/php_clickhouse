@@ -3,7 +3,11 @@ select() past memory_limit raises the memory error instead of reaching the hard 
 --EXTENSIONS--
 clickhouse
 --SKIPIF--
-<?php require __DIR__ . "/_clickhouse.inc"; clickhouse_skip_if_no_server(); ?>
+<?php
+require __DIR__ . "/_clickhouse.inc";
+clickhouse_skip_if_no_server();
+clickhouse_skip_unless_shutdown_after_oom();
+?>
 --INI--
 memory_limit=32M
 --FILE--

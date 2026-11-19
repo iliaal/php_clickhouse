@@ -183,8 +183,14 @@ jobs:
             | tee "$RUNNER_TEMP/phpt.out"
           # 232 needs #[\SensitiveParameter], which PHP 8.2 introduced.
           version_skips=$(php -r 'echo PHP_VERSION_ID < 80200 ? "tests/232_construct_sensitive_parameter.phpt" : "";')
+          # setup-php's 7.4-8.1 builds end the process on a memory_limit
+          # error without running shutdown functions, which these tests need.
+          oom_skips=""
+          if [ "$(php -n -d display_errors=0 tests/_oom_shutdown_probe.php 2>&1)" != ok ]; then
+            oom_skips="tests/277_select_memory_limit_deferred_oom.phpt tests/285_select_memory_limit_fatal_client_usable.phpt tests/286_map_memory_limit_fatal_client_usable.phpt"
+          fi
           scripts/assert-phpt-summary.sh "$RUNNER_TEMP/phpt.out" \
-            $version_skips \
+            $version_skips $oom_skips \
             tests/027.phpt tests/064.phpt tests/070.phpt tests/188.phpt \
             tests/207_reentrant_ssl_ca_files.phpt \
             tests/209_windows_x86_config_bounds.phpt \

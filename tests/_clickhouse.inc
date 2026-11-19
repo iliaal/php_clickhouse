@@ -138,3 +138,18 @@ function clickhouse_skip_if_no_tls_server(): void
 /* Back-compat aliases. Old function names kept for one release. */
 function seasclick_test_config(): array { return clickhouse_test_config(); }
 function seasclick_skip_if_no_server(): void { clickhouse_skip_if_no_server(); }
+
+/**
+ * For use inside --SKIPIF-- sections of tests that hit memory_limit and then
+ * check the client from a shutdown function.
+ */
+function clickhouse_skip_unless_shutdown_after_oom(): void
+{
+    $php = getenv("TEST_PHP_EXECUTABLE") ?: PHP_BINARY;
+    $out = shell_exec(escapeshellarg($php) . " -n -d display_errors=0 "
+        . escapeshellarg(__DIR__ . "/_oom_shutdown_probe.php") . " 2>&1");
+    if ($out !== "ok") {
+        print "skip shutdown functions do not run after a memory_limit error on this PHP build";
+        exit;
+    }
+}
