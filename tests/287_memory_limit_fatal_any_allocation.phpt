@@ -7,6 +7,7 @@ clickhouse
 require __DIR__ . "/_clickhouse.inc";
 clickhouse_skip_if_no_server();
 clickhouse_skip_unless_shutdown_after_oom();
+clickhouse_skip_unless_tracked_allocator();
 if (!function_exists("proc_open")) {
     print "skip proc_open unavailable";
 } elseif (!is_readable("/proc/self/maps")) {

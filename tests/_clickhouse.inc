@@ -153,3 +153,18 @@ function clickhouse_skip_unless_shutdown_after_oom(): void
         exit;
     }
 }
+
+/**
+ * For use inside --SKIPIF-- sections of tests whose child processes run with
+ * the tracked allocator, which PHP 8.0 introduced.
+ */
+function clickhouse_skip_unless_tracked_allocator(): void
+{
+    $php = getenv("TEST_PHP_EXECUTABLE") ?: PHP_BINARY;
+    $out = shell_exec("USE_ZEND_ALLOC=0 USE_TRACKED_ALLOC=1 " . escapeshellarg($php)
+        . " -n -d display_errors=0 " . escapeshellarg(__DIR__ . "/_oom_shutdown_probe.php") . " 2>&1");
+    if ($out !== "ok") {
+        print "skip the tracked allocator does not enforce memory_limit on this PHP build";
+        exit;
+    }
+}

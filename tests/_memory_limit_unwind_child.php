@@ -23,6 +23,8 @@ if ($mode === "prepare") {
     });
     $params = ["a" => str_repeat("p", 100)];
     $c->select("SELECT 1 AS x, {a:String} AS y", $params);
+    /* PHP 8.0 raises a memory_limit below 2 MiB to 2 MiB. */
+    $pad = str_repeat("p", 3 << 20);
     gc_collect_cycles();
     /* $shift bytes of headroom run out before, during, or after the
      * allocations select() makes outside of row conversion. */
