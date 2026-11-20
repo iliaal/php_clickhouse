@@ -15,22 +15,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A fatal error during a query no longer leaves the client stuck or leaks
   native memory. Affected fatal errors happen inside a row, progress,
-  profile, or verbose callback, inside `__toString()` or `jsonSerialize()`
+  profile, or verbose callback; inside `__toString()` or `jsonSerialize()`
   while `insert()`, `insertAssoc()`, `write()`, or
-  `selectWithExternalData()` convert values, or inside a userland stream
-  wrapper that `insertFromStream()` reads. Before, every later call on that
+  `selectWithExternalData()` convert values; inside a userland stream
+  wrapper that `insertFromStream()` reads; or on reaching `memory_limit`
+  during `select()`, `selectStatement()`, `selectWithExternalData()`,
+  `selectStreamCallback()`, or `selectToStream()`, or while a
+  `selectStream()` iterator converts rows. Before, every later call on that
   client, such as calls from shutdown functions, threw "Reentrant operation:
   another query is already in progress". A fatal error in `insert()`
-  conversion of 200,000 rows also leaked about 5.9 MB. Before PHP 8.5, a
-  `memory_limit` fatal error while `select()` and the streaming readers
-  converted rows leaked up to about 1.9 MB of native result data.
+  conversion of 200,000 rows also leaked about 5.9 MB. On PHP releases that
+  raise the `memory_limit` error immediately (before 8.2.35, 8.3.36, 8.4.27,
+  and 8.5.12), a `memory_limit` fatal error while `select()` and the
+  streaming readers converted rows leaked up to about 1.9 MB of native result
+  data.
 - `selectWithExternalData()` and `selectStream()` iteration no longer inherit
   NULL or nesting-depth state from a conversion that a fatal error, or a
   reentrant call from `__toString()`, left unfinished. Before, `NULL` was
   accepted for a non-Nullable external column and nested results failed with
   "nested-type depth exceeds limit". The state is per thread, so under
   FrankenPHP and other threaded SAPIs it carried into later requests.
-- PHP 8.5 and later: `select()`, `selectStatement()`, and
+- PHP 8.2.35, 8.3.36, 8.4.27, 8.5.12, 8.6.0, and later, which defer the
+  `memory_limit` error: `select()`, `selectStatement()`, and
   `selectWithExternalData()` stop converting rows once the result exceeds
   `memory_limit` and report the "Allowed memory size exhausted" fatal error.
   Before, conversion continued until PHP hit the hard limit and killed the

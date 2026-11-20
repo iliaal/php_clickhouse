@@ -115,6 +115,10 @@ void parseIdentifier(const char *s, size_t len, const char *what,
                      bool allow_dot, std::string *emit_out);
 void validateIdentifier(const char *s, size_t len, const char *what, bool allow_dot);
 void validateMetadataFilterName(const std::string &s, const char *what);
+/* Interned so that reading the property allocates nothing: connection
+ * recovery reads it while a fatal error is pending, when any allocation can
+ * raise another memory_limit error. */
+extern zend_string *clickhouse_database_prop;
 std::string currentDatabase(zval *this_obj);
 void runHelperSelect(zval *return_value, zval *this_obj,
                      const std::string &sql, zend_long fetch_mode);
@@ -134,23 +138,38 @@ void do_execute_into(zval *this_obj,
 /* Defines a ClickHouse method whose body runs between clickhouseMethodEnter()
  * and clickhouseMethodLeave(); the latter re-raises a bailout that PHP code
  * deferred until the body's C++ frames had unwound. */
-void clickhouseMethodEnter(int *saved_depth);
-void clickhouseMethodLeave(int saved_depth);
-ZEND_NORETURN void clickhouseMethodBailout(int saved_depth);
-#define CLICKHOUSE_METHOD(name) \
-    static void clickhouse_method_##name(INTERNAL_FUNCTION_PARAMETERS); \
-    PHP_METHOD(ClickHouse, name) \
+struct clickhouse_method_state {
+    int depth;
+    uint64_t invocation;
+    uint64_t outer;
+};
+void clickhouseMethodEnter(clickhouse_method_state *state);
+void clickhouseMethodLeave(const clickhouse_method_state *state);
+ZEND_NORETURN void clickhouseMethodBailout(const clickhouse_method_state *state);
+#define CLICKHOUSE_CLASS_METHOD(cls, name) \
+    static void clickhouse_method_##cls##_##name(INTERNAL_FUNCTION_PARAMETERS); \
+    PHP_METHOD(cls, name) \
     { \
-        int clickhouse_saved_depth; \
-        clickhouseMethodEnter(&clickhouse_saved_depth); \
+        clickhouse_method_state clickhouse_state; \
+        clickhouseMethodEnter(&clickhouse_state); \
         zend_try { \
-            clickhouse_method_##name(INTERNAL_FUNCTION_PARAM_PASSTHRU); \
+            clickhouse_method_##cls##_##name(INTERNAL_FUNCTION_PARAM_PASSTHRU); \
         } zend_catch { \
-            clickhouseMethodBailout(clickhouse_saved_depth); \
+            clickhouseMethodBailout(&clickhouse_state); \
         } zend_end_try(); \
-        clickhouseMethodLeave(clickhouse_saved_depth); \
+        clickhouseMethodLeave(&clickhouse_state); \
     } \
-    static void clickhouse_method_##name(INTERNAL_FUNCTION_PARAMETERS)
+    static void clickhouse_method_##cls##_##name(INTERNAL_FUNCTION_PARAMETERS)
+#define CLICKHOUSE_METHOD(name) CLICKHOUSE_CLASS_METHOD(ClickHouse, name)
+
+/* True when an operation failed: a PHP exception is set, or a fatal error is
+ * unwinding the enclosing ClickHouse method. Callers must not allocate PHP
+ * values in either case. */
+bool clickhouseBailoutPending();
+static inline bool clickhouseOperationFailed()
+{
+    return EG(exception) || clickhouseBailoutPending();
+}
 
 #endif /* PHP_CLICKHOUSE_INTERNAL_H */
 

@@ -3131,7 +3131,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
                         convertToZval(return_tmp, col, i, "array", 1, nested_mode);
                     }
                 } catch (...) {
-                    zval_ptr_dtor(return_tmp);
+                    discardPartialZval(return_tmp);
                     throw;
                 }
                 if (is_array)
@@ -3203,7 +3203,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
                     runPhpCode([&] { convertToZval(return_tmp, element, row, "tuple", 1, nested_mode); });
                 }
             } catch (...) {
-                zval_ptr_dtor(return_tmp);
+                discardPartialZval(return_tmp);
                 throw;
             }
             if (is_array)
@@ -3309,7 +3309,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             /* Free partial map output on throw before ownership transfers to the parent. */
             struct MapZvGuard {
                 zval *z;
-                ~MapZvGuard() { if (z) zval_ptr_dtor(z); }
+                ~MapZvGuard() { if (z) discardPartialZval(z); }
             } map_guard{map_zv};
 
             if (fetch_mode & SC_FETCH_MAP_AS_PAIRS) {
@@ -3328,7 +3328,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
                                       nested_mode | SC_FETCH_ONE);
                         add_next_index_zval(&pair, &value);
                     } catch (...) {
-                        zval_ptr_dtor(&pair);
+                        discardPartialZval(&pair);
                         throw;
                     }
                     add_next_index_zval(map_zv, &pair);

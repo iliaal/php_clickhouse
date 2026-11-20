@@ -63,6 +63,7 @@ using namespace clickhouse;
 using namespace std;
 
  zend_class_entry *clickhouse_ce, *clickhouse_exception_ce, *clickhouse_iter_ce, *clickhouse_statement_ce;
+zend_string *clickhouse_database_prop;
 
 /* A fatal error (zend_bailout) inside PHP code that runs under clickhouse-cpp
  * or conversion frames longjmps over them, skipping destructors: the library's
@@ -73,21 +74,42 @@ using namespace std;
  * there is no re-raise point, so the bailout keeps its native behavior. */
 static thread_local int g_method_depth = 0;
 static thread_local bool g_bailout_pending = false;
+/* Clients whose QueryActiveGuard is armed, each with the method invocation
+ * that armed it. A Fiber can suspend one query and arm another, so entries
+ * are not released in LIFO order. */
+struct ActiveQuery {
+    clickhouse_object *obj;
+    uint64_t owner;
+};
+static thread_local std::vector<ActiveQuery> g_active_queries;
+static thread_local uint64_t g_method_invocations = 0;
+static thread_local uint64_t g_current_method = 0;
 
 struct PhpBailoutPending : std::runtime_error {
     PhpBailoutPending() : std::runtime_error("PHP fatal error during a ClickHouse operation") {}
 };
 
-void clickhouseMethodEnter(int *saved_depth)
+void clickhouseMethodEnter(clickhouse_method_state *state)
 {
-    *saved_depth = g_method_depth;
+    if (UNEXPECTED(g_bailout_pending)) {
+        /* PHP code called this method while a fatal error unwinds an
+         * enclosing one; keep the fatal error going instead of dropping it. */
+        if (g_method_depth > 0) {
+            zend_bailout();
+        }
+        g_bailout_pending = false;
+    }
+    state->depth = g_method_depth;
+    state->outer = g_current_method;
+    state->invocation = ++g_method_invocations;
+    g_current_method = state->invocation;
     ++g_method_depth;
-    g_bailout_pending = false;
 }
 
-void clickhouseMethodLeave(int saved_depth)
+void clickhouseMethodLeave(const clickhouse_method_state *state)
 {
-    g_method_depth = saved_depth;
+    g_method_depth = state->depth;
+    g_current_method = state->outer;
     if (UNEXPECTED(g_bailout_pending)) {
         g_bailout_pending = false;
         zend_bailout();
@@ -95,13 +117,26 @@ void clickhouseMethodLeave(int saved_depth)
 }
 
 /* A bailout raised outside clickhouseRunPhpCode (memory_limit in the method
- * body) still unwinds the method natively; keep the depth exact for the next
- * caller on this thread. */
-ZEND_NORETURN void clickhouseMethodBailout(int saved_depth)
+ * body) still unwinds the method natively, skipping the QueryActiveGuard
+ * destructors; release the clients this invocation held and keep the depth
+ * exact for the next caller on this thread. */
+ZEND_NORETURN void clickhouseMethodBailout(const clickhouse_method_state *state)
 {
-    g_method_depth = saved_depth;
+    for (size_t i = g_active_queries.size(); i-- > 0;) {
+        if (g_active_queries[i].owner == state->invocation) {
+            g_active_queries[i].obj->query_active = false;
+            g_active_queries.erase(g_active_queries.begin() + i);
+        }
+    }
+    g_method_depth = state->depth;
+    g_current_method = state->outer;
     g_bailout_pending = false;
     zend_bailout();
+}
+
+bool clickhouseBailoutPending()
+{
+    return g_bailout_pending;
 }
 
 /* A C++ exception must not leave the zend_try block: EG(bailout) is restored
@@ -707,6 +742,8 @@ PHP_RINIT_FUNCTION(clickhouse)
 #endif
     g_method_depth = 0;
     g_bailout_pending = false;
+    g_active_queries.clear();
+    g_current_method = 0;
     return SUCCESS;
 }
 /* }}} */
@@ -720,6 +757,7 @@ PHP_MINIT_FUNCTION(clickhouse)
 #endif
 
     clickhouse_ce = register_class_ClickHouse();
+    clickhouse_database_prop = zend_string_init_interned("database", sizeof("database") - 1, 1);
     clickhouse_mark_not_serializable(clickhouse_ce);
     clickhouse_ce->create_object = clickhouse_create_object;
 #if PHP_VERSION_ID >= 80400
@@ -2080,10 +2118,21 @@ struct QueryActiveGuard {
                 "instance from inside row / progress / profile / verbose "
                 "callbacks.");
         }
+        g_active_queries.push_back({obj, g_current_method});
         obj->query_active = true;
         armed = true;
     }
-    ~QueryActiveGuard() { if (armed) obj->query_active = false; }
+    ~QueryActiveGuard() {
+        if (armed) {
+            obj->query_active = false;
+            for (size_t i = g_active_queries.size(); i-- > 0;) {
+                if (g_active_queries[i].obj == obj) {
+                    g_active_queries.erase(g_active_queries.begin() + i);
+                    break;
+                }
+            }
+        }
+    }
     QueryActiveGuard(const QueryActiveGuard&) = delete;
     QueryActiveGuard& operator=(const QueryActiveGuard&) = delete;
 };
@@ -2603,9 +2652,11 @@ void do_select_into(zval *out, zval *this_obj,
                 for (size_t row = 0; row < block.GetRowCount(); ++row)
                 {
 #ifdef ZEND_HAS_OOM
-                    /* PHP 8.5 defers the memory_limit error to the next VM interrupt
-                     * and _exit()s the process at the hard limit. Stop converting so
-                     * the deferred error is raised when the method returns. */
+                    /* PHP releases that define ZEND_HAS_OOM (8.2.35, 8.3.36, 8.4.27,
+                     * 8.5.12, 8.6.0 and later) defer the memory_limit error to the
+                     * next VM interrupt and _exit() the process at the hard limit.
+                     * Stop converting so the deferred error is raised when the
+                     * method returns. */
                     if (ZEND_HAS_OOM()) {
                         throw std::runtime_error("memory limit exhausted while fetching rows");
                     }
@@ -2621,8 +2672,8 @@ void do_select_into(zval *out, zval *this_obj,
                             convertToZval(&kp_col1, cols[0], row, "", 0, fetch_mode|SC_FETCH_ONE);
                             convertToZval(&kp_col2, cols[1], row, "", 0, fetch_mode|SC_FETCH_ONE);
                         } catch (...) {
-                            if (Z_TYPE(kp_col1) != IS_UNDEF) zval_ptr_dtor(&kp_col1);
-                            if (Z_TYPE(kp_col2) != IS_UNDEF) zval_ptr_dtor(&kp_col2);
+                            if (Z_TYPE(kp_col1) != IS_UNDEF) discardPartialZval(&kp_col1);
+                            if (Z_TYPE(kp_col2) != IS_UNDEF) discardPartialZval(&kp_col2);
                             throw;
                         }
 
@@ -2643,8 +2694,8 @@ void do_select_into(zval *out, zval *this_obj,
                                 zend_string_release(coerced);
                             } catch (...) {
                                 if (coerced) zend_string_release(coerced);
-                                zval_ptr_dtor(&kp_col1);
-                                zval_ptr_dtor(&kp_col2);
+                                discardPartialZval(&kp_col1);
+                                discardPartialZval(&kp_col2);
                                 throw;
                             }
                         }
@@ -2679,7 +2730,7 @@ void do_select_into(zval *out, zval *this_obj,
                                 }
                                 add_next_index_zval(positional_out, &pos_tmp);
                             } catch (...) {
-                                zval_ptr_dtor(&pos_tmp);
+                                discardPartialZval(&pos_tmp);
                                 throw;
                             }
                         } else {
@@ -2693,7 +2744,7 @@ void do_select_into(zval *out, zval *this_obj,
                             }
                         }
                     } catch (...) {
-                        if (Z_TYPE(row_tmp) != IS_UNDEF) zval_ptr_dtor(&row_tmp);
+                        if (Z_TYPE(row_tmp) != IS_UNDEF) discardPartialZval(&row_tmp);
                         throw;
                     }
                     add_next_index_zval(out, &row_tmp);
@@ -3283,7 +3334,7 @@ static zend_long do_select_to_stream(zval *this_obj,
                         try {
                             convertToZval(&cell, cols[c], r, "", 0, fetch_mode);
                         } catch (...) {
-                            if (Z_TYPE(cell) != IS_UNDEF) zval_ptr_dtor(&cell);
+                            if (Z_TYPE(cell) != IS_UNDEF) discardPartialZval(&cell);
                             throw;
                         }
                         appendCellForStream(&buf, &cell, fmt);
@@ -3380,7 +3431,7 @@ CLICKHOUSE_METHOD(selectToStream)
     std::string qid = makeQid(query_id);
     zend_long n = do_select_to_stream(getThis(), ZSTR_VAL(sql), ZSTR_LEN(sql),
                                       params, stream_zv, fmt, qid, settings);
-    if (EG(exception)) return;
+    if (clickhouseOperationFailed()) return;
     RETURN_LONG(n);
 }
 /* }}} */
@@ -3418,8 +3469,8 @@ CLICKHOUSE_METHOD(selectStatement)
     /* Statement iteration requires full rows; ignore result-shape flags. */
     do_select_into(&stmt->rows, getThis(), ZSTR_VAL(sql), ZSTR_LEN(sql), params,
                    fetch_mode & SC_FETCH_VALUE_FLAGS, qid, settings, NULL, &stmt->positional_rows);
-    if (EG(exception)) {
-        zval_ptr_dtor(return_value);
+    if (clickhouseOperationFailed()) {
+        discardPartialZval(return_value);
         ZVAL_UNDEF(return_value);
         return;
     }
@@ -3627,7 +3678,7 @@ CLICKHOUSE_METHOD(insert)
     ZEND_PARSE_PARAMETERS_END();
 
     do_insert_into(getThis(), table, columns, values, makeQid(query_id), settings);
-    if (EG(exception)) {
+    if (clickhouseOperationFailed()) {
         return;
     }
     RETURN_TRUE;
@@ -4510,7 +4561,7 @@ CLICKHOUSE_METHOD(execute)
 
     do_execute_into(getThis(), ZSTR_VAL(sql), ZSTR_LEN(sql), params,
                     makeQid(query_id), settings);
-    if (EG(exception)) {
+    if (clickhouseOperationFailed()) {
         return;
     }
     RETURN_TRUE;
@@ -4932,7 +4983,7 @@ CLICKHOUSE_METHOD(insertAssoc)
 
         do_insert_into(getThis(), table, &columns_zv, rows, qid, settings);
         zval_ptr_dtor(&columns_zv);
-        if (EG(exception)) {
+        if (clickhouseOperationFailed()) {
             return;
         }
     } catch (const std::exception &e) {
@@ -5150,7 +5201,7 @@ CLICKHOUSE_METHOD(selectStreamCallback)
                                           fetch_mode & SC_FETCH_VALUE_FLAGS);
                         }
                     } catch (...) {
-                        zval_ptr_dtor(&row_zv);
+                        discardPartialZval(&row_zv);
                         throw;
                     }
                     zval args[1], retval;
@@ -5218,7 +5269,9 @@ PHP_METHOD(ClickHouseRowIterator, valid)
     RETURN_TRUE;
 }
 
-PHP_METHOD(ClickHouseRowIterator, current)
+/* A ClickHouse method, so a fatal error during conversion is re-raised once
+ * its frames unwind, including when a callback iterates the rows. */
+CLICKHOUSE_CLASS_METHOD(ClickHouseRowIterator, current)
 {
     if (zend_parse_parameters_none() == FAILURE) return;
     clickhouse_iter_object *iter = Z_CLICKHOUSE_ITER_P(getThis());
@@ -5244,7 +5297,7 @@ PHP_METHOD(ClickHouseRowIterator, current)
                           iter->fetch_mode & SC_FETCH_VALUE_FLAGS);
         }
     } catch (const std::exception &e) {
-        zval_ptr_dtor(return_value);
+        discardPartialZval(return_value);
         throwClickHouseError(e);
         RETURN_NULL();
     }

@@ -23,6 +23,17 @@
  * unwinds the caller's C++ frames instead of longjmping over them; see
  * clickhouse.cpp. */
 void clickhouseRunPhpCode(void (*fn)(void *), void *ctx);
+bool clickhouseBailoutPending();
+
+/* After a fatal error the array being filled can hold a half-inserted
+ * element, and destroying values can run PHP destructors. Leave partial output
+ * to request shutdown, which reclaims it. */
+static inline void discardPartialZval(zval *zv)
+{
+    if (!clickhouseBailoutPending()) {
+        zval_ptr_dtor(zv);
+    }
+}
 
 template <typename F>
 static inline void runPhpCode(F &&f)
