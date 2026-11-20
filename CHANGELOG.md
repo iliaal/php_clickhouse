@@ -15,12 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A fatal error during a query no longer leaves the client stuck or leaks
   native memory. Affected fatal errors happen inside a row, progress,
-  profile, or verbose callback, inside `__toString()` or `jsonSerialize()`
+  profile, or verbose callback; inside `__toString()` or `jsonSerialize()`
   while `insert()`, `insertAssoc()`, `write()`, or
-  `selectWithExternalData()` convert values, or inside a userland stream
-  wrapper that `insertFromStream()` reads. Before, every later call on that
-  client, such as calls from shutdown functions, threw "Reentrant operation:
-  another query is already in progress". A fatal error in `insert()`
+  `selectWithExternalData()` convert values; inside a userland stream
+  wrapper that `insertFromStream()` reads; or on reaching `memory_limit`
+  while `select()`, `selectStatement()`, or `selectWithExternalData()`
+  convert rows. Before, every later call on that client, such as calls from
+  shutdown functions, threw "Reentrant operation: another query is already
+  in progress". A fatal error in `insert()`
   conversion of 200,000 rows also leaked about 5.9 MB. Before PHP 8.5, a
   `memory_limit` fatal error while `select()` and the streaming readers
   converted rows leaked up to about 1.9 MB of native result data.

@@ -172,7 +172,7 @@ void validateMetadataFilterName(const std::string &s, const char *what)
 std::string currentDatabase(zval *this_obj)
 {
     zval rv;
-    zval *db = sc_zend_read_property(clickhouse_ce, this_obj, "database", sizeof("database") - 1, 0, &rv);
+    zval *db = sc_zend_read_property_ex(clickhouse_ce, this_obj, clickhouse_database_prop, 0, &rv);
     if (db) ZVAL_DEREF(db);
     if (db && Z_TYPE_P(db) == IS_STRING) {
         return std::string(Z_STRVAL_P(db), Z_STRLEN_P(db));

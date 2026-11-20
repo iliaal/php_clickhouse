@@ -63,6 +63,7 @@ using namespace clickhouse;
 using namespace std;
 
  zend_class_entry *clickhouse_ce, *clickhouse_exception_ce, *clickhouse_iter_ce, *clickhouse_statement_ce;
+zend_string *clickhouse_database_prop;
 
 /* A fatal error (zend_bailout) inside PHP code that runs under clickhouse-cpp
  * or conversion frames longjmps over them, skipping destructors: the library's
@@ -102,6 +103,11 @@ ZEND_NORETURN void clickhouseMethodBailout(int saved_depth)
     g_method_depth = saved_depth;
     g_bailout_pending = false;
     zend_bailout();
+}
+
+bool clickhouseBailoutPending()
+{
+    return g_bailout_pending;
 }
 
 /* A C++ exception must not leave the zend_try block: EG(bailout) is restored
@@ -720,6 +726,7 @@ PHP_MINIT_FUNCTION(clickhouse)
 #endif
 
     clickhouse_ce = register_class_ClickHouse();
+    clickhouse_database_prop = zend_string_init_interned("database", sizeof("database") - 1, 1);
     clickhouse_mark_not_serializable(clickhouse_ce);
     clickhouse_ce->create_object = clickhouse_create_object;
 #if PHP_VERSION_ID >= 80400
@@ -2621,8 +2628,8 @@ void do_select_into(zval *out, zval *this_obj,
                             convertToZval(&kp_col1, cols[0], row, "", 0, fetch_mode|SC_FETCH_ONE);
                             convertToZval(&kp_col2, cols[1], row, "", 0, fetch_mode|SC_FETCH_ONE);
                         } catch (...) {
-                            if (Z_TYPE(kp_col1) != IS_UNDEF) zval_ptr_dtor(&kp_col1);
-                            if (Z_TYPE(kp_col2) != IS_UNDEF) zval_ptr_dtor(&kp_col2);
+                            if (Z_TYPE(kp_col1) != IS_UNDEF) discardPartialZval(&kp_col1);
+                            if (Z_TYPE(kp_col2) != IS_UNDEF) discardPartialZval(&kp_col2);
                             throw;
                         }
 
@@ -2643,8 +2650,8 @@ void do_select_into(zval *out, zval *this_obj,
                                 zend_string_release(coerced);
                             } catch (...) {
                                 if (coerced) zend_string_release(coerced);
-                                zval_ptr_dtor(&kp_col1);
-                                zval_ptr_dtor(&kp_col2);
+                                discardPartialZval(&kp_col1);
+                                discardPartialZval(&kp_col2);
                                 throw;
                             }
                         }
@@ -2679,7 +2686,7 @@ void do_select_into(zval *out, zval *this_obj,
                                 }
                                 add_next_index_zval(positional_out, &pos_tmp);
                             } catch (...) {
-                                zval_ptr_dtor(&pos_tmp);
+                                discardPartialZval(&pos_tmp);
                                 throw;
                             }
                         } else {
@@ -2693,7 +2700,7 @@ void do_select_into(zval *out, zval *this_obj,
                             }
                         }
                     } catch (...) {
-                        if (Z_TYPE(row_tmp) != IS_UNDEF) zval_ptr_dtor(&row_tmp);
+                        if (Z_TYPE(row_tmp) != IS_UNDEF) discardPartialZval(&row_tmp);
                         throw;
                     }
                     add_next_index_zval(out, &row_tmp);
@@ -3283,7 +3290,7 @@ static zend_long do_select_to_stream(zval *this_obj,
                         try {
                             convertToZval(&cell, cols[c], r, "", 0, fetch_mode);
                         } catch (...) {
-                            if (Z_TYPE(cell) != IS_UNDEF) zval_ptr_dtor(&cell);
+                            if (Z_TYPE(cell) != IS_UNDEF) discardPartialZval(&cell);
                             throw;
                         }
                         appendCellForStream(&buf, &cell, fmt);
@@ -5150,7 +5157,7 @@ CLICKHOUSE_METHOD(selectStreamCallback)
                                           fetch_mode & SC_FETCH_VALUE_FLAGS);
                         }
                     } catch (...) {
-                        zval_ptr_dtor(&row_zv);
+                        discardPartialZval(&row_zv);
                         throw;
                     }
                     zval args[1], retval;

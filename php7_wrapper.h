@@ -28,6 +28,15 @@ static inline zval* sc_zend_read_property(zend_class_entry *class_ptr, zval *obj
 #endif
 }
 
+static inline zval* sc_zend_read_property_ex(zend_class_entry *class_ptr, zval *obj, zend_string *name, int silent, zval *rv)
+{
+#if PHP_VERSION_ID < 80000
+    return zend_read_property_ex(class_ptr, obj, name, silent, rv);
+#else
+    return zend_read_property_ex(class_ptr, Z_OBJ_P(obj), name, silent, rv);
+#endif
+}
+
 static inline void sc_zend_update_property_long(zend_class_entry *scope, zval *object, const char *name, size_t name_length, zend_long value)
 {
 #if PHP_VERSION_ID < 80000

@@ -115,6 +115,10 @@ void parseIdentifier(const char *s, size_t len, const char *what,
                      bool allow_dot, std::string *emit_out);
 void validateIdentifier(const char *s, size_t len, const char *what, bool allow_dot);
 void validateMetadataFilterName(const std::string &s, const char *what);
+/* Interned so that reading the property allocates nothing: connection
+ * recovery reads it while a fatal error is pending, when any allocation can
+ * raise another memory_limit error. */
+extern zend_string *clickhouse_database_prop;
 std::string currentDatabase(zval *this_obj);
 void runHelperSelect(zval *return_value, zval *this_obj,
                      const std::string &sql, zend_long fetch_mode);
