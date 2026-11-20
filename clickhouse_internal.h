@@ -140,7 +140,8 @@ void do_execute_into(zval *this_obj,
  * deferred until the body's C++ frames had unwound. */
 struct clickhouse_method_state {
     int depth;
-    size_t active_queries;
+    uint64_t invocation;
+    uint64_t outer;
 };
 void clickhouseMethodEnter(clickhouse_method_state *state);
 void clickhouseMethodLeave(const clickhouse_method_state *state);

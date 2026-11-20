@@ -168,3 +168,63 @@ function clickhouse_skip_unless_tracked_allocator(): void
         exit;
     }
 }
+
+/**
+ * Runs tests/_memory_limit_unwind_child.php once per shift for each mode, at
+ * most eight at a time, and prints the failures per mode. Each child must hit
+ * memory_limit exactly once and still query from its shutdown function;
+ * headroom modes may instead complete. The children use the tracked
+ * allocator, which checks the limit on every allocation, so the failing
+ * allocation does not depend on allocator chunk sizes.
+ */
+function clickhouse_run_memory_limit_children(array $cases, array $headroom_modes = []): void
+{
+    if (!preg_match('~\s(/\S*clickhouse\.so)$~m', file_get_contents("/proc/self/maps"), $m)) {
+        exit("clickhouse.so is not in /proc/self/maps\n");
+    }
+    $php = getenv("TEST_PHP_EXECUTABLE") ?: PHP_BINARY;
+    $env = getenv();
+    $env["USE_ZEND_ALLOC"] = "0";
+    $env["USE_TRACKED_ALLOC"] = "1";
+    foreach ($cases as $mode => $shifts) {
+        $failures = [];
+        $fatals = 0;
+        foreach (array_chunk($shifts, 8) as $batch) {
+            $running = [];
+            foreach ($batch as $shift) {
+                $proc = proc_open([$php, "-n", "-d", "extension=" . $m[1],
+                                   "-d", "memory_limit=8M", "-d", "display_errors=1",
+                                   __DIR__ . "/_memory_limit_unwind_child.php", (string)$shift, $mode],
+                                  [1 => ["pipe", "w"], 2 => ["redirect", 1]], $pipes, null, $env);
+                $running[$shift] = [$proc, $pipes[1]];
+            }
+            foreach ($running as $shift => [$proc, $out]) {
+                $output = stream_get_contents($out);
+                fclose($out);
+                $status = proc_close($proc);
+                $count = substr_count($output, "Fatal error: Allowed memory size");
+                $fatals += $count;
+                /* A headroom child cannot lower the limit below its usage, and
+                 * with enough headroom it completes its query. */
+                $completed = in_array($mode, $headroom_modes, true) && $count === 0 && $status === 0
+                    && preg_match('~^(limit below usage|completed)\n~', $output);
+                $ok = ($completed || ($status === 255 && $count === 1))
+                    && substr($output, -10) === "[{\"x\":1}]\n"
+                    && strpos($output, "unreachable") === false
+                    && strpos($output, "iteration finished") === false
+                    && strpos($output, "Sanitizer") === false
+                    && strpos($output, "runtime error:") === false;
+                if (!$ok) {
+                    $failures[] = "$mode, shift $shift, exit $status:\n" . trim($output);
+                }
+            }
+        }
+        if ($fatals === 0) {
+            $failures[] = "$mode: no child reached memory_limit";
+        }
+        echo $mode, ": ", count($shifts), " children, ", count($failures), " failures\n";
+        if ($failures) {
+            echo implode("\n\n", $failures), "\n";
+        }
+    }
+}

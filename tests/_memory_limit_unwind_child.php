@@ -1,5 +1,5 @@
 <?php
-/* Child of tests/287: hits memory_limit inside a ClickHouse call, then
+/* Child of tests/287 and 288: hits memory_limit inside a ClickHouse call, then
  * queries again from a shutdown function. argv[1] shifts where the limit is
  * reached; argv[2] picks the call. */
 require __DIR__ . "/_clickhouse.inc";
@@ -33,6 +33,39 @@ if ($mode === "prepare") {
         exit;
     }
     $c->select("SELECT 1 AS x, {a:String} AS y", $params);
+    echo "completed\n";
+    exit;
+}
+
+if ($mode === "fiber") {
+    register_shutdown_function(function () use ($c) {
+        ini_set("memory_limit", "-1");
+        try {
+            echo json_encode($c->select("SELECT 1 AS x")), "\n";
+        } catch (ClickHouseException $e) {
+            echo get_class($e), ": ", $e->getMessage(), "\n";
+        }
+    });
+    /* The verbose callback makes select_finish allocate after the row
+     * callback, outside row conversion. */
+    $c->setVerbose(function ($event, $ctx) {});
+    /* The Fiber suspends a query on another client inside its row callback,
+     * so that query's guard is armed before this client's and released
+     * while this client's query still runs. */
+    $other = new ClickHouse(clickhouse_test_config());
+    $fiber = new Fiber(function () use ($other) {
+        $other->selectStreamCallback("SELECT 1 AS x", function () {
+            Fiber::suspend();
+        });
+    });
+    $fiber->start();
+    $c->selectStreamCallback("SELECT 1 AS x", function () use ($fiber, $shift) {
+        $fiber->resume();
+        gc_collect_cycles();
+        if (@ini_set("memory_limit", (string)(memory_get_usage() + $shift)) === false) {
+            echo "limit below usage\n";
+        }
+    });
     echo "completed\n";
     exit;
 }

@@ -74,8 +74,16 @@ zend_string *clickhouse_database_prop;
  * there is no re-raise point, so the bailout keeps its native behavior. */
 static thread_local int g_method_depth = 0;
 static thread_local bool g_bailout_pending = false;
-/* Clients whose QueryActiveGuard is armed, innermost last. */
-static thread_local std::vector<clickhouse_object *> g_active_queries;
+/* Clients whose QueryActiveGuard is armed, each with the method invocation
+ * that armed it. A Fiber can suspend one query and arm another, so entries
+ * are not released in LIFO order. */
+struct ActiveQuery {
+    clickhouse_object *obj;
+    uint64_t owner;
+};
+static thread_local std::vector<ActiveQuery> g_active_queries;
+static thread_local uint64_t g_method_invocations = 0;
+static thread_local uint64_t g_current_method = 0;
 
 struct PhpBailoutPending : std::runtime_error {
     PhpBailoutPending() : std::runtime_error("PHP fatal error during a ClickHouse operation") {}
@@ -92,13 +100,16 @@ void clickhouseMethodEnter(clickhouse_method_state *state)
         g_bailout_pending = false;
     }
     state->depth = g_method_depth;
-    state->active_queries = g_active_queries.size();
+    state->outer = g_current_method;
+    state->invocation = ++g_method_invocations;
+    g_current_method = state->invocation;
     ++g_method_depth;
 }
 
 void clickhouseMethodLeave(const clickhouse_method_state *state)
 {
     g_method_depth = state->depth;
+    g_current_method = state->outer;
     if (UNEXPECTED(g_bailout_pending)) {
         g_bailout_pending = false;
         zend_bailout();
@@ -107,15 +118,18 @@ void clickhouseMethodLeave(const clickhouse_method_state *state)
 
 /* A bailout raised outside clickhouseRunPhpCode (memory_limit in the method
  * body) still unwinds the method natively, skipping the QueryActiveGuard
- * destructors; release the clients they held and keep the depth exact for
- * the next caller on this thread. */
+ * destructors; release the clients this invocation held and keep the depth
+ * exact for the next caller on this thread. */
 ZEND_NORETURN void clickhouseMethodBailout(const clickhouse_method_state *state)
 {
-    while (g_active_queries.size() > state->active_queries) {
-        g_active_queries.back()->query_active = false;
-        g_active_queries.pop_back();
+    for (size_t i = g_active_queries.size(); i-- > 0;) {
+        if (g_active_queries[i].owner == state->invocation) {
+            g_active_queries[i].obj->query_active = false;
+            g_active_queries.erase(g_active_queries.begin() + i);
+        }
     }
     g_method_depth = state->depth;
+    g_current_method = state->outer;
     g_bailout_pending = false;
     zend_bailout();
 }
@@ -729,6 +743,7 @@ PHP_RINIT_FUNCTION(clickhouse)
     g_method_depth = 0;
     g_bailout_pending = false;
     g_active_queries.clear();
+    g_current_method = 0;
     return SUCCESS;
 }
 /* }}} */
@@ -2103,14 +2118,19 @@ struct QueryActiveGuard {
                 "instance from inside row / progress / profile / verbose "
                 "callbacks.");
         }
-        g_active_queries.push_back(obj);
+        g_active_queries.push_back({obj, g_current_method});
         obj->query_active = true;
         armed = true;
     }
     ~QueryActiveGuard() {
         if (armed) {
             obj->query_active = false;
-            g_active_queries.pop_back();
+            for (size_t i = g_active_queries.size(); i-- > 0;) {
+                if (g_active_queries[i].obj == obj) {
+                    g_active_queries.erase(g_active_queries.begin() + i);
+                    break;
+                }
+            }
         }
     }
     QueryActiveGuard(const QueryActiveGuard&) = delete;
