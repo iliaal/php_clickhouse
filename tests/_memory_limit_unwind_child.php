@@ -1,5 +1,5 @@
 <?php
-/* Child of tests/287, 288 and 289: hits memory_limit inside a ClickHouse call, then
+/* Child of tests/287 through 291: hits memory_limit inside a ClickHouse call, then
  * queries again from a shutdown function. argv[1] shifts where the limit is
  * reached; argv[2] picks the call. */
 require __DIR__ . "/_clickhouse.inc";

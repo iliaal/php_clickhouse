@@ -113,7 +113,7 @@ matches either way, so the ASan CI job also runs them through
 
 Add a test to that list in `.github/workflows/tests.yml` when its regression
 is a leak. Tests that run their fatal errors through
-`clickhouse_run_memory_limit_children()` (287, 288, and 289) need no list
+`clickhouse_run_memory_limit_children()` (287 through 291) need no list
 entry to catch a leak: each child is a separate CLI process that the helper
 starts with LeakSanitizer enabled, so a regular `run-tests.php --asan` run
 fails on a child's leak report.
