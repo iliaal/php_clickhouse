@@ -192,7 +192,7 @@ bool runHelperExec(zval *this_obj, const std::string &sql)
 {
     do_execute_into(this_obj, sql.c_str(), sql.size(),
                     /*params=*/NULL, /*qid=*/std::string(), /*settings=*/NULL);
-    return !EG(exception);
+    return !clickhouseOperationFailed();
 }
 
 void runHelperSelectFirstRow(zval *return_value, zval *this_obj, const std::string &sql)
@@ -200,9 +200,9 @@ void runHelperSelectFirstRow(zval *return_value, zval *this_obj, const std::stri
     zval rows;
     ZVAL_UNDEF(&rows);
     runHelperSelect(&rows, this_obj, sql, 0);
-    if (EG(exception)) {
+    if (clickhouseOperationFailed()) {
         /* Failure may leave a partially populated rows array, or UNDEF before initialization. */
-        if (Z_TYPE(rows) != IS_UNDEF) {
+        if (Z_TYPE(rows) != IS_UNDEF && !clickhouseBailoutPending()) {
             zval_ptr_dtor(&rows);
         }
         return;
@@ -383,7 +383,7 @@ CLICKHOUSE_METHOD(isExists)
         " AND name = " + sqlStringLiteral(std::string(ZSTR_VAL(table), ZSTR_LEN(table)));
     zval row;
     runHelperSelectFirstRow(&row, getThis(), sql);
-    if (EG(exception)) return;
+    if (clickhouseOperationFailed()) return;
     bool exists = false;
     if (Z_TYPE(row) == IS_ARRAY) {
         zval *cnt = zend_hash_str_find(Z_ARRVAL(row), "c", sizeof("c") - 1);
@@ -440,7 +440,7 @@ CLICKHOUSE_METHOD(getServerVersion)
     }
     zval row;
     runHelperSelectFirstRow(&row, getThis(), "SELECT version() AS v");
-    if (EG(exception)) return;
+    if (clickhouseOperationFailed()) return;
     if (Z_TYPE(row) == IS_ARRAY) {
         zval *v = zend_hash_str_find(Z_ARRVAL(row), "v", sizeof("v") - 1);
         if (v && Z_TYPE_P(v) == IS_STRING) {

@@ -1,10 +1,47 @@
 <?php
-/* Child of tests/287: runs out of memory_limit during select() conversion
- * after a ballast of 1 MiB plus argv[1] bytes, then queries again from a
- * shutdown function. */
+/* Child of tests/287: hits memory_limit inside a ClickHouse call, then
+ * queries again from a shutdown function. argv[1] shifts where the limit is
+ * reached; argv[2] picks the call. */
 require __DIR__ . "/_clickhouse.inc";
 $c = new ClickHouse(clickhouse_test_config());
-$ballast = str_repeat("x", (1 << 20) + (int)$argv[1]);
+$shift = (int)$argv[1];
+$mode = $argv[2];
+$map = "map(concat(repeat('k', 64), toString(number)), number,
+            concat(repeat('j', 64), toString(number)), number)";
+$sql = "SELECT $map AS m FROM numbers(1000000) SETTINGS max_block_size = 65536";
+
+if ($mode === "prepare") {
+    /* Raise the limit in the shutdown function: the query that ran out of
+     * memory keeps nothing large to release. */
+    register_shutdown_function(function () use ($c) {
+        ini_set("memory_limit", "-1");
+        try {
+            echo json_encode($c->select("SELECT 1 AS x")), "\n";
+        } catch (ClickHouseException $e) {
+            echo get_class($e), ": ", $e->getMessage(), "\n";
+        }
+    });
+    $params = ["a" => str_repeat("p", 100)];
+    $c->select("SELECT 1 AS x, {a:String} AS y", $params);
+    gc_collect_cycles();
+    /* $shift bytes of headroom run out before, during, or after the
+     * allocations select() makes outside of row conversion. */
+    if (@ini_set("memory_limit", (string)(memory_get_usage() + $shift)) === false) {
+        echo "limit below usage\n";
+        exit;
+    }
+    $c->select("SELECT 1 AS x, {a:String} AS y", $params);
+    echo "completed\n";
+    exit;
+}
+
+if ($mode === "iterator") {
+    $source = new ClickHouse(clickhouse_test_config());
+    $rows = $source->selectStream("SELECT map(concat(repeat('k', 64), toString(number)), number) AS m,
+                                          toNullable(toString(number)) AS s
+                                   FROM numbers(30000)");
+}
+$ballast = str_repeat("x", (1 << 20) + $shift);
 register_shutdown_function(function () use ($c, &$ballast) {
     $ballast = null;
     try {
@@ -13,7 +50,22 @@ register_shutdown_function(function () use ($c, &$ballast) {
         echo get_class($e), ": ", $e->getMessage(), "\n";
     }
 });
-$rows = $c->select("SELECT map(concat(repeat('k', 64), toString(number)), number,
-                               concat(repeat('j', 64), toString(number)), number) AS m
-                    FROM numbers(1000000) SETTINGS max_block_size = 65536");
-echo "unreachable ", count($rows), "\n";
+switch ($mode) {
+    case "select":
+        $result = $c->select($sql);
+        break;
+    case "statement":
+        $result = $c->selectStatement($sql);
+        break;
+    case "iterator":
+        /* The row iterator converts rows while a ClickHouse callback runs. */
+        $kept = [];
+        $c->selectStreamCallback("SELECT 1 AS x", function () use ($rows, &$kept) {
+            foreach ($rows as $row) {
+                $kept[] = $row;
+            }
+            echo "iteration finished\n";
+        });
+        break;
+}
+echo "unreachable\n";

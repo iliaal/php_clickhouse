@@ -74,21 +74,31 @@ zend_string *clickhouse_database_prop;
  * there is no re-raise point, so the bailout keeps its native behavior. */
 static thread_local int g_method_depth = 0;
 static thread_local bool g_bailout_pending = false;
+/* Clients whose QueryActiveGuard is armed, innermost last. */
+static thread_local std::vector<clickhouse_object *> g_active_queries;
 
 struct PhpBailoutPending : std::runtime_error {
     PhpBailoutPending() : std::runtime_error("PHP fatal error during a ClickHouse operation") {}
 };
 
-void clickhouseMethodEnter(int *saved_depth)
+void clickhouseMethodEnter(clickhouse_method_state *state)
 {
-    *saved_depth = g_method_depth;
+    if (UNEXPECTED(g_bailout_pending)) {
+        /* PHP code called this method while a fatal error unwinds an
+         * enclosing one; keep the fatal error going instead of dropping it. */
+        if (g_method_depth > 0) {
+            zend_bailout();
+        }
+        g_bailout_pending = false;
+    }
+    state->depth = g_method_depth;
+    state->active_queries = g_active_queries.size();
     ++g_method_depth;
-    g_bailout_pending = false;
 }
 
-void clickhouseMethodLeave(int saved_depth)
+void clickhouseMethodLeave(const clickhouse_method_state *state)
 {
-    g_method_depth = saved_depth;
+    g_method_depth = state->depth;
     if (UNEXPECTED(g_bailout_pending)) {
         g_bailout_pending = false;
         zend_bailout();
@@ -96,11 +106,16 @@ void clickhouseMethodLeave(int saved_depth)
 }
 
 /* A bailout raised outside clickhouseRunPhpCode (memory_limit in the method
- * body) still unwinds the method natively; keep the depth exact for the next
- * caller on this thread. */
-ZEND_NORETURN void clickhouseMethodBailout(int saved_depth)
+ * body) still unwinds the method natively, skipping the QueryActiveGuard
+ * destructors; release the clients they held and keep the depth exact for
+ * the next caller on this thread. */
+ZEND_NORETURN void clickhouseMethodBailout(const clickhouse_method_state *state)
 {
-    g_method_depth = saved_depth;
+    while (g_active_queries.size() > state->active_queries) {
+        g_active_queries.back()->query_active = false;
+        g_active_queries.pop_back();
+    }
+    g_method_depth = state->depth;
     g_bailout_pending = false;
     zend_bailout();
 }
@@ -713,6 +728,7 @@ PHP_RINIT_FUNCTION(clickhouse)
 #endif
     g_method_depth = 0;
     g_bailout_pending = false;
+    g_active_queries.clear();
     return SUCCESS;
 }
 /* }}} */
@@ -2087,10 +2103,16 @@ struct QueryActiveGuard {
                 "instance from inside row / progress / profile / verbose "
                 "callbacks.");
         }
+        g_active_queries.push_back(obj);
         obj->query_active = true;
         armed = true;
     }
-    ~QueryActiveGuard() { if (armed) obj->query_active = false; }
+    ~QueryActiveGuard() {
+        if (armed) {
+            obj->query_active = false;
+            g_active_queries.pop_back();
+        }
+    }
     QueryActiveGuard(const QueryActiveGuard&) = delete;
     QueryActiveGuard& operator=(const QueryActiveGuard&) = delete;
 };
@@ -2610,9 +2632,11 @@ void do_select_into(zval *out, zval *this_obj,
                 for (size_t row = 0; row < block.GetRowCount(); ++row)
                 {
 #ifdef ZEND_HAS_OOM
-                    /* PHP 8.5 defers the memory_limit error to the next VM interrupt
-                     * and _exit()s the process at the hard limit. Stop converting so
-                     * the deferred error is raised when the method returns. */
+                    /* PHP releases that define ZEND_HAS_OOM (8.2.35, 8.3.36, 8.4.27,
+                     * 8.5.12, 8.6.0 and later) defer the memory_limit error to the
+                     * next VM interrupt and _exit() the process at the hard limit.
+                     * Stop converting so the deferred error is raised when the
+                     * method returns. */
                     if (ZEND_HAS_OOM()) {
                         throw std::runtime_error("memory limit exhausted while fetching rows");
                     }
@@ -3387,7 +3411,7 @@ CLICKHOUSE_METHOD(selectToStream)
     std::string qid = makeQid(query_id);
     zend_long n = do_select_to_stream(getThis(), ZSTR_VAL(sql), ZSTR_LEN(sql),
                                       params, stream_zv, fmt, qid, settings);
-    if (EG(exception)) return;
+    if (clickhouseOperationFailed()) return;
     RETURN_LONG(n);
 }
 /* }}} */
@@ -3425,8 +3449,8 @@ CLICKHOUSE_METHOD(selectStatement)
     /* Statement iteration requires full rows; ignore result-shape flags. */
     do_select_into(&stmt->rows, getThis(), ZSTR_VAL(sql), ZSTR_LEN(sql), params,
                    fetch_mode & SC_FETCH_VALUE_FLAGS, qid, settings, NULL, &stmt->positional_rows);
-    if (EG(exception)) {
-        zval_ptr_dtor(return_value);
+    if (clickhouseOperationFailed()) {
+        discardPartialZval(return_value);
         ZVAL_UNDEF(return_value);
         return;
     }
@@ -3634,7 +3658,7 @@ CLICKHOUSE_METHOD(insert)
     ZEND_PARSE_PARAMETERS_END();
 
     do_insert_into(getThis(), table, columns, values, makeQid(query_id), settings);
-    if (EG(exception)) {
+    if (clickhouseOperationFailed()) {
         return;
     }
     RETURN_TRUE;
@@ -4517,7 +4541,7 @@ CLICKHOUSE_METHOD(execute)
 
     do_execute_into(getThis(), ZSTR_VAL(sql), ZSTR_LEN(sql), params,
                     makeQid(query_id), settings);
-    if (EG(exception)) {
+    if (clickhouseOperationFailed()) {
         return;
     }
     RETURN_TRUE;
@@ -4939,7 +4963,7 @@ CLICKHOUSE_METHOD(insertAssoc)
 
         do_insert_into(getThis(), table, &columns_zv, rows, qid, settings);
         zval_ptr_dtor(&columns_zv);
-        if (EG(exception)) {
+        if (clickhouseOperationFailed()) {
             return;
         }
     } catch (const std::exception &e) {
@@ -5225,7 +5249,9 @@ PHP_METHOD(ClickHouseRowIterator, valid)
     RETURN_TRUE;
 }
 
-PHP_METHOD(ClickHouseRowIterator, current)
+/* A ClickHouse method, so a fatal error during conversion is re-raised once
+ * its frames unwind, including when a callback iterates the rows. */
+CLICKHOUSE_CLASS_METHOD(ClickHouseRowIterator, current)
 {
     if (zend_parse_parameters_none() == FAILURE) return;
     clickhouse_iter_object *iter = Z_CLICKHOUSE_ITER_P(getThis());
@@ -5251,7 +5277,7 @@ PHP_METHOD(ClickHouseRowIterator, current)
                           iter->fetch_mode & SC_FETCH_VALUE_FLAGS);
         }
     } catch (const std::exception &e) {
-        zval_ptr_dtor(return_value);
+        discardPartialZval(return_value);
         throwClickHouseError(e);
         RETURN_NULL();
     }
