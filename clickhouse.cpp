@@ -71,7 +71,15 @@ zend_string *clickhouse_database_prop;
  * clickhouseRunPhpCode turns the bailout into a C++ exception so those frames
  * unwind; CLICKHOUSE_METHOD re-raises it after the method body returns. While
  * a bailout is pending no further PHP code runs. Outside a ClickHouse method
- * there is no re-raise point, so the bailout keeps its native behavior. */
+ * there is no re-raise point, so the bailout keeps its native behavior.
+ *
+ * Any Zend allocation can raise the memory_limit fatal error, so inside a
+ * ClickHouse method every allocation made while a C++ frame owns native
+ * memory (a std::string, Query, Block, ColumnRef, or vector) runs under
+ * clickhouseRunPhpCode, with no such owner between it and the allocation.
+ * PHP releases that defer the memory_limit error (ZEND_HAS_OOM) raise it when
+ * the next PHP function call starts, which is under clickhouseRunPhpCode, or
+ * after the method returns. */
 static thread_local int g_method_depth = 0;
 static thread_local bool g_bailout_pending = false;
 /* Clients whose QueryActiveGuard is armed, each with the method invocation
@@ -84,10 +92,6 @@ struct ActiveQuery {
 static thread_local std::vector<ActiveQuery> g_active_queries;
 static thread_local uint64_t g_method_invocations = 0;
 static thread_local uint64_t g_current_method = 0;
-
-struct PhpBailoutPending : std::runtime_error {
-    PhpBailoutPending() : std::runtime_error("PHP fatal error during a ClickHouse operation") {}
-};
 
 void clickhouseMethodEnter(clickhouse_method_state *state)
 {
@@ -470,13 +474,15 @@ struct RowsSnapshot {
     zval value;
 
     explicit RowsSnapshot(HashTable *rows) {
-        array_init_size(&value, zend_hash_num_elements(rows));
-        zval *row;
-        ZEND_HASH_FOREACH_VAL(rows, row) {
-            zval copy;
-            ZVAL_COPY_DEREF(&copy, row);
-            add_next_index_zval(&value, &copy);
-        } ZEND_HASH_FOREACH_END();
+        runPhpCode([&] {
+            array_init_size(&value, zend_hash_num_elements(rows));
+            zval *row;
+            ZEND_HASH_FOREACH_VAL(rows, row) {
+                zval copy;
+                ZVAL_COPY_DEREF(&copy, row);
+                add_next_index_zval(&value, &copy);
+            } ZEND_HASH_FOREACH_END();
+        });
     }
     ~RowsSnapshot() {
         zval_ptr_dtor(&value);
@@ -854,6 +860,16 @@ zend_module_entry clickhouse_module_entry =
 };
 /* }}} */
 
+/* zend_throw_exception() allocates, so run it where a memory_limit fatal
+ * error unwinds the caller's C++ frames; the method wrapper re-raises it. */
+static void throwClickHouseMessage(const char *msg)
+{
+    try {
+        runPhpCode([&] { zend_throw_exception(clickhouse_exception_ce, msg, 0); });
+    } catch (const PhpBailoutPending &) {
+    }
+}
+
 /* The handshake takes a literal database name, not a db.table identifier. */
 static void validateDatabaseName(const char *s, size_t len)
 {
@@ -909,7 +925,7 @@ static bool loadConfigBool(HashTable *ht, const char *key, bool &out)
     if (!parseConfigBool(v, out)) {
         std::string msg = std::string(key) +
             " must be a boolean (true, false, 0, 1, \"true\", \"false\", \"0\", \"1\", or \"\" for false)";
-        zend_throw_exception(clickhouse_exception_ce, msg.c_str(), 0);
+        throwClickHouseMessage(msg.c_str());
         return false;
     }
     return true;
@@ -953,8 +969,7 @@ CLICKHOUSE_METHOD(__construct)
     /* PHP allows an explicit second __construct() call. Reject it before any
      * property is written, or the config changes while the client stays stale. */
     if (Z_CLICKHOUSE_P(this_obj)->client) {
-        zend_throw_exception(clickhouse_exception_ce,
-            "ClickHouse object is already constructed", 0);
+        throwClickHouseMessage("ClickHouse object is already constructed");
         return;
     }
 
@@ -968,8 +983,7 @@ CLICKHOUSE_METHOD(__construct)
         try {
             ZStrGuard sg(value);
             if (memchr(sg.val(), '\0', sg.len()) != nullptr) {
-                zend_throw_exception(clickhouse_exception_ce,
-                    "host must not contain NUL bytes", 0);
+                throwClickHouseMessage("host must not contain NUL bytes");
                 return;
             }
             sc_zend_update_property_stringl(clickhouse_ce, this_obj, "host", sizeof("host") - 1,
@@ -984,8 +998,7 @@ CLICKHOUSE_METHOD(__construct)
     {
         zend_long _p = zval_get_long(value);
         if (_p < 1 || _p > 65535) {
-            zend_throw_exception(clickhouse_exception_ce,
-                "port out of 1..65535 range", 0);
+            throwClickHouseMessage("port out of 1..65535 range");
             return;
         }
         sc_zend_update_property_long(clickhouse_ce, this_obj, "port", sizeof("port") - 1, _p);
@@ -1005,8 +1018,8 @@ CLICKHOUSE_METHOD(__construct)
             else if (n == 4 && strncasecmp(s, "zstd", 4) == 0)  cv = 2;
             else if (n == 4 && strncasecmp(s, "none", 4) == 0)  cv = 0;
             else {
-                zend_throw_exception(clickhouse_exception_ce,
-                    "Unknown compression name; expected 'lz4', 'zstd', 'none', 0, 1, 2, true, or false", 0);
+                throwClickHouseMessage(
+                    "Unknown compression name; expected 'lz4', 'zstd', 'none', 0, 1, 2, true, or false");
                 return;
             }
         } else if (Z_TYPE_P(value) == IS_TRUE) {
@@ -1016,22 +1029,22 @@ CLICKHOUSE_METHOD(__construct)
         } else if (Z_TYPE_P(value) == IS_LONG) {
             zend_long n = Z_LVAL_P(value);
             if (n < 0 || n > 2) {
-                zend_throw_exception(clickhouse_exception_ce,
-                    "compression out of range; expected 0 (none), 1 (lz4), or 2 (zstd)", 0);
+                throwClickHouseMessage(
+                    "compression out of range; expected 0 (none), 1 (lz4), or 2 (zstd)");
                 return;
             }
             cv = (long)n;
         } else if (Z_TYPE_P(value) == IS_DOUBLE) {
             double d = Z_DVAL_P(value);
             if (d != 0.0 && d != 1.0 && d != 2.0) {
-                zend_throw_exception(clickhouse_exception_ce,
-                    "compression out of range; expected 0 (none), 1 (lz4), or 2 (zstd)", 0);
+                throwClickHouseMessage(
+                    "compression out of range; expected 0 (none), 1 (lz4), or 2 (zstd)");
                 return;
             }
             cv = (long)d;
         } else {
-            zend_throw_exception(clickhouse_exception_ce,
-                "compression must be 'lz4', 'zstd', 'none', 0, 1, 2, true, or false", 0);
+            throwClickHouseMessage(
+                "compression must be 'lz4', 'zstd', 'none', 0, 1, 2, true, or false");
             return;
         }
         sc_zend_update_property_long(clickhouse_ce, this_obj, "compression", sizeof("compression") - 1, cv);
@@ -1048,8 +1061,8 @@ CLICKHOUSE_METHOD(__construct)
         zend_long n = zval_get_long(v);
         if (n < 0 || n > max) {
             std::string msg = std::string(key) + " out of range";
-            zend_throw_exception(clickhouse_exception_ce, msg.c_str(), 0);
-            return false; // caller checks EG(exception)
+            throwClickHouseMessage(msg.c_str());
+            return false; // caller checks clickhouseOperationFailed()
         }
         out = n;
         return true;
@@ -1059,26 +1072,26 @@ CLICKHOUSE_METHOD(__construct)
         zend_long n;
         if (load_bounded_nonneg_long("retry_timeout", ZEND_LONG_MAX, n)) {
             sc_zend_update_property_long(clickhouse_ce, this_obj, "retry_timeout", sizeof("retry_timeout") - 1, n);
-        } else if (EG(exception)) { return; }
+        } else if (clickhouseOperationFailed()) { return; }
     }
     {
         zend_long n;
         if (load_bounded_nonneg_long(
                 "retry_count", unsigned_max_as_zend_long(UINT_MAX), n)) {
             sc_zend_update_property_long(clickhouse_ce, this_obj, "retry_count", sizeof("retry_count") - 1, n);
-        } else if (EG(exception)) { return; }
+        } else if (clickhouseOperationFailed()) { return; }
     }
     {
         zend_long n;
         if (load_bounded_nonneg_long("connect_timeout", (zend_long)(INT_MAX / 1000), n)) {
             sc_zend_update_property_long(clickhouse_ce, this_obj, "connect_timeout", sizeof("connect_timeout") - 1, n);
-        } else if (EG(exception)) { return; }
+        } else if (clickhouseOperationFailed()) { return; }
     }
     {
         zend_long n;
         if (load_bounded_nonneg_long("receive_timeout", (zend_long)(UINT_MAX / 1000U), n)) {
             sc_zend_update_property_long(clickhouse_ce, this_obj, "receive_timeout", sizeof("receive_timeout") - 1, n);
-        } else if (EG(exception)) { return; }
+        } else if (clickhouseOperationFailed()) { return; }
     }
 
     /* Declared, freshly written properties return their slots, leaving shared rv unused. */
@@ -1109,8 +1122,7 @@ CLICKHOUSE_METHOD(__construct)
         if (php_array_get_value(_ht, "send_timeout", value)) {
             zend_long n = zval_get_long(value);
             if (n < 0 || n > (zend_long)(UINT_MAX / 1000U)) {
-                zend_throw_exception(clickhouse_exception_ce,
-                    "send_timeout out of range", 0);
+                throwClickHouseMessage("send_timeout out of range");
                 return;
             }
             Options = Options.SetConnectionSendTimeout(std::chrono::seconds(n));
@@ -1123,7 +1135,7 @@ CLICKHOUSE_METHOD(__construct)
             if (!v || Z_ISNULL_P(v)) return true;
             auto fail = [&]() -> bool {
                 std::string msg = std::string(key) + " out of range";
-                zend_throw_exception(clickhouse_exception_ce, msg.c_str(), 0);
+                throwClickHouseMessage(msg.c_str());
                 return false;
             };
             /* On 32-bit PHP, valid values above LONG_MAX arrive as doubles;
@@ -1159,13 +1171,13 @@ CLICKHOUSE_METHOD(__construct)
             bool b;
             if (loadConfigBool(_ht, "tcp_nodelay", b)) {
                 Options = Options.TcpNoDelay(b);
-            } else if (EG(exception)) { return; }
+            } else if (clickhouseOperationFailed()) { return; }
             if (loadConfigBool(_ht, "tcp_keepalive", b)) {
                 Options = Options.TcpKeepAlive(b);
-            } else if (EG(exception)) { return; }
+            } else if (clickhouseOperationFailed()) { return; }
             if (loadConfigBool(_ht, "ping_before_query", b)) {
                 Options = Options.SetPingBeforeQuery(b);
-            } else if (EG(exception)) { return; }
+            } else if (clickhouseOperationFailed()) { return; }
         }
         auto apply_nonneg_int_max = [&](const char *key, auto apply) -> bool {
             zval *v = zend_hash_str_find(_ht, (char*)key, strlen(key));
@@ -1175,7 +1187,7 @@ CLICKHOUSE_METHOD(__construct)
             zend_long n = zval_get_long(v);
             if (n < 0 || n > INT_MAX) {
                 std::string msg = std::string(key) + " out of range";
-                zend_throw_exception(clickhouse_exception_ce, msg.c_str(), 0);
+                throwClickHouseMessage(msg.c_str());
                 return false;
             }
             apply(n);
@@ -1195,7 +1207,7 @@ CLICKHOUSE_METHOD(__construct)
             })) return;
     #ifdef WITH_OPENSSL
         bool want_ssl = false;
-        if (!loadConfigBool(_ht, "ssl", want_ssl) && EG(exception)) return;
+        if (!loadConfigBool(_ht, "ssl", want_ssl) && clickhouseOperationFailed()) return;
         /* Validate TLS options even when disabled so invalid configuration cannot hide. */
         {
         ClientOptions::SSLOptions ssl_opts;
@@ -1217,8 +1229,8 @@ CLICKHOUSE_METHOD(__construct)
                 }
             }
             if (ver == 0) {
-                zend_throw_exception(clickhouse_exception_ce,
-                    "ssl_min_protocol_version must be one of tls1.0, tls1.1, tls1.2, tls1.3", 0);
+                throwClickHouseMessage(
+                    "ssl_min_protocol_version must be one of tls1.0, tls1.1, tls1.2, tls1.3");
                 return;
             }
             ssl_opts.SetMinProtocolVersion(ver);
@@ -1227,22 +1239,20 @@ CLICKHOUSE_METHOD(__construct)
             bool b;
             if (loadConfigBool(_ht, "ssl_skip_verify", b)) {
                 ssl_opts.SetSkipVerification(b);
-            } else if (EG(exception)) { return; }
+            } else if (clickhouseOperationFailed()) { return; }
             if (loadConfigBool(_ht, "ssl_use_default_ca", b)) {
                 ssl_opts.SetUseDefaultCALocations(b);
-            } else if (EG(exception)) { return; }
+            } else if (clickhouseOperationFailed()) { return; }
         }
         /* OpenSSL takes C strings; an embedded NUL would load a different path. */
         if (php_array_get_value(_ht, "ssl_ca_directory", value) && Z_TYPE_P(value) != IS_FALSE) {
             if (Z_TYPE_P(value) != IS_STRING && Z_TYPE_P(value) != IS_OBJECT) {
-                zend_throw_exception(clickhouse_exception_ce,
-                    "ssl_ca_directory must be a string", 0);
+                throwClickHouseMessage("ssl_ca_directory must be a string");
                 return;
             }
             ZStrGuard sg(value);
             if (memchr(sg.val(), '\0', sg.len()) != nullptr) {
-                zend_throw_exception(clickhouse_exception_ce,
-                    "ssl_ca_directory must not contain NUL bytes", 0);
+                throwClickHouseMessage("ssl_ca_directory must not contain NUL bytes");
                 return;
             }
             ssl_opts.SetPathToCADirectory(std::string(sg.val(), sg.len()));
@@ -1260,22 +1270,20 @@ CLICKHOUSE_METHOD(__construct)
                     zval *ev = fv;
                     if (Z_ISREF_P(ev)) ev = Z_REFVAL_P(ev);
                     if (Z_TYPE_P(ev) != IS_STRING && Z_TYPE_P(ev) != IS_OBJECT) {
-                        zend_throw_exception(clickhouse_exception_ce,
-                            "ssl_ca_files must be a string or an array of strings", 0);
+                        throwClickHouseMessage(
+                            "ssl_ca_files must be a string or an array of strings");
                         return;
                     }
                     ZStrGuard sg(ev);
                     files.emplace_back(sg.val(), sg.len());
                 } ZEND_HASH_FOREACH_END();
             } else {
-                zend_throw_exception(clickhouse_exception_ce,
-                    "ssl_ca_files must be a string or an array of strings", 0);
+                throwClickHouseMessage("ssl_ca_files must be a string or an array of strings");
                 return;
             }
             for (const auto &f : files) {
                 if (f.find('\0') != std::string::npos) {
-                    zend_throw_exception(clickhouse_exception_ce,
-                        "ssl_ca_files must not contain NUL bytes", 0);
+                    throwClickHouseMessage("ssl_ca_files must not contain NUL bytes");
                     return;
                 }
             }
@@ -1308,7 +1316,7 @@ CLICKHOUSE_METHOD(__construct)
         } ZEND_HASH_FOREACH_END();
         if (!unknown.empty()) {
             std::string msg = "unknown ssl_* option '" + unknown + "'";
-            zend_throw_exception(clickhouse_exception_ce, msg.c_str(), 0);
+            throwClickHouseMessage(msg.c_str());
             return;
         }
         }
@@ -1324,7 +1332,7 @@ CLICKHOUSE_METHOD(__construct)
                 if (!sv || Z_ISNULL_P(sv)) continue;
                 if (strcmp(k, "ssl_min_protocol_version") != 0 && isUnsetTlsPath(k, sv)) continue;
                 std::string msg = std::string("ssl_* option '") + k + "' requires 'ssl' => true";
-                zend_throw_exception(clickhouse_exception_ce, msg.c_str(), 0);
+                throwClickHouseMessage(msg.c_str());
                 return;
             }
             static const struct { const char *key; bool def; } ssl_bool_keys[] = {
@@ -1335,7 +1343,7 @@ CLICKHOUSE_METHOD(__construct)
                 bool b = bk.def;
                 if (loadConfigBool(_ht, k, b) && b != bk.def) {
                     std::string msg = std::string("ssl_* option '") + k + "' requires 'ssl' => true";
-                    zend_throw_exception(clickhouse_exception_ce, msg.c_str(), 0);
+                    throwClickHouseMessage(msg.c_str());
                     return;
                 }
             }
@@ -1343,11 +1351,10 @@ CLICKHOUSE_METHOD(__construct)
     #else
         {
             bool want_ssl = false;
-            if (!loadConfigBool(_ht, "ssl", want_ssl) && EG(exception)) return;
+            if (!loadConfigBool(_ht, "ssl", want_ssl) && clickhouseOperationFailed()) return;
             if (want_ssl) {
-                zend_throw_exception(clickhouse_exception_ce,
-                    "php_clickhouse was built without TLS support. Reconfigure with --enable-clickhouse-openssl",
-                    0);
+                throwClickHouseMessage(
+                    "php_clickhouse was built without TLS support. Reconfigure with --enable-clickhouse-openssl");
                 return;
             }
         }
@@ -1391,7 +1398,7 @@ CLICKHOUSE_METHOD(__construct)
         if (!offending.empty()) {
             std::string msg = "ssl_* option '" + offending +
                 "' requires php_clickhouse built with TLS support (--enable-clickhouse-openssl)";
-            zend_throw_exception(clickhouse_exception_ce, msg.c_str(), 0);
+            throwClickHouseMessage(msg.c_str());
             return;
         }
         }
@@ -1400,8 +1407,7 @@ CLICKHOUSE_METHOD(__construct)
         if (php_array_get_value(_ht, "endpoints", value)) {
             /* Invalid endpoints must not silently fall back to localhost. */
             if (Z_TYPE_P(value) != IS_ARRAY) {
-                zend_throw_exception(clickhouse_exception_ce,
-                    "endpoints must be a list of [host, port] arrays", 0);
+                throwClickHouseMessage("endpoints must be a list of [host, port] arrays");
                 return;
             }
             std::vector<Endpoint> eps;
@@ -1411,8 +1417,8 @@ CLICKHOUSE_METHOD(__construct)
             ZEND_HASH_FOREACH_VAL(eps_ht, ep_zv) {
                 ZVAL_DEREF(ep_zv);
                 if (Z_TYPE_P(ep_zv) != IS_ARRAY) {
-                    zend_throw_exception(clickhouse_exception_ce,
-                        "each endpoints entry must be an array with a 'host' key", 0);
+                    throwClickHouseMessage(
+                        "each endpoints entry must be an array with a 'host' key");
                     return;
                 }
                 HashTable *eh = Z_ARRVAL_P(ep_zv);
@@ -1421,8 +1427,7 @@ CLICKHOUSE_METHOD(__construct)
                 if (hz) ZVAL_DEREF(hz);
                 if (pz) ZVAL_DEREF(pz);
                 if (!hz || Z_TYPE_P(hz) == IS_NULL) {
-                    zend_throw_exception(clickhouse_exception_ce,
-                        "each endpoints entry requires a non-null 'host'", 0);
+                    throwClickHouseMessage("each endpoints entry requires a non-null 'host'");
                     return;
                 }
                 DerefZvalHold host_hold(hz);
@@ -1431,8 +1436,7 @@ CLICKHOUSE_METHOD(__construct)
                 {
                     ZStrGuard host_sg(host_hold.get());
                     if (memchr(host_sg.val(), '\0', host_sg.len()) != nullptr) {
-                        zend_throw_exception(clickhouse_exception_ce,
-                            "host must not contain NUL bytes", 0);
+                        throwClickHouseMessage("host must not contain NUL bytes");
                         return;
                     }
                     e.host = std::string(host_sg.val(), host_sg.len());
@@ -1440,8 +1444,7 @@ CLICKHOUSE_METHOD(__construct)
                 if (port_hold.get()) {
                     zend_long p = zval_get_long(port_hold.get());
                     if (p < 1 || p > 65535) {
-                        zend_throw_exception(clickhouse_exception_ce,
-                            "Endpoint port out of 1..65535 range", 0);
+                        throwClickHouseMessage("Endpoint port out of 1..65535 range");
                         return;
                     }
                     e.port = (uint16_t)p;
@@ -1449,8 +1452,7 @@ CLICKHOUSE_METHOD(__construct)
                 eps.push_back(std::move(e));
             } ZEND_HASH_FOREACH_END();
             if (eps.empty()) {
-                zend_throw_exception(clickhouse_exception_ce,
-                    "endpoints was provided but contained no usable entries", 0);
+                throwClickHouseMessage("endpoints was provided but contained no usable entries");
                 return;
             }
             /* clickhouse-cpp prepends a nonempty host to endpoints; suppress the
@@ -1465,16 +1467,20 @@ CLICKHOUSE_METHOD(__construct)
         {
             ZStrGuard sg(value);
             validateDatabaseName(sg.val(), sg.len());
-            sc_zend_update_property_stringl(clickhouse_ce, this_obj, "database", sizeof("database") - 1,
-                                            sg.val(), sg.len());
+            runPhpCode([&] {
+                sc_zend_update_property_stringl(clickhouse_ce, this_obj, "database", sizeof("database") - 1,
+                                                sg.val(), sg.len());
+            });
             Options = Options.SetDefaultDatabase(std::string(sg.val(), sg.len()));
         }
 
         if (php_array_get_value(_ht, "user", value))
         {
             ZStrGuard sg(value);
-            sc_zend_update_property_stringl(clickhouse_ce, this_obj, "user", sizeof("user") - 1,
-                                            sg.val(), sg.len());
+            runPhpCode([&] {
+                sc_zend_update_property_stringl(clickhouse_ce, this_obj, "user", sizeof("user") - 1,
+                                                sg.val(), sg.len());
+            });
             Options = Options.SetUser(std::string(sg.val(), sg.len()));
         }
 
@@ -1660,21 +1666,28 @@ void throwClickHouseError(const std::exception &e, const std::string &query_id)
         return;
     }
     std::string msg = sanitizeError(e.what());
-    zval ex;
-    object_init_ex(&ex, clickhouse_exception_ce);
+    /* Callers run in catch handlers, often outside any try block, and the
+     * method wrapper re-raises a fatal error raised here. */
+    try {
+        runPhpCode([&] {
+            zval ex;
+            object_init_ex(&ex, clickhouse_exception_ce);
 
-    if (auto se = dynamic_cast<const clickhouse::ServerException*>(&e)) {
-        const clickhouse::Exception &exc = se->GetException();
-        sc_zend_update_property_long(clickhouse_exception_ce, &ex, "server_code", sizeof("server_code") - 1, (zend_long)exc.code);
-        if (!exc.name.empty()) {
-            sc_zend_update_property_stringl(clickhouse_exception_ce, &ex, "server_name", sizeof("server_name") - 1, exc.name.c_str(), exc.name.size());
-        }
+            if (auto se = dynamic_cast<const clickhouse::ServerException*>(&e)) {
+                const clickhouse::Exception &exc = se->GetException();
+                sc_zend_update_property_long(clickhouse_exception_ce, &ex, "server_code", sizeof("server_code") - 1, (zend_long)exc.code);
+                if (!exc.name.empty()) {
+                    sc_zend_update_property_stringl(clickhouse_exception_ce, &ex, "server_name", sizeof("server_name") - 1, exc.name.c_str(), exc.name.size());
+                }
+            }
+            if (!query_id.empty()) {
+                sc_zend_update_property_stringl(clickhouse_exception_ce, &ex, "query_id", sizeof("query_id") - 1, query_id.c_str(), query_id.size());
+            }
+            sc_zend_update_property_stringl(clickhouse_exception_ce, &ex, "message", sizeof("message") - 1, msg.c_str(), msg.size());
+            zend_throw_exception_object(&ex);
+        });
+    } catch (const PhpBailoutPending &) {
     }
-    if (!query_id.empty()) {
-        sc_zend_update_property_stringl(clickhouse_exception_ce, &ex, "query_id", sizeof("query_id") - 1, query_id.c_str(), query_id.size());
-    }
-    sc_zend_update_property_stringl(clickhouse_exception_ce, &ex, "message", sizeof("message") - 1, msg.c_str(), msg.size());
-    zend_throw_exception_object(&ex);
 }
 
 static std::string formatParamValue(zval *v, const std::string &type,
@@ -1947,8 +1960,9 @@ void addAssocUInt64(zval *array, const char *key, uint64_t value)
         add_assoc_long(array, key, (zend_long)value);
         return;
     }
-    std::string text = std::to_string(value);
-    add_assoc_stringl(array, key, text.data(), text.size());
+    char text[24];
+    int len = snprintf(text, sizeof(text), "%" PRIu64, value);
+    add_assoc_stringl(array, key, text, (size_t)len);
 }
 
 static void attachProgressAndProfile(Query &q, clickhouse_object *obj)
@@ -2074,19 +2088,34 @@ static void emitVerbose(clickhouse_object *obj, const char *event, zval *ctx)
     if (ctx) zval_ptr_dtor(ctx);
 }
 
+/* Builds the payload under clickhouseRunPhpCode. fill must not own native
+ * memory, so callers compute strings such as the redacted SQL beforehand. */
+template <typename F>
+static void emitVerboseEvent(clickhouse_object *obj, const char *event, F &&fill)
+{
+    if (!verbose_active(obj) || g_bailout_pending) {
+        return;
+    }
+    runPhpCode([&] {
+        zval ctx;
+        array_init(&ctx);
+        fill(&ctx);
+        emitVerbose(obj, event, &ctx);
+    });
+}
+
 static void attachVerbose(Query &q, clickhouse_object *obj)
 {
     if (!verbose_active(obj)) return;
 
     q.OnException(phpCallback([obj](const Exception &e) {
-        zval ctx;
-        array_init(&ctx);
-        add_assoc_long(&ctx, "code", (zend_long)e.code);
-        add_assoc_string(&ctx, "name", e.name.c_str());
         /* Server error text can expose embedded SQL and bound secrets. */
         std::string vmsg = sanitizeError(e.display_text.c_str());
-        add_assoc_stringl(&ctx, "message", (char*)vmsg.data(), vmsg.size());
-        emitVerbose(obj, "server_exception", &ctx);
+        emitVerboseEvent(obj, "server_exception", [&](zval *ctx) {
+            add_assoc_long(ctx, "code", (zend_long)e.code);
+            add_assoc_string(ctx, "name", e.name.c_str());
+            add_assoc_stringl(ctx, "message", (char*)vmsg.data(), vmsg.size());
+        });
     }));
 }
 
@@ -2574,18 +2603,17 @@ void do_select_into(zval *out, zval *this_obj,
                      "The second argument to the select function must be an array");
 
         if (verbose_active(obj)) {
-            zval ctx;
-            array_init(&ctx);
             std::string redacted_sql = redactSqlLiterals(log_sql);
-            add_assoc_stringl(&ctx, "sql", (char*)redacted_sql.data(), redacted_sql.size());
-            add_assoc_stringl(&ctx, "query_id", (char*)qid.data(), qid.size());
-            add_assoc_long(&ctx, "settings_count", (zend_long)obj->settings.size());
-            add_assoc_long(&ctx, "fetch_mode", (zend_long)fetch_mode);
-            emitVerbose(obj, "select_start", &ctx);
+            emitVerboseEvent(obj, "select_start", [&](zval *ctx) {
+                add_assoc_stringl(ctx, "sql", (char*)redacted_sql.data(), redacted_sql.size());
+                add_assoc_stringl(ctx, "query_id", (char*)qid.data(), qid.size());
+                add_assoc_long(ctx, "settings_count", (zend_long)obj->settings.size());
+                add_assoc_long(ctx, "fetch_mode", (zend_long)fetch_mode);
+            });
         }
 
         if (!(fetch_mode & SC_FETCH_ONE)) {
-            array_init(out);
+            runPhpCode([&] { array_init(out); });
         }
 
         size_t verbose_block_idx = 0;
@@ -2597,12 +2625,11 @@ void do_select_into(zval *out, zval *this_obj,
         query.OnData(phpCallback([out, positional_out, fetch_mode, &fetched_one, obj, &verbose_block_idx,
                       &pos_decided, &pos_active](const Block &block) {
             if (verbose_active(obj)) {
-                zval ctx;
-                array_init(&ctx);
-                add_assoc_long(&ctx, "rows", (zend_long)block.GetRowCount());
-                add_assoc_long(&ctx, "columns", (zend_long)block.GetColumnCount());
-                add_assoc_long(&ctx, "block_index", (zend_long)verbose_block_idx++);
-                emitVerbose(obj, "data_block", &ctx);
+                emitVerboseEvent(obj, "data_block", [&](zval *ctx) {
+                    add_assoc_long(ctx, "rows", (zend_long)block.GetRowCount());
+                    add_assoc_long(ctx, "columns", (zend_long)block.GetColumnCount());
+                    add_assoc_long(ctx, "block_index", (zend_long)verbose_block_idx++);
+                });
             }
             /* Native state lives outside the conversion region below, so a
              * memory_limit bailout during conversion still unwinds it. */
@@ -2755,13 +2782,12 @@ void do_select_into(zval *out, zval *this_obj,
         runSelectWithRecovery(client, query, this_obj, obj, external_tables,
                               /*detach_callbacks=*/true);
         if (verbose_active(obj)) {
-            zval ctx;
-            array_init(&ctx);
-            add_assoc_double(&ctx, "elapsed_ms", obj->stats.elapsed_ms);
-            addAssocUInt64(&ctx, "rows_read", obj->stats.rows_read);
-            addAssocUInt64(&ctx, "bytes_read", obj->stats.bytes_read);
-            addAssocUInt64(&ctx, "blocks", verbose_block_idx);
-            emitVerbose(obj, "select_finish", &ctx);
+            emitVerboseEvent(obj, "select_finish", [&](zval *ctx) {
+                add_assoc_double(ctx, "elapsed_ms", obj->stats.elapsed_ms);
+                addAssocUInt64(ctx, "rows_read", obj->stats.rows_read);
+                addAssocUInt64(ctx, "bytes_read", obj->stats.bytes_read);
+                addAssocUInt64(ctx, "blocks", verbose_block_idx);
+            });
         }
         recordQuerySuccess(obj, log_sql, qid);
     }
@@ -2955,9 +2981,9 @@ CLICKHOUSE_METHOD(selectWithExternalData)
     HashTable *externals_ht = Z_ARRVAL_P(externals);
     size_t externals_count = zend_hash_num_elements(externals_ht);
     if (externals_count == 0) {
-        zend_throw_exception(clickhouse_exception_ce,
+        throwClickHouseMessage(
             "selectWithExternalData requires at least one external table; "
-            "use select() when no external data is needed", 0);
+            "use select() when no external data is needed");
         return;
     }
 
@@ -3257,13 +3283,12 @@ static zend_long do_select_to_stream(zval *this_obj,
                      "The second argument to selectToStream must be an array");
 
         if (verbose_active(obj)) {
-            zval ctx;
-            array_init(&ctx);
             std::string redacted_sql = redactSqlLiterals(log_sql);
-            add_assoc_stringl(&ctx, "sql", (char*)redacted_sql.data(), redacted_sql.size());
-            add_assoc_stringl(&ctx, "query_id", (char*)qid.data(), qid.size());
-            add_assoc_long(&ctx, "settings_count", (zend_long)obj->settings.size());
-            emitVerbose(obj, "select_start", &ctx);
+            emitVerboseEvent(obj, "select_start", [&](zval *ctx) {
+                add_assoc_stringl(ctx, "sql", (char*)redacted_sql.data(), redacted_sql.size());
+                add_assoc_stringl(ctx, "query_id", (char*)qid.data(), qid.size());
+                add_assoc_long(ctx, "settings_count", (zend_long)obj->settings.size());
+            });
         }
 
         bool header_written = false;
@@ -3280,12 +3305,11 @@ static zend_long do_select_to_stream(zval *this_obj,
             const size_t row_count = block.GetRowCount();
             if (col_count == 0) return;
             if (verbose_active(obj)) {
-                zval ctx;
-                array_init(&ctx);
-                add_assoc_long(&ctx, "rows", (zend_long)row_count);
-                add_assoc_long(&ctx, "columns", (zend_long)col_count);
-                add_assoc_long(&ctx, "block_index", (zend_long)verbose_block_idx++);
-                emitVerbose(obj, "data_block", &ctx);
+                emitVerboseEvent(obj, "data_block", [&](zval *ctx) {
+                    add_assoc_long(ctx, "rows", (zend_long)row_count);
+                    add_assoc_long(ctx, "columns", (zend_long)col_count);
+                    add_assoc_long(ctx, "block_index", (zend_long)verbose_block_idx++);
+                });
             }
 
             /* Columns live outside the PHP region below, so a fatal error in
@@ -3308,16 +3332,18 @@ static zend_long do_select_to_stream(zval *this_obj,
                     }
                 }
                 if (streamFormatHasHeader(fmt)) {
-                    for (size_t c = 0; c < col_count; ++c) {
-                        if (c > 0) smart_str_appendc(&buf, cell_sep);
-                        const std::string &nm = block.GetColumnName(c);
-                        if (streamFormatIsCSV(fmt)) {
-                            csvAppendEscaped(&buf, nm.data(), nm.size());
-                        } else {
-                            tsvAppendEscaped(&buf, nm.data(), nm.size());
+                    runPhpCode([&] {
+                        for (size_t c = 0; c < col_count; ++c) {
+                            if (c > 0) smart_str_appendc(&buf, cell_sep);
+                            const std::string &nm = block.GetColumnName(c);
+                            if (streamFormatIsCSV(fmt)) {
+                                csvAppendEscaped(&buf, nm.data(), nm.size());
+                            } else {
+                                tsvAppendEscaped(&buf, nm.data(), nm.size());
+                            }
                         }
-                    }
-                    smart_str_appendl(&buf, row_term, row_term_len);
+                        smart_str_appendl(&buf, row_term, row_term_len);
+                    });
                 }
                 header_written = true;
             }
@@ -3350,15 +3376,15 @@ static zend_long do_select_to_stream(zval *this_obj,
 
         runSelectWithRecovery(client, query, this_obj, obj, nullptr,
                               /*detach_callbacks=*/false);
-        flushStreamBuf(&buf, stream_zv);
+        /* A userland stream wrapper runs PHP code. */
+        runPhpCode([&] { flushStreamBuf(&buf, stream_zv); });
         if (verbose_active(obj)) {
-            zval ctx;
-            array_init(&ctx);
-            add_assoc_double(&ctx, "elapsed_ms", obj->stats.elapsed_ms);
-            addAssocUInt64(&ctx, "rows_read", obj->stats.rows_read);
-            addAssocUInt64(&ctx, "bytes_read", obj->stats.bytes_read);
-            addAssocUInt64(&ctx, "blocks", verbose_block_idx);
-            emitVerbose(obj, "select_finish", &ctx);
+            emitVerboseEvent(obj, "select_finish", [&](zval *ctx) {
+                add_assoc_double(ctx, "elapsed_ms", obj->stats.elapsed_ms);
+                addAssocUInt64(ctx, "rows_read", obj->stats.rows_read);
+                addAssocUInt64(ctx, "bytes_read", obj->stats.bytes_read);
+                addAssocUInt64(ctx, "blocks", verbose_block_idx);
+            });
         }
         recordQuerySuccess(obj, log_sql, qid);
     }
@@ -3413,9 +3439,9 @@ CLICKHOUSE_METHOD(selectToStream)
     StreamFormat fmt = StreamFormat::TSV;
     if (format_s) {
         if (!parseStreamFormat(ZSTR_VAL(format_s), ZSTR_LEN(format_s), fmt)) {
-            zend_throw_exception(clickhouse_exception_ce,
+            throwClickHouseMessage(
                 "selectToStream: unknown format; expected TabSeparated, "
-                "TabSeparatedWithNames, CSV, or CSVWithNames", 0);
+                "TabSeparatedWithNames, CSV, or CSVWithNames");
             return;
         }
     }
@@ -3423,8 +3449,7 @@ CLICKHOUSE_METHOD(selectToStream)
     php_stream *stream = NULL;
     php_stream_from_zval_no_verify(stream, stream_zv);
     if (!stream) {
-        zend_throw_exception(clickhouse_exception_ce,
-            "selectToStream: argument 3 must be an open stream resource", 0);
+        throwClickHouseMessage("selectToStream: argument 3 must be an open stream resource");
         return;
     }
 
@@ -3463,7 +3488,7 @@ CLICKHOUSE_METHOD(selectStatement)
     ZEND_PARSE_PARAMETERS_END();
     std::string qid = makeQid(query_id);
 
-    object_init_ex(return_value, clickhouse_statement_ce);
+    runPhpCode([&] { object_init_ex(return_value, clickhouse_statement_ce); });
     clickhouse_statement_object *stmt = Z_CLICKHOUSE_STATEMENT_P(return_value);
 
     /* Statement iteration requires full rows; ignore result-shape flags. */
@@ -3476,7 +3501,13 @@ CLICKHOUSE_METHOD(selectStatement)
     }
 
     clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
-    buildStatsArray(&stmt->statistics, obj->stats);
+    /* A fatal error inside a string-key insert leaves a bucket the array
+     * cannot destroy, so publish the array only once it is complete. */
+    runPhpCode([&] {
+        zval stats;
+        buildStatsArray(&stats, obj->stats);
+        ZVAL_COPY_VALUE(&stmt->statistics, &stats);
+    });
 }
 /* }}} */
 
@@ -3508,16 +3539,19 @@ static void buildSingleColumnZval(HashTable *values_ht, size_t column_index,
                                   const std::vector<zend_string*> *column_names,
                                   zval *out)
 {
-    array_init_size(out, zend_hash_num_elements(values_ht));
+    ZVAL_UNDEF(out);
     try {
-        zval *pzval;
-        ZEND_HASH_FOREACH_VAL(values_ht, pzval) {
-            zval *fzval = extractRowCell(pzval, column_index, column_names);
-            Z_TRY_ADDREF_P(fzval);
-            add_next_index_zval(out, fzval);
-        } ZEND_HASH_FOREACH_END();
+        runPhpCode([&] {
+            array_init_size(out, zend_hash_num_elements(values_ht));
+            zval *pzval;
+            ZEND_HASH_FOREACH_VAL(values_ht, pzval) {
+                zval *fzval = extractRowCell(pzval, column_index, column_names);
+                Z_TRY_ADDREF_P(fzval);
+                add_next_index_zval(out, fzval);
+            } ZEND_HASH_FOREACH_END();
+        });
     } catch (...) {
-        zval_ptr_dtor(out);
+        discardPartialZval(out);
         ZVAL_UNDEF(out);
         throw;
     }
@@ -4058,41 +4092,38 @@ CLICKHOUSE_METHOD(insertFromStream)
     StreamFormat fmt = StreamFormat::TSV;
     if (format_s) {
         if (!parseStreamFormat(ZSTR_VAL(format_s), ZSTR_LEN(format_s), fmt)) {
-            zend_throw_exception(clickhouse_exception_ce,
+            throwClickHouseMessage(
                 "insertFromStream: unknown format; expected TabSeparated, "
-                "TabSeparatedWithNames, CSV, or CSVWithNames", 0);
+                "TabSeparatedWithNames, CSV, or CSVWithNames");
             return;
         }
     }
 
     if (batch_rows < 1) {
-        zend_throw_exception(clickhouse_exception_ce,
-            "insertFromStream: batch_rows must be >= 1", 0);
+        throwClickHouseMessage("insertFromStream: batch_rows must be >= 1");
         return;
     }
     /* Bound buffered rows even when the caller requests a huge batch. */
     const zend_long MAX_BATCH_ROWS = 10000000; /* 10M rows */
     if (batch_rows > MAX_BATCH_ROWS) {
-        zend_throw_exception(clickhouse_exception_ce,
+        throwClickHouseMessage(
             "insertFromStream: batch_rows exceeds the maximum of 10000000 "
             "(a larger value would buffer the whole stream in memory, "
-            "defeating batching)", 0);
+            "defeating batching)");
         return;
     }
 
     php_stream *stream = NULL;
     php_stream_from_zval_no_verify(stream, stream_zv);
     if (!stream) {
-        zend_throw_exception(clickhouse_exception_ce,
-            "insertFromStream: argument 3 must be an open stream resource", 0);
+        throwClickHouseMessage("insertFromStream: argument 3 must be an open stream resource");
         return;
     }
 
     HashTable *columns_ht = Z_ARRVAL_P(columns);
     size_t columns_count = zend_hash_num_elements(columns_ht);
     if (columns_count == 0) {
-        zend_throw_exception(clickhouse_exception_ce,
-            "insertFromStream: columns list cannot be empty", 0);
+        throwClickHouseMessage("insertFromStream: columns list cannot be empty");
         return;
     }
 
@@ -4154,7 +4185,7 @@ CLICKHOUSE_METHOD(insertFromStream)
         InsertConversionScopeGuard conversion_scope;
 
         std::vector<zval> col_zvals(columns_count);
-        for (size_t c = 0; c < columns_count; ++c) array_init(&col_zvals[c]);
+        for (size_t c = 0; c < columns_count; ++c) ZVAL_UNDEF(&col_zvals[c]);
 
         auto cleanup_col_zvals = [&]() {
             for (size_t c = 0; c < columns_count; ++c) {
@@ -4169,8 +4200,11 @@ CLICKHOUSE_METHOD(insertFromStream)
             Block blockInsert;
             for (size_t c = 0; c < columns_count; ++c) {
                 zvalToBlock(blockInsert, blockQuery, c, &col_zvals[c]);
-                zval_ptr_dtor(&col_zvals[c]);
-                array_init(&col_zvals[c]);
+                runPhpCode([&] {
+                    zval_ptr_dtor(&col_zvals[c]);
+                    ZVAL_UNDEF(&col_zvals[c]);
+                    array_init(&col_zvals[c]);
+                });
             }
             block_dirty = true;
             client->SendInsertBlock(blockInsert);
@@ -4201,6 +4235,10 @@ CLICKHOUSE_METHOD(insertFromStream)
         };
 
         try {
+            /* Inside this try so that a fatal error closes the open insert. */
+            runPhpCode([&] {
+                for (size_t c = 0; c < columns_count; ++c) array_init(&col_zvals[c]);
+            });
             stream = (php_stream *)zend_fetch_resource2_ex(
                 stream_zv, NULL, php_file_le_stream(), php_file_le_pstream());
             if (!stream) {
@@ -4236,9 +4274,12 @@ CLICKHOUSE_METHOD(insertFromStream)
                     throw std::runtime_error(
                         "insertFromStream: stream returned 0 bytes without reaching EOF");
                 }
-                parser.feed(buf, (size_t)n, on_row);
+                /* Cells and rows become zvals here. The parser and the
+                 * batch's Block live outside this region, and flush_batch
+                 * runs its own allocations under clickhouseRunPhpCode. */
+                runPhpCode([&] { parser.feed(buf, (size_t)n, on_row); });
             }
-            parser.finish(on_row);
+            runPhpCode([&] { parser.finish(on_row); });
 
             flush_batch();
             client->EndInsert();
@@ -4519,21 +4560,19 @@ void do_execute_into(zval *this_obj,
                      "The second argument to execute must be an array");
 
         if (verbose_active(obj)) {
-            zval ctx;
-            array_init(&ctx);
             std::string redacted_sql = redactSqlLiterals(log_sql);
-            add_assoc_stringl(&ctx, "sql", (char*)redacted_sql.data(), redacted_sql.size());
-            add_assoc_stringl(&ctx, "query_id", (char*)qid.data(), qid.size());
-            add_assoc_long(&ctx, "settings_count", (zend_long)obj->settings.size());
-            emitVerbose(obj, "execute_start", &ctx);
+            emitVerboseEvent(obj, "execute_start", [&](zval *ctx) {
+                add_assoc_stringl(ctx, "sql", (char*)redacted_sql.data(), redacted_sql.size());
+                add_assoc_stringl(ctx, "query_id", (char*)qid.data(), qid.size());
+                add_assoc_long(ctx, "settings_count", (zend_long)obj->settings.size());
+            });
         }
 
         runExecuteWithRecovery(client, query, this_obj, obj);
         if (verbose_active(obj)) {
-            zval ctx;
-            array_init(&ctx);
-            add_assoc_double(&ctx, "elapsed_ms", obj->stats.elapsed_ms);
-            emitVerbose(obj, "execute_finish", &ctx);
+            emitVerboseEvent(obj, "execute_finish", [&](zval *ctx) {
+                add_assoc_double(ctx, "elapsed_ms", obj->stats.elapsed_ms);
+            });
         }
         recordQuerySuccess(obj, log_sql, qid);
     }
@@ -4591,14 +4630,10 @@ CLICKHOUSE_METHOD(setSettings)
         ZEND_HASH_FOREACH_KEY_VAL(ht, nk, zk, vz) {
             (void)nk;
             if (!zk) {
-                zend_throw_exception(clickhouse_exception_ce,
-                    "setting keys must be strings", 0);
-                return;
+                throw std::runtime_error("setting keys must be strings");
             }
             if (ZSTR_LEN(zk) == 0) {
-                zend_throw_exception(clickhouse_exception_ce,
-                    "setting key must not be empty", 0);
-                return;
+                throw std::runtime_error("setting key must not be empty");
             }
             m[std::string(ZSTR_VAL(zk), ZSTR_LEN(zk))] = formatScalarParam(vz);
         } ZEND_HASH_FOREACH_END();
@@ -4625,8 +4660,7 @@ CLICKHOUSE_METHOD(setSetting)
         Z_PARAM_ZVAL(value)
     ZEND_PARSE_PARAMETERS_END();
     if (ZSTR_LEN(key) == 0) {
-        zend_throw_exception(clickhouse_exception_ce,
-            "setting key must not be empty", 0);
+        throwClickHouseMessage("setting key must not be empty");
         return;
     }
     clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
@@ -4697,7 +4731,7 @@ static bool setCallbackField(zval *target, zval *cb, const char *err_name)
     bool clear_only = Z_TYPE_P(cb) == IS_NULL;
     if (!clear_only && !zend_is_callable(cb, 0, NULL)) {
         std::string msg = std::string(err_name) + " expects a callable or null";
-        zend_throw_exception(clickhouse_exception_ce, msg.c_str(), 0);
+        throwClickHouseMessage(msg.c_str());
         return false;
     }
     if (Z_TYPE(*target) != IS_UNDEF) {
@@ -4772,8 +4806,7 @@ CLICKHOUSE_METHOD(setVerbose)
     } else if (zend_is_callable(sink, 0, NULL)) {
         new_callback = true;
     } else {
-        zend_throw_exception(clickhouse_exception_ce,
-            "setVerbose expects bool, null, or callable", 0);
+        throwClickHouseMessage("setVerbose expects bool, null, or callable");
         return;
     }
 
@@ -4925,12 +4958,12 @@ CLICKHOUSE_METHOD(insertAssoc)
         }
 
         zval columns_zv;
-        array_init(&columns_zv);
 
         /* Reuse the first row HashTable as the expected key set without allocating names. */
         HashTable *first_ht = Z_ARRVAL_P(first);
         size_t expected_count = zend_hash_num_elements(first_ht);
-        {
+        runPhpCode([&] {
+            array_init(&columns_zv);
             zval *fv;
             zend_string *fk;
             zend_ulong fnk;
@@ -4943,7 +4976,7 @@ CLICKHOUSE_METHOD(insertAssoc)
                 }
                 add_next_index_stringl(&columns_zv, ZSTR_VAL(fk), ZSTR_LEN(fk));
             } ZEND_HASH_FOREACH_END();
-        }
+        });
 
         /* The gatherer tries numeric indexes first; reject integer keys and
          * mismatched key sets before they can select the wrong values. */
@@ -5022,7 +5055,7 @@ CLICKHOUSE_METHOD(selectStream)
     std::string qid = makeQid(query_id);
     clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
 
-    object_init_ex(return_value, clickhouse_iter_ce);
+    runPhpCode([&] { object_init_ex(return_value, clickhouse_iter_ce); });
     clickhouse_iter_object *iter = Z_CLICKHOUSE_ITER_P(return_value);
     iter->fetch_mode = fetch_mode;
     std::string log_sql(ZSTR_VAL(sql), ZSTR_LEN(sql));
@@ -5037,26 +5070,24 @@ CLICKHOUSE_METHOD(selectStream)
                      /*params_err_msg=*/nullptr);
 
         if (verbose_active(obj)) {
-            zval ctx;
-            array_init(&ctx);
             std::string redacted_sql = redactSqlLiterals(log_sql);
-            add_assoc_stringl(&ctx, "sql", (char*)redacted_sql.data(), redacted_sql.size());
-            add_assoc_stringl(&ctx, "query_id", (char*)qid.data(), qid.size());
-            add_assoc_long(&ctx, "settings_count", (zend_long)obj->settings.size());
-            add_assoc_long(&ctx, "fetch_mode", (zend_long)fetch_mode);
-            emitVerbose(obj, "select_start", &ctx);
+            emitVerboseEvent(obj, "select_start", [&](zval *ctx) {
+                add_assoc_stringl(ctx, "sql", (char*)redacted_sql.data(), redacted_sql.size());
+                add_assoc_stringl(ctx, "query_id", (char*)qid.data(), qid.size());
+                add_assoc_long(ctx, "settings_count", (zend_long)obj->settings.size());
+                add_assoc_long(ctx, "fetch_mode", (zend_long)fetch_mode);
+            });
         }
 
         size_t verbose_block_idx = 0;
         query.OnData(phpCallback([iter, obj, &verbose_block_idx](const Block &block) {
             if (block.GetRowCount() == 0 || block.GetColumnCount() == 0) return;
             if (verbose_active(obj)) {
-                zval ctx;
-                array_init(&ctx);
-                add_assoc_long(&ctx, "rows", (zend_long)block.GetRowCount());
-                add_assoc_long(&ctx, "columns", (zend_long)block.GetColumnCount());
-                add_assoc_long(&ctx, "block_index", (zend_long)verbose_block_idx++);
-                emitVerbose(obj, "data_block", &ctx);
+                emitVerboseEvent(obj, "data_block", [&](zval *ctx) {
+                    add_assoc_long(ctx, "rows", (zend_long)block.GetRowCount());
+                    add_assoc_long(ctx, "columns", (zend_long)block.GetColumnCount());
+                    add_assoc_long(ctx, "block_index", (zend_long)verbose_block_idx++);
+                });
             }
             if (iter->column_names.empty()) {
                 const size_t nc = block.GetColumnCount();
@@ -5089,13 +5120,12 @@ CLICKHOUSE_METHOD(selectStream)
         runSelectWithRecovery(client, query, getThis(), obj, nullptr,
                               /*detach_callbacks=*/true);
         if (verbose_active(obj)) {
-            zval ctx;
-            array_init(&ctx);
-            add_assoc_double(&ctx, "elapsed_ms", obj->stats.elapsed_ms);
-            addAssocUInt64(&ctx, "rows_read", obj->stats.rows_read);
-            addAssocUInt64(&ctx, "bytes_read", obj->stats.bytes_read);
-            addAssocUInt64(&ctx, "blocks", verbose_block_idx);
-            emitVerbose(obj, "select_finish", &ctx);
+            emitVerboseEvent(obj, "select_finish", [&](zval *ctx) {
+                add_assoc_double(ctx, "elapsed_ms", obj->stats.elapsed_ms);
+                addAssocUInt64(ctx, "rows_read", obj->stats.rows_read);
+                addAssocUInt64(ctx, "bytes_read", obj->stats.bytes_read);
+                addAssocUInt64(ctx, "blocks", verbose_block_idx);
+            });
         }
         recordQuerySuccess(obj, log_sql, qid);
     }
@@ -5135,8 +5165,7 @@ CLICKHOUSE_METHOD(selectStreamCallback)
     ZEND_PARSE_PARAMETERS_END();
 
     if (!zend_is_callable(cb, 0, NULL)) {
-        zend_throw_exception(clickhouse_exception_ce,
-            "Argument 2 passed to selectStreamCallback must be callable", 0);
+        throwClickHouseMessage("Argument 2 passed to selectStreamCallback must be callable");
         return;
     }
 
@@ -5154,13 +5183,12 @@ CLICKHOUSE_METHOD(selectStreamCallback)
                      /*params_err_msg=*/nullptr);
 
         if (verbose_active(obj)) {
-            zval ctx;
-            array_init(&ctx);
             std::string redacted_sql = redactSqlLiterals(log_sql);
-            add_assoc_stringl(&ctx, "sql", (char*)redacted_sql.data(), redacted_sql.size());
-            add_assoc_stringl(&ctx, "query_id", (char*)qid.data(), qid.size());
-            add_assoc_long(&ctx, "settings_count", (zend_long)obj->settings.size());
-            emitVerbose(obj, "select_start", &ctx);
+            emitVerboseEvent(obj, "select_start", [&](zval *ctx) {
+                add_assoc_stringl(ctx, "sql", (char*)redacted_sql.data(), redacted_sql.size());
+                add_assoc_stringl(ctx, "query_id", (char*)qid.data(), qid.size());
+                add_assoc_long(ctx, "settings_count", (zend_long)obj->settings.size());
+            });
         }
 
         size_t verbose_block_idx = 0;
@@ -5172,12 +5200,11 @@ CLICKHOUSE_METHOD(selectStreamCallback)
             if (stop_requested) return;
             if (block.GetRowCount() == 0 || block.GetColumnCount() == 0) return;
             if (verbose_active(obj)) {
-                zval ctx;
-                array_init(&ctx);
-                add_assoc_long(&ctx, "rows", (zend_long)block.GetRowCount());
-                add_assoc_long(&ctx, "columns", (zend_long)block.GetColumnCount());
-                add_assoc_long(&ctx, "block_index", (zend_long)verbose_block_idx++);
-                emitVerbose(obj, "data_block", &ctx);
+                emitVerboseEvent(obj, "data_block", [&](zval *ctx) {
+                    add_assoc_long(ctx, "rows", (zend_long)block.GetRowCount());
+                    add_assoc_long(ctx, "columns", (zend_long)block.GetColumnCount());
+                    add_assoc_long(ctx, "block_index", (zend_long)verbose_block_idx++);
+                });
             }
             /* GetColumnName allocates; cache names outside the row loop. */
             /* The cached names and columns live outside the PHP region below,
@@ -5229,13 +5256,12 @@ CLICKHOUSE_METHOD(selectStreamCallback)
         runSelectWithRecovery(client, query, getThis(), obj, nullptr,
                               /*detach_callbacks=*/true);
         if (verbose_active(obj)) {
-            zval ctx;
-            array_init(&ctx);
-            add_assoc_double(&ctx, "elapsed_ms", obj->stats.elapsed_ms);
-            addAssocUInt64(&ctx, "rows_read", obj->stats.rows_read);
-            addAssocUInt64(&ctx, "bytes_read", obj->stats.bytes_read);
-            addAssocUInt64(&ctx, "blocks", verbose_block_idx);
-            emitVerbose(obj, "select_finish", &ctx);
+            emitVerboseEvent(obj, "select_finish", [&](zval *ctx) {
+                add_assoc_double(ctx, "elapsed_ms", obj->stats.elapsed_ms);
+                addAssocUInt64(ctx, "rows_read", obj->stats.rows_read);
+                addAssocUInt64(ctx, "bytes_read", obj->stats.bytes_read);
+                addAssocUInt64(ctx, "blocks", verbose_block_idx);
+            });
         }
         recordQuerySuccess(obj, log_sql, qid);
     }
@@ -5283,19 +5309,28 @@ CLICKHOUSE_CLASS_METHOD(ClickHouseRowIterator, current)
         RETURN_NULL();
     }
     const size_t col_count = block.GetColumnCount();
-    array_init_size(return_value, (uint32_t)col_count);
     /* convertToZval throws on unsupported or malformed server-side types;
      * letting the exception cross the C Zend dispatcher is UB. */
     static const std::string empty_name;
     ConvertDepthScopeGuard depth_scope;
     try {
+        /* Block::operator[] returns an owning ColumnRef; take those
+         * references outside the conversion region below. */
+        std::vector<ColumnRef> cols;
+        cols.reserve(col_count);
         for (size_t col = 0; col < col_count; ++col) {
-            const std::string &name = (col < iter->column_names.size())
-                ? iter->column_names[col]
-                : empty_name;
-            convertToZval(return_value, block[col], iter->row_idx, name, 0,
-                          iter->fetch_mode & SC_FETCH_VALUE_FLAGS);
+            cols.push_back(block[col]);
         }
+        runPhpCode([&] {
+            array_init_size(return_value, (uint32_t)col_count);
+            for (size_t col = 0; col < col_count; ++col) {
+                const std::string &name = (col < iter->column_names.size())
+                    ? iter->column_names[col]
+                    : empty_name;
+                convertToZval(return_value, cols[col], iter->row_idx, name, 0,
+                              iter->fetch_mode & SC_FETCH_VALUE_FLAGS);
+            }
+        });
     } catch (const std::exception &e) {
         discardPartialZval(return_value);
         throwClickHouseError(e);
@@ -5401,9 +5436,8 @@ PHP_METHOD(ClickHouseException, getQueryId)
  */
 PHP_METHOD(ClickHouseStatement, __construct)
 {
-    zend_throw_exception(clickhouse_exception_ce,
-        "ClickHouseStatement is constructed by ClickHouse::selectStatement(); direct construction is not allowed",
-        0);
+    throwClickHouseMessage(
+        "ClickHouseStatement is constructed by ClickHouse::selectStatement(); direct construction is not allowed");
     return;
 }
 
@@ -5522,14 +5556,12 @@ PHP_METHOD(ClickHouseStatement, offsetGet)
 
 PHP_METHOD(ClickHouseStatement, offsetSet)
 {
-    zend_throw_exception(clickhouse_exception_ce,
-        "ClickHouseStatement is read-only; offsetSet is not supported", 0);
+    throwClickHouseMessage("ClickHouseStatement is read-only; offsetSet is not supported");
 }
 
 PHP_METHOD(ClickHouseStatement, offsetUnset)
 {
-    zend_throw_exception(clickhouse_exception_ce,
-        "ClickHouseStatement is read-only; offsetUnset is not supported", 0);
+    throwClickHouseMessage("ClickHouseStatement is read-only; offsetUnset is not supported");
 }
 
 static void statement_emit_rows(zval *return_value, zval *this_obj)
@@ -5614,8 +5646,7 @@ PHP_METHOD(ClickHouseStatement, fetchKeyPair)
     zval *row;
     ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(source_rows), row) {
         if (Z_TYPE_P(row) != IS_ARRAY || zend_hash_num_elements(Z_ARRVAL_P(row)) < 2) {
-            zend_throw_exception(clickhouse_exception_ce,
-                "fetchKeyPair requires each row to have at least 2 columns", 0);
+            throwClickHouseMessage("fetchKeyPair requires each row to have at least 2 columns");
             zend_array_destroy(Z_ARR_P(return_value));
             ZVAL_UNDEF(return_value);
             return;
@@ -5629,8 +5660,7 @@ PHP_METHOD(ClickHouseStatement, fetchKeyPair)
 
         if (Z_TYPE_P(kv) == IS_ARRAY || Z_TYPE_P(kv) == IS_OBJECT) {
             /* Array keys would stringify to "Array", collapsing distinct rows. */
-            zend_throw_exception(clickhouse_exception_ce,
-                "fetchKeyPair requires a scalar key column", 0);
+            throwClickHouseMessage("fetchKeyPair requires a scalar key column");
             zend_array_destroy(Z_ARR_P(return_value));
             ZVAL_UNDEF(return_value);
             return;

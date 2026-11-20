@@ -175,7 +175,9 @@ function clickhouse_skip_unless_tracked_allocator(): void
  * memory_limit exactly once and still query from its shutdown function;
  * headroom modes may instead complete. The children use the tracked
  * allocator, which checks the limit on every allocation, so the failing
- * allocation does not depend on allocator chunk sizes.
+ * allocation does not depend on allocator chunk sizes. Each child is its own
+ * CLI process, so under AddressSanitizer it runs with leak detection on even
+ * when the runner's does not; a leak report fails the child.
  */
 function clickhouse_run_memory_limit_children(array $cases, array $headroom_modes = []): void
 {
@@ -186,6 +188,8 @@ function clickhouse_run_memory_limit_children(array $cases, array $headroom_mode
     $env = getenv();
     $env["USE_ZEND_ALLOC"] = "0";
     $env["USE_TRACKED_ALLOC"] = "1";
+    $env["ASAN_OPTIONS"] = (isset($env["ASAN_OPTIONS"]) && $env["ASAN_OPTIONS"] !== ""
+        ? $env["ASAN_OPTIONS"] . ":" : "") . "detect_leaks=1";
     foreach ($cases as $mode => $shifts) {
         $failures = [];
         $fatals = 0;
@@ -215,6 +219,11 @@ function clickhouse_run_memory_limit_children(array $cases, array $headroom_mode
                     && strpos($output, "Sanitizer") === false
                     && strpos($output, "runtime error:") === false;
                 if (!$ok) {
+                    /* Sanitizer reports from many children can exceed the
+                     * runner's own memory_limit when it diffs the output. */
+                    if (strlen($output) > 8192) {
+                        $output = substr($output, 0, 4096) . "\n[...]\n" . substr($output, -4096);
+                    }
                     $failures[] = "$mode, shift $shift, exit $status:\n" . trim($output);
                 }
             }

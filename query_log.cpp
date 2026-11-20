@@ -31,6 +31,7 @@ extern "C" {
 
 #include "lib/clickhouse-cpp/clickhouse/client.h"
 #include "lib/clickhouse-cpp/clickhouse/exceptions.h"
+#include "typesToPhp.hpp"
 #include "clickhouse_internal.h"
 
 #include <algorithm>

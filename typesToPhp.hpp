@@ -19,11 +19,18 @@
 #include <stdexcept>
 #include <type_traits>
 
-/* Runs fn(ctx), which may execute PHP code, so that a fatal error inside it
- * unwinds the caller's C++ frames instead of longjmping over them; see
- * clickhouse.cpp. */
+/* Runs fn(ctx), which may execute PHP code or allocate from the Zend heap, so
+ * that a fatal error inside it (memory_limit included) unwinds the caller's
+ * C++ frames instead of longjmping over them; see clickhouse.cpp. fn's own
+ * frame must not own native memory: the longjmp still skips it. */
 void clickhouseRunPhpCode(void (*fn)(void *), void *ctx);
 bool clickhouseBailoutPending();
+
+/* Thrown by clickhouseRunPhpCode once a fatal error is pending. The method
+ * wrapper catches it and re-raises the fatal error. */
+struct PhpBailoutPending : std::runtime_error {
+    PhpBailoutPending() : std::runtime_error("PHP fatal error during a ClickHouse operation") {}
+};
 
 /* After a fatal error the array being filled can hold a half-inserted
  * element, and destroying values can run PHP destructors. Leave partial output
@@ -43,12 +50,12 @@ static inline void runPhpCode(F &&f)
                          const_cast<void *>(static_cast<const void *>(&f)));
 }
 
-/* Only objects (__toString) run PHP code during string conversion. */
+/* Objects run __toString, and other non-string values allocate the result. */
 static inline zend_string *zvalGetStringRunningPhp(zval *zv)
 {
     zval *d = zv;
     ZVAL_DEREF(d);
-    if (Z_TYPE_P(d) != IS_OBJECT) {
+    if (Z_TYPE_P(d) == IS_STRING) {
         return zval_get_string(zv);
     }
     zend_string *s = nullptr;

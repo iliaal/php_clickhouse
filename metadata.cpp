@@ -30,6 +30,7 @@ extern "C" {
 #include "php_clickhouse.h"
 
 #include "lib/clickhouse-cpp/clickhouse/client.h"
+#include "typesToPhp.hpp"
 #include "clickhouse_internal.h"
 #include <stdexcept>
 
@@ -220,7 +221,7 @@ void runHelperSelectFirstRow(zval *return_value, zval *this_obj, const std::stri
             return;
         }
     }
-    array_init(return_value);
+    runPhpCode([&] { array_init(return_value); });
     zval_ptr_dtor(&rows);
 }
 /* {{{ proto array databaseSize(?string database)

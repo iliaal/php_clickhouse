@@ -1267,18 +1267,21 @@ struct PinnedArray {
             ZVAL_COPY(&value, src);
             return;
         }
-        array_init_size(&value, zend_hash_num_elements(ht));
-        zend_ulong h;
-        zend_string *k;
-        ZEND_HASH_FOREACH_KEY_VAL_IND(ht, h, k, e) {
-            zval copy;
-            ZVAL_COPY_DEREF(&copy, e);
-            if (k) {
-                zend_hash_add_new(Z_ARRVAL(value), k, &copy);
-            } else {
-                zend_hash_index_add_new(Z_ARRVAL(value), h, &copy);
-            }
-        } ZEND_HASH_FOREACH_END();
+        ZVAL_UNDEF(&value);
+        runPhpCode([&] {
+            array_init_size(&value, zend_hash_num_elements(ht));
+            zend_ulong h;
+            zend_string *k;
+            ZEND_HASH_FOREACH_KEY_VAL_IND(ht, h, k, e) {
+                zval copy;
+                ZVAL_COPY_DEREF(&copy, e);
+                if (k) {
+                    zend_hash_add_new(Z_ARRVAL(value), k, &copy);
+                } else {
+                    zend_hash_index_add_new(Z_ARRVAL(value), h, &copy);
+                }
+            } ZEND_HASH_FOREACH_END();
+        });
     }
     ~PinnedArray() { zval_ptr_dtor(&value); }
     PinnedArray(const PinnedArray&) = delete;
@@ -1392,8 +1395,8 @@ static ColumnRef appendMapPairsColumn(HashTable *values_ht,
     uint32_t row_count = zend_hash_num_elements(values_ht);
     zval all_keys;
     zval all_values;
-    array_init_size(&all_keys, row_count);
-    array_init_size(&all_values, row_count);
+    ZVAL_UNDEF(&all_keys);
+    ZVAL_UNDEF(&all_values);
     struct ReleasePairs {
         zval *keys;
         zval *values;
@@ -1406,39 +1409,43 @@ static ColumnRef appendMapPairsColumn(HashTable *values_ht,
     /* Copy every pair before converting any: key/value conversion may run
      * __toString, which can rewrite rows or pairs that classifyMapInput()
      * validated but this function has not reached yet. */
-    zval *row;
-    ZEND_HASH_FOREACH_VAL(values_ht, row) {
-        ZVAL_DEREF(row);
-        if (Z_TYPE_P(row) != IS_ARRAY) {
-            throw std::runtime_error("Map row must be a PHP array");
-        }
-        HashTable *row_ht = Z_ARRVAL_P(row);
-        zval tmp;
-        array_init_size(&tmp, zend_hash_num_elements(row_ht));
-        zval *keys = zend_hash_next_index_insert(Z_ARRVAL(all_keys), &tmp);
-        array_init_size(&tmp, zend_hash_num_elements(row_ht));
-        zval *values = zend_hash_next_index_insert(Z_ARRVAL(all_values), &tmp);
-        zval *pair;
-        ZEND_HASH_FOREACH_VAL(row_ht, pair) {
-            ZVAL_DEREF(pair);
-            zval *key = NULL;
-            zval *value = NULL;
-            if (Z_TYPE_P(pair) == IS_ARRAY) {
-                key = zend_hash_index_find(Z_ARRVAL_P(pair), 0);
-                value = zend_hash_index_find(Z_ARRVAL_P(pair), 1);
+    runPhpCode([&] {
+        array_init_size(&all_keys, row_count);
+        array_init_size(&all_values, row_count);
+        zval *row;
+        ZEND_HASH_FOREACH_VAL(values_ht, row) {
+            ZVAL_DEREF(row);
+            if (Z_TYPE_P(row) != IS_ARRAY) {
+                throw std::runtime_error("Map row must be a PHP array");
             }
-            if (!key || !value) {
-                throw std::runtime_error(
-                    "Map ordered pair must be an array of [key, value]");
-            }
-            zval key_copy;
-            zval value_copy;
-            ZVAL_COPY_DEREF(&key_copy, key);
-            ZVAL_COPY_DEREF(&value_copy, value);
-            add_next_index_zval(keys, &key_copy);
-            add_next_index_zval(values, &value_copy);
+            HashTable *row_ht = Z_ARRVAL_P(row);
+            zval tmp;
+            array_init_size(&tmp, zend_hash_num_elements(row_ht));
+            zval *keys = zend_hash_next_index_insert(Z_ARRVAL(all_keys), &tmp);
+            array_init_size(&tmp, zend_hash_num_elements(row_ht));
+            zval *values = zend_hash_next_index_insert(Z_ARRVAL(all_values), &tmp);
+            zval *pair;
+            ZEND_HASH_FOREACH_VAL(row_ht, pair) {
+                ZVAL_DEREF(pair);
+                zval *key = NULL;
+                zval *value = NULL;
+                if (Z_TYPE_P(pair) == IS_ARRAY) {
+                    key = zend_hash_index_find(Z_ARRVAL_P(pair), 0);
+                    value = zend_hash_index_find(Z_ARRVAL_P(pair), 1);
+                }
+                if (!key || !value) {
+                    throw std::runtime_error(
+                        "Map ordered pair must be an array of [key, value]");
+                }
+                zval key_copy;
+                zval value_copy;
+                ZVAL_COPY_DEREF(&key_copy, key);
+                ZVAL_COPY_DEREF(&value_copy, value);
+                add_next_index_zval(keys, &key_copy);
+                add_next_index_zval(values, &value_copy);
+            } ZEND_HASH_FOREACH_END();
         } ZEND_HASH_FOREACH_END();
-    } ZEND_HASH_FOREACH_END();
+    });
 
     for (uint32_t i = 0; i < row_count; ++i) {
         zval *keys = zend_hash_index_find(Z_ARRVAL(all_keys), i);
@@ -2149,23 +2156,25 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 value->Append(std::string_view(ZSTR_VAL(buf.s), ZSTR_LEN(buf.s)));
                 smart_str_free(&buf);
             } else if (Z_TYPE_P(v) == IS_STRING) {
+                bool valid = false;
+                /* The JSON parser allocates from the Zend heap. */
+                runPhpCode([&] {
 #if PHP_VERSION_ID >= 80300
-                if (!php_json_validate_ex(Z_STRVAL_P(v), Z_STRLEN_P(v), 0,
-                                          PHP_JSON_PARSER_DEFAULT_DEPTH)) {
-                    if (EG(exception)) zend_clear_exception();
-                    throw std::runtime_error("JSON insert: string value is not valid JSON");
-                }
+                    valid = php_json_validate_ex(Z_STRVAL_P(v), Z_STRLEN_P(v), 0,
+                                                 PHP_JSON_PARSER_DEFAULT_DEPTH);
 #else
-                zval probe;
-                /* php_json_decode leaves output untouched on failure; initialize before cleanup. */
-                ZVAL_UNDEF(&probe);
-                if (php_json_decode(&probe, Z_STRVAL_P(v), Z_STRLEN_P(v),
-                                    /*assoc=*/true, PHP_JSON_PARSER_DEFAULT_DEPTH) == FAILURE) {
+                    zval probe;
+                    /* php_json_decode leaves output untouched on failure; initialize before cleanup. */
+                    ZVAL_UNDEF(&probe);
+                    valid = php_json_decode(&probe, Z_STRVAL_P(v), Z_STRLEN_P(v),
+                                            /*assoc=*/true, PHP_JSON_PARSER_DEFAULT_DEPTH) == SUCCESS;
+                    zval_ptr_dtor(&probe);
+#endif
+                });
+                if (!valid) {
                     if (EG(exception)) zend_clear_exception();
                     throw std::runtime_error("JSON insert: string value is not valid JSON");
                 }
-                zval_ptr_dtor(&probe);
-#endif
                 value->Append(std::string_view(Z_STRVAL_P(v), Z_STRLEN_P(v)));
             } else if (Z_TYPE_P(v) == IS_NULL) {
                 if (g_allow_null_in_strict == 0) {
@@ -2438,47 +2447,50 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         zval return_should_storage;
         ZVAL_UNDEF(&return_should_storage);
         zval *return_should = &return_should_storage;
-        array_init(return_should);
 
         zval return_tmp_storage;
         ZVAL_UNDEF(&return_tmp_storage);
         zval *return_tmp = &return_tmp_storage;
 
         try {
-            zval *fzval;
-            zval *pzval;
-            for (size_t field = 0; field < arity; field++)
-            {
-                array_init(return_tmp);
-
-                ZEND_HASH_FOREACH_VAL(values_ht, pzval)
+            /* tupleType is owned here; transpose the rows below it. */
+            runPhpCode([&] {
+                array_init(return_should);
+                zval *fzval;
+                zval *pzval;
+                for (size_t field = 0; field < arity; field++)
                 {
-                    ZVAL_DEREF(pzval);
-                    if (Z_TYPE_P(pzval) != IS_ARRAY)
-                    {
-                        throw std::runtime_error("Tuple row must be a PHP array");
-                    }
-                    if (zend_hash_num_elements(Z_ARRVAL_P(pzval)) != arity) {
-                        throw std::runtime_error(
-                            "Tuple row arity does not match the column type");
-                    }
-                    fzval = zend_hash_index_find(Z_ARRVAL_P(pzval), field);
-                    if (NULL == fzval)
-                    {
-                        throw std::runtime_error(
-                            "Tuple row is missing a field value");
-                    }
-                    ZVAL_DEREF(fzval);
-                    Z_TRY_ADDREF_P(fzval);
-                    add_next_index_zval(return_tmp, fzval);
-                }
-                ZEND_HASH_FOREACH_END();
+                    array_init(return_tmp);
 
-                /* Transfer ownership: clear the slot so the catch handler
-                 * doesn't double-free what is now owned by return_should. */
-                add_next_index_zval(return_should, return_tmp);
-                ZVAL_UNDEF(return_tmp);
-            }
+                    ZEND_HASH_FOREACH_VAL(values_ht, pzval)
+                    {
+                        ZVAL_DEREF(pzval);
+                        if (Z_TYPE_P(pzval) != IS_ARRAY)
+                        {
+                            throw std::runtime_error("Tuple row must be a PHP array");
+                        }
+                        if (zend_hash_num_elements(Z_ARRVAL_P(pzval)) != arity) {
+                            throw std::runtime_error(
+                                "Tuple row arity does not match the column type");
+                        }
+                        fzval = zend_hash_index_find(Z_ARRVAL_P(pzval), field);
+                        if (NULL == fzval)
+                        {
+                            throw std::runtime_error(
+                                "Tuple row is missing a field value");
+                        }
+                        ZVAL_DEREF(fzval);
+                        Z_TRY_ADDREF_P(fzval);
+                        add_next_index_zval(return_tmp, fzval);
+                    }
+                    ZEND_HASH_FOREACH_END();
+
+                    /* Transfer ownership: clear the slot so the catch handler
+                     * doesn't double-free what is now owned by return_should. */
+                    add_next_index_zval(return_should, return_tmp);
+                    ZVAL_UNDEF(return_tmp);
+                }
+            });
 
             std::vector<ColumnRef> columns;
             size_t tupleTypeIndex = 0;
@@ -2704,25 +2716,50 @@ static void pointToZval(zval *out, const std::tuple<double, double>& pt)
     add_next_index_double(out, std::get<1>(pt));
 }
 
-// Geo ArrayValueView is iterable but cannot bind to a vector reference.
+/* Geo values are copied out of the column before any PHP allocation: an
+ * ArrayValueView holds a reference to the column, which a memory_limit
+ * bailout would leak. */
+using GeoPoint = std::tuple<double, double>;
+using GeoRing = std::vector<GeoPoint>;
+using GeoPolygon = std::vector<GeoRing>;
+using GeoMultiPolygon = std::vector<GeoPolygon>;
+
 template <typename PointRange>
-static void ringRangeToZval(zval *out, const PointRange& ring)
+static GeoRing copyGeoRing(const PointRange &ring)
+{
+    GeoRing out;
+    for (auto pt : ring) {
+        out.push_back(pt);
+    }
+    return out;
+}
+
+template <typename RingRange>
+static GeoPolygon copyGeoPolygon(const RingRange &poly)
+{
+    GeoPolygon out;
+    for (auto ring : poly) {
+        out.push_back(copyGeoRing(ring));
+    }
+    return out;
+}
+
+static void ringToZval(zval *out, const GeoRing &ring)
 {
     array_init(out);
-    for (auto pt : ring) {
+    for (const GeoPoint &pt : ring) {
         zval pt_zv;
         pointToZval(&pt_zv, pt);
         add_next_index_zval(out, &pt_zv);
     }
 }
 
-template <typename RingRange>
-static void polygonRangeToZval(zval *out, const RingRange& poly)
+static void polygonToZval(zval *out, const GeoPolygon &poly)
 {
     array_init(out);
-    for (auto ring : poly) {
+    for (const GeoRing &ring : poly) {
         zval r_zv;
-        ringRangeToZval(&r_zv, ring);
+        ringToZval(&r_zv, ring);
         add_next_index_zval(out, &r_zv);
     }
 }
@@ -2914,17 +2951,22 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         {
             bool assoc = (fetch_mode & SC_FETCH_JSON_AS_ARRAY) != 0;
             zval decoded;
-            /* Packed string views lack a NUL terminator required by the PHP JSON scanner. */
-            /* php_json_decode takes char* (not const) on PHP 7.4; &str[0]
-             * is a mutable, NUL-terminated pointer on every target. */
-            std::string json_str(sv);
-            if (json_str.size() > MAX_JSON_CELL_BYTES) {
+            if (sv.size() > MAX_JSON_CELL_BYTES) {
                 throw std::runtime_error("JSON read: cell exceeds maximum JSON decode size (16 MiB)");
             }
             /* php_json_decode leaves output untouched on failure. */
             ZVAL_UNDEF(&decoded);
-            if (php_json_decode(&decoded, &json_str[0], json_str.size(), assoc,
-                                PHP_JSON_PARSER_DEFAULT_DEPTH) == FAILURE)
+            bool decoded_ok = false;
+            runPhpCode([&] {
+                /* Packed string views lack a NUL terminator required by the
+                 * PHP JSON scanner; a zend_string adds one, and its buffer is
+                 * mutable for php_json_decode's char * on PHP 7.4. */
+                zend_string *json_str = zend_string_init(sv.data(), sv.size(), 0);
+                decoded_ok = php_json_decode(&decoded, ZSTR_VAL(json_str), ZSTR_LEN(json_str),
+                                             assoc, PHP_JSON_PARSER_DEFAULT_DEPTH) == SUCCESS;
+                zend_string_release(json_str);
+            });
+            if (!decoded_ok)
             {
                 throw std::runtime_error("JSON read: failed to decode server JSON value");
             }
@@ -3627,43 +3669,56 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
 
     case Type::Code::Point:
     {
-        auto col = columnRef->As<ColumnPoint>();
+        auto *col = dynamic_cast<ColumnPoint *>(columnRef.get());
         if (!col) throw std::runtime_error("Point column downcast failed");
+        GeoPoint pt = col->At(row);
         zval pt_zv;
-        pointToZval(&pt_zv, col->At(row));
+        pointToZval(&pt_zv, pt);
         emitNestedZval(arr, &pt_zv, column_name, is_array, fetch_mode);
         break;
     }
     case Type::Code::Ring:
     {
-        auto col = columnRef->As<ColumnRing>();
+        auto *col = dynamic_cast<ColumnRing *>(columnRef.get());
         if (!col) throw std::runtime_error("Ring column downcast failed");
-        zval r_zv;
-        ringRangeToZval(&r_zv, col->At(row));
-        emitNestedZval(arr, &r_zv, column_name, is_array, fetch_mode);
+        GeoRing ring = copyGeoRing(col->At(row));
+        runPhpCode([&] {
+            zval r_zv;
+            ringToZval(&r_zv, ring);
+            emitNestedZval(arr, &r_zv, column_name, is_array, fetch_mode);
+        });
         break;
     }
     case Type::Code::Polygon:
     {
-        auto col = columnRef->As<ColumnPolygon>();
+        auto *col = dynamic_cast<ColumnPolygon *>(columnRef.get());
         if (!col) throw std::runtime_error("Polygon column downcast failed");
-        zval p_zv;
-        polygonRangeToZval(&p_zv, col->At(row));
-        emitNestedZval(arr, &p_zv, column_name, is_array, fetch_mode);
+        GeoPolygon poly = copyGeoPolygon(col->At(row));
+        runPhpCode([&] {
+            zval p_zv;
+            polygonToZval(&p_zv, poly);
+            emitNestedZval(arr, &p_zv, column_name, is_array, fetch_mode);
+        });
         break;
     }
     case Type::Code::MultiPolygon:
     {
-        auto col = columnRef->As<ColumnMultiPolygon>();
+        auto *col = dynamic_cast<ColumnMultiPolygon *>(columnRef.get());
         if (!col) throw std::runtime_error("MultiPolygon column downcast failed");
-        zval mp_zv;
-        array_init(&mp_zv);
+        GeoMultiPolygon multi;
         for (auto poly : col->At(row)) {
-            zval poly_zv;
-            polygonRangeToZval(&poly_zv, poly);
-            add_next_index_zval(&mp_zv, &poly_zv);
+            multi.push_back(copyGeoPolygon(poly));
         }
-        emitNestedZval(arr, &mp_zv, column_name, is_array, fetch_mode);
+        runPhpCode([&] {
+            zval mp_zv;
+            array_init(&mp_zv);
+            for (const GeoPolygon &poly : multi) {
+                zval poly_zv;
+                polygonToZval(&poly_zv, poly);
+                add_next_index_zval(&mp_zv, &poly_zv);
+            }
+            emitNestedZval(arr, &mp_zv, column_name, is_array, fetch_mode);
+        });
         break;
     }
 

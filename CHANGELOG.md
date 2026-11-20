@@ -29,6 +29,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and 8.5.12), a `memory_limit` fatal error while `select()` and the
   streaming readers converted rows leaked up to about 1.9 MB of native result
   data.
+- A `memory_limit` fatal error outside row conversion no longer leaks native
+  memory. This covers allocations around a query's SQL, bound parameters,
+  settings, and query ID; verbose payloads; result, statement, and exception
+  objects; `__construct()` option parsing; and the rows that `insert()`,
+  `insertAssoc()`, `write()`, `insertFromStream()`, and
+  `selectWithExternalData()` convert. Before, each such fatal error leaked
+  the call's native state until the process exited: for example 355 bytes for
+  a `select()` with one typed placeholder, about 9 KB for a two-row
+  `insert()`, and the converted block's columns for a `selectStream()`
+  iterator row. Measured under LeakSanitizer on PHP 8.3, 8.4, and 8.5 debug
+  builds that raise the `memory_limit` error immediately.
+- `selectStatement()` no longer crashes the process at shutdown after a
+  `memory_limit` fatal error while it builds the statement's statistics.
 - `selectWithExternalData()` and `selectStream()` iteration no longer inherit
   NULL or nesting-depth state from a conversion that a fatal error, or a
   reentrant call from `__toString()`, left unfinished. Before, `NULL` was

@@ -136,8 +136,8 @@ void do_execute_into(zval *this_obj,
                      zval *params, const std::string &qid, zval *settings);
 
 /* Defines a ClickHouse method whose body runs between clickhouseMethodEnter()
- * and clickhouseMethodLeave(); the latter re-raises a bailout that PHP code
- * deferred until the body's C++ frames had unwound. */
+ * and clickhouseMethodLeave(); the latter re-raises a bailout that PHP code or
+ * a Zend allocation deferred until the body's C++ frames had unwound. */
 struct clickhouse_method_state {
     int depth;
     uint64_t invocation;
@@ -153,7 +153,10 @@ ZEND_NORETURN void clickhouseMethodBailout(const clickhouse_method_state *state)
         clickhouse_method_state clickhouse_state; \
         clickhouseMethodEnter(&clickhouse_state); \
         zend_try { \
-            clickhouse_method_##cls##_##name(INTERNAL_FUNCTION_PARAM_PASSTHRU); \
+            try { \
+                clickhouse_method_##cls##_##name(INTERNAL_FUNCTION_PARAM_PASSTHRU); \
+            } catch (const PhpBailoutPending &) { \
+            } \
         } zend_catch { \
             clickhouseMethodBailout(&clickhouse_state); \
         } zend_end_try(); \
