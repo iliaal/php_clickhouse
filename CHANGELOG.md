@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-20
+
 ### Added
 
 - Prebuilt PHP 8.6 binaries for Linux (glibc x86_64, arm64) and Windows; macOS PHP 8.6 installs build from source.
@@ -42,6 +44,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the converted block's columns for a `selectStream()` iterator row.
   Measured under LeakSanitizer on PHP 8.3, 8.4, and 8.5 debug builds that
   raise the `memory_limit` error immediately.
+- A `memory_limit` fatal error is no longer dropped, with the script
+  running on, when `ClickHouseStatement::__construct()`, `offsetSet()`,
+  `offsetUnset()`, or `fetchKeyPair()` reaches it inside a ClickHouse
+  callback or while a Fiber is suspended inside a ClickHouse method, or when
+  `selectStream()` iteration reaches it inside a `selectStreamCallback()`
+  callback. That iteration could also return `NULL` or crash.
 - `selectStatement()` no longer crashes the process at shutdown after a
   `memory_limit` fatal error while it builds the statement's statistics.
 - `selectWithExternalData()` and `selectStream()` iteration no longer inherit
@@ -1202,7 +1210,8 @@ own way.
   emits a clear "unsupported" warning. Full Windows build of the
   vendored zstd + absl + lz4 + cityhash is a separate project.
 
-[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.13.2...HEAD
+[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.14.0...HEAD
+[0.14.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.14.0
 [0.13.2]: https://github.com/iliaal/php_clickhouse/releases/tag/0.13.2
 [0.13.1]: https://github.com/iliaal/php_clickhouse/releases/tag/0.13.1
 [0.13.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.13.0
