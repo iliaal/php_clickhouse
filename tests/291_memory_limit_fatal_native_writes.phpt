@@ -23,7 +23,8 @@ $c->execute("CREATE TABLE test.memory_limit_native (a UInt64, s String, n Nullab
              m Map(String, UInt64), t Tuple(UInt8, String)) ENGINE = Null");
 /* Each mode is one API call. The shifts step memory_limit in 32-byte
  * increments through the allocations that call makes while it holds insert
- * blocks, external tables, or client options.
+ * blocks, external tables, or client options, including option values that
+ * raise a warning.
  * Under LeakSanitizer, a child that unwinds natively over that state reports
  * the leak. The modes are split across tests 289 to 291 so that each test
  * stays within the runner's per-test timeout. */
@@ -34,8 +35,9 @@ clickhouse_run_memory_limit_children([
     "from_stream" => range(0, 1056, 32),
     "external" => range(0, 1056, 32),
     "construct" => range(0, 4768, 32),
+    "construct_options" => range(0, 3296, 32),
     "metadata" => range(0, 800, 32),
-], ["insert", "insert_assoc", "write", "from_stream", "external", "construct", "metadata"]);
+], ["insert", "insert_assoc", "write", "from_stream", "external", "construct", "construct_options", "metadata"]);
 $c->execute("DROP TABLE test.memory_limit_native");
 ?>
 --EXPECT--
@@ -45,4 +47,5 @@ write: 19 children, 0 failures
 from_stream: 34 children, 0 failures
 external: 34 children, 0 failures
 construct: 150 children, 0 failures
+construct_options: 104 children, 0 failures
 metadata: 26 children, 0 failures

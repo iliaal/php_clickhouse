@@ -1,5 +1,5 @@
 <?php
-/* Child of tests/287 through 291: hits memory_limit inside a ClickHouse call, then
+/* Child of tests/287 through 293: hits memory_limit inside a ClickHouse call, then
  * queries again from a shutdown function. argv[1] shifts where the limit is
  * reached; argv[2] picks the call. */
 require __DIR__ . "/_clickhouse.inc";
@@ -45,6 +45,20 @@ $native_qid = "memory-limit-native-" . getmypid() . "-" . str_repeat("q", 24);
 $native_params = ["a" => str_repeat("p", 100), "n" => 1234567];
 $native_settings = ["max_threads" => 1];
 $native_sql = "SELECT number AS x, {a:String} AS y, {n} AS z FROM numbers(3)";
+/* Built before the limited call, so that its temporaries are not freed
+ * again inside it. Host names longer than the std::string inline buffer. */
+$native_host = "memory-limit-native-options.invalid";
+$native_object = new stdClass();
+$native_options = ["host" => $native_host] + clickhouse_test_config() + [
+    "send_timeout" => $native_object,
+    "connect_timeout_ms" => $native_object,
+    "tcp_keepalive_idle" => $native_object,
+    "endpoints" => [["host" => $native_host, "port" => $native_object]],
+    "database" => "not.valid",
+];
+$native_warning_handler = function () {
+    return true;
+};
 $native_calls = [
     "execute" => function () use ($c, $native_params, $native_qid, $native_settings) {
         $c->execute("SELECT {a:String} AS y, {n} AS z", $native_params, $native_qid, $native_settings);
@@ -61,7 +75,16 @@ $native_calls = [
     },
     "to_stream" => function () use ($c, $native_sql, $native_params, $native_qid, $native_settings) {
         $fp = fopen("php://memory", "w+");
-        $c->selectToStream($native_sql, $native_params, $fp, "CSVWithNames", $native_qid, $native_settings);
+        $c->selectToStream("SELECT number AS x, {a:String} AS y, {n} AS z, toNullable(number) AS nn
+                            FROM numbers(3)", $native_params, $fp, "CSVWithNames", $native_qid, $native_settings);
+        fclose($fp);
+    },
+    "to_stream_nullable" => function () use ($c) {
+        /* Nullable cells take the native formatting path; enough of them
+         * that the output buffer grows while one is being written. */
+        $fp = fopen("php://memory", "w+");
+        $c->selectToStream("SELECT toNullable(number) AS a, if(number % 7 = 0, NULL, number) AS b
+                            FROM numbers(500)", [], $fp, "TSV");
         fclose($fp);
     },
     "callback" => function () use ($c, $native_sql, $native_params, $native_qid, $native_settings) {
@@ -116,6 +139,17 @@ $native_calls = [
         } catch (ClickHouseException $e) {
         }
     },
+    "construct_options" => function () use ($native_options, $native_warning_handler) {
+        /* An object option value raises a warning, which allocates and runs
+         * the user error handler, while the client options are being built;
+         * the invalid database ends the call before it connects. */
+        set_error_handler($native_warning_handler, E_WARNING);
+        try {
+            new ClickHouse($native_options);
+        } catch (ClickHouseException $e) {
+        }
+        restore_error_handler();
+    },
     "metadata" => function () use ($c) {
         $c->tableSize("memory_limit_native");
         $c->isExists("test", "memory_limit_native");
@@ -159,6 +193,77 @@ if (isset($native_calls[$mode])) {
     }
     $call();
     echo "completed\n";
+    exit;
+}
+
+/* ClickHouseStatement methods that throw without running a query. A fatal
+ * error inside one must end the script even inside a ClickHouse callback or
+ * while a Fiber is suspended inside a ClickHouse method. */
+if (strncmp($mode, "plain_", 6) === 0) {
+    [, $method, $where] = explode("_", $mode);
+    register_shutdown_function(function () use ($c) {
+        ini_set("memory_limit", "-1");
+        try {
+            echo json_encode($c->select("SELECT 1 AS x")), "\n";
+        } catch (ClickHouseException $e) {
+            echo get_class($e), ": ", $e->getMessage(), "\n";
+        }
+    });
+    $stmt = $c->selectStatement("SELECT 1 AS a");
+    $plain_calls = [
+        "construct" => function () {
+            new ClickHouseStatement();
+        },
+        "offsetset" => function () use ($stmt) {
+            $stmt[0] = 1;
+        },
+        "offsetunset" => function () use ($stmt) {
+            unset($stmt[0]);
+        },
+        "fetchkeypair" => function () use ($stmt) {
+            $stmt->fetchKeyPair();
+        },
+    ];
+    $call = $plain_calls[$method];
+    $limited = function () use ($call, $shift) {
+        try {
+            $call();
+        } catch (ClickHouseException $e) {
+        }
+        $pad = str_repeat("p", 3 << 20);
+        gc_collect_cycles();
+        if (@ini_set("memory_limit", (string)(memory_get_usage() + $shift)) === false) {
+            echo "limit below usage\n";
+            return;
+        }
+        try {
+            $call();
+        } catch (ClickHouseException $e) {
+        }
+        echo "completed\n";
+    };
+    if ($where === "callback") {
+        $c->selectStreamCallback("SELECT number FROM numbers(3)", function () use ($limited) {
+            $limited();
+            return false;
+        });
+    } else {
+        $other = new ClickHouse(clickhouse_test_config());
+        $fiber = new Fiber(function () use ($other) {
+            $other->selectStreamCallback("SELECT 1 AS x", function () {
+                Fiber::suspend();
+            });
+        });
+        $fiber->start();
+        /* After a fatal error PHP frees a suspended Fiber without unwinding
+         * it, which would leak the native state of its query; finish it. */
+        register_shutdown_function(function () use ($fiber) {
+            if ($fiber->isSuspended()) {
+                $fiber->resume();
+            }
+        });
+        $limited();
+    }
     exit;
 }
 

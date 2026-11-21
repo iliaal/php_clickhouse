@@ -212,7 +212,14 @@ function clickhouse_run_memory_limit_children(array $cases, array $headroom_mode
                  * with enough headroom it completes its query. */
                 $completed = in_array($mode, $headroom_modes, true) && $count === 0 && $status === 0
                     && preg_match('~^(limit below usage|completed)\n~', $output);
-                $ok = ($completed || ($status === 255 && $count === 1))
+                /* After the fatal error, and the stack trace PHP 8.5 adds to it,
+                 * only the shutdown function's query may print: the call must
+                 * not continue past it. */
+                $after_fatal = $count === 1
+                    ? preg_replace('~^\nStack trace:\n(?:#\d+ [^\n]*\n)+~', "\n",
+                                   strstr(strstr($output, "Fatal error: Allowed memory size"), "\n"))
+                    : "";
+                $ok = ($completed || ($status === 255 && $count === 1 && $after_fatal === "\n[{\"x\":1}]\n"))
                     && substr($output, -10) === "[{\"x\":1}]\n"
                     && strpos($output, "unreachable") === false
                     && strpos($output, "iteration finished") === false
