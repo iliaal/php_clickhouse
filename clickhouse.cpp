@@ -175,6 +175,11 @@ void clickhouseRunPhpCode(void (*fn)(void *), void *ctx)
     if (cxx_error) {
         std::rethrow_exception(cxx_error);
     }
+    /* Code that does not re-raise a pending fatal error, such as a method
+     * that is not a CLICKHOUSE_METHOD, must not let this region continue. */
+    if (UNEXPECTED(g_bailout_pending)) {
+        throw PhpBailoutPending();
+    }
 }
 
 /* Library callbacks can fire while a pending bailout unwinds through catch
@@ -317,6 +322,10 @@ struct clickhouse_iter_object {
     std::vector<Block> blocks;
     /* Cache stable result-schema names to avoid GetColumnName allocations per cell. */
     std::vector<std::string> column_names;
+    /* References to the columns of block current_cols_block, taken outside
+     * current()'s conversion region so that a fatal error there leaks none. */
+    std::vector<ColumnRef> current_cols;
+    size_t current_cols_block;
     size_t block_idx;
     size_t row_idx;
     uint64_t cumulative_row_idx;
@@ -349,6 +358,8 @@ static zend_object *clickhouse_iter_create_object(zend_class_entry *ce)
     iter->fetch_mode = 0;
     new (&iter->blocks) std::vector<Block>();
     new (&iter->column_names) std::vector<std::string>();
+    new (&iter->current_cols) std::vector<ColumnRef>();
+    iter->current_cols_block = SIZE_MAX;
 
     zend_object_std_init(&iter->std, ce);
     object_properties_init(&iter->std, ce);
@@ -361,6 +372,7 @@ static void clickhouse_iter_free_obj(zend_object *object)
     clickhouse_iter_object *iter = clickhouse_iter_from_obj(object);
     iter->blocks.~vector<Block>();
     iter->column_names.~vector<std::string>();
+    iter->current_cols.~vector<ColumnRef>();
     zend_object_std_dtor(&iter->std);
 }
 
@@ -1120,7 +1132,7 @@ CLICKHOUSE_METHOD(__construct)
         else if (cv == 2) Options = Options.SetCompressionMethod(CompressionMethod::ZSTD);
 
         if (php_array_get_value(_ht, "send_timeout", value)) {
-            zend_long n = zval_get_long(value);
+            zend_long n = zvalGetLongRunningPhp(value);
             if (n < 0 || n > (zend_long)(UINT_MAX / 1000U)) {
                 throwClickHouseMessage("send_timeout out of range");
                 return;
@@ -1151,7 +1163,7 @@ CLICKHOUSE_METHOD(__construct)
                 }
                 n = (int64_t)d;
             } else {
-                zend_long l = zval_get_long(v);
+                zend_long l = zvalGetLongRunningPhp(v);
                 if (l < 0 || l > max) {
                     return fail();
                 }
@@ -1184,7 +1196,7 @@ CLICKHOUSE_METHOD(__construct)
             if (!v) return true;
             if (Z_ISREF_P(v)) v = Z_REFVAL_P(v);
             if (Z_ISNULL_P(v)) return true;
-            zend_long n = zval_get_long(v);
+            zend_long n = zvalGetLongRunningPhp(v);
             if (n < 0 || n > INT_MAX) {
                 std::string msg = std::string(key) + " out of range";
                 throwClickHouseMessage(msg.c_str());
@@ -1442,7 +1454,7 @@ CLICKHOUSE_METHOD(__construct)
                     e.host = std::string(host_sg.val(), host_sg.len());
                 }
                 if (port_hold.get()) {
-                    zend_long p = zval_get_long(port_hold.get());
+                    zend_long p = zvalGetLongRunningPhp(port_hold.get());
                     if (p < 1 || p > 65535) {
                         throwClickHouseMessage("Endpoint port out of 1..65535 range");
                         return;
@@ -3115,11 +3127,12 @@ static void csvAppendEscaped(smart_str *buf, const char *s, size_t len)
  * Scalar spellings need no TSV/CSV escaping; unsupported types fall back. */
 static bool tryAppendStreamCell(smart_str *buf, const ColumnRef &col, size_t row)
 {
+    /* Raw pointers: the caller's ColumnRef owns the columns, and a reference
+     * held here would leak if smart_str hit memory_limit. */
     const Column *c = col.get();
-    ColumnRef nested;
     Type::Code code = c->Type()->GetCode();
     if (code == Type::Code::Nullable) {
-        auto n = col->As<ColumnNullable>();
+        auto *n = dynamic_cast<const ColumnNullable *>(c);
         if (!n) {
             return false;
         }
@@ -3127,8 +3140,8 @@ static bool tryAppendStreamCell(smart_str *buf, const ColumnRef &col, size_t row
             smart_str_appendl(buf, "\\N", 2);
             return true;
         }
-        nested = n->Nested();
-        c = nested.get();
+        /* The nullable column keeps its nested column alive. */
+        c = n->Nested().get();
         code = c->Type()->GetCode();
         if (code == Type::Code::Nullable) {
             return false;
@@ -5315,12 +5328,16 @@ CLICKHOUSE_CLASS_METHOD(ClickHouseRowIterator, current)
     ConvertDepthScopeGuard depth_scope;
     try {
         /* Block::operator[] returns an owning ColumnRef; take those
-         * references outside the conversion region below. */
-        std::vector<ColumnRef> cols;
-        cols.reserve(col_count);
-        for (size_t col = 0; col < col_count; ++col) {
-            cols.push_back(block[col]);
+         * references once per block, outside the conversion region below. */
+        if (iter->current_cols_block != iter->block_idx) {
+            iter->current_cols.clear();
+            iter->current_cols.reserve(col_count);
+            for (size_t col = 0; col < col_count; ++col) {
+                iter->current_cols.push_back(block[col]);
+            }
+            iter->current_cols_block = iter->block_idx;
         }
+        const std::vector<ColumnRef> &cols = iter->current_cols;
         runPhpCode([&] {
             array_init_size(return_value, (uint32_t)col_count);
             for (size_t col = 0; col < col_count; ++col) {
@@ -5434,7 +5451,7 @@ PHP_METHOD(ClickHouseException, getQueryId)
  * Materialized result wrapper. Constructed only by
  * ClickHouse::selectStatement(); the public constructor throws.
  */
-PHP_METHOD(ClickHouseStatement, __construct)
+CLICKHOUSE_CLASS_METHOD(ClickHouseStatement, __construct)
 {
     throwClickHouseMessage(
         "ClickHouseStatement is constructed by ClickHouse::selectStatement(); direct construction is not allowed");
@@ -5554,12 +5571,12 @@ PHP_METHOD(ClickHouseStatement, offsetGet)
     ZVAL_COPY(return_value, v);
 }
 
-PHP_METHOD(ClickHouseStatement, offsetSet)
+CLICKHOUSE_CLASS_METHOD(ClickHouseStatement, offsetSet)
 {
     throwClickHouseMessage("ClickHouseStatement is read-only; offsetSet is not supported");
 }
 
-PHP_METHOD(ClickHouseStatement, offsetUnset)
+CLICKHOUSE_CLASS_METHOD(ClickHouseStatement, offsetUnset)
 {
     throwClickHouseMessage("ClickHouseStatement is read-only; offsetUnset is not supported");
 }
@@ -5632,7 +5649,7 @@ PHP_METHOD(ClickHouseStatement, fetchOne)
     ZVAL_COPY(return_value, first);
 }
 
-PHP_METHOD(ClickHouseStatement, fetchKeyPair)
+CLICKHOUSE_CLASS_METHOD(ClickHouseStatement, fetchKeyPair)
 {
     if (zend_parse_parameters_none() == FAILURE) return;
     clickhouse_statement_object *stmt = Z_CLICKHOUSE_STATEMENT_P(getThis());

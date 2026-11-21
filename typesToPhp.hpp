@@ -63,6 +63,20 @@ static inline zend_string *zvalGetStringRunningPhp(zval *zv)
     return s;
 }
 
+/* zval_get_long() warns on an object, and the warning allocates and can run a
+ * user error handler. */
+static inline zend_long zvalGetLongRunningPhp(zval *zv)
+{
+    zval *d = zv;
+    ZVAL_DEREF(d);
+    if (Z_TYPE_P(d) != IS_OBJECT) {
+        return zval_get_long(zv);
+    }
+    zend_long n = 0;
+    runPhpCode([&] { n = zval_get_long(zv); });
+    return n;
+}
+
 /* Own zval_get_string output across C++ exceptions. A throwing __toString
  * returns an interned empty string; raise a sentinel C++ exception while
  * preserving EG(exception) for the PHP boundary. */

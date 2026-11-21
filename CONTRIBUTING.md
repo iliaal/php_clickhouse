@@ -111,12 +111,13 @@ matches either way, so the ASan CI job also runs them through
   tests/288_memory_limit_fatal_fiber_interleaved.phpt
 ```
 
-Add a test to that list in `.github/workflows/tests.yml` when its regression
-is a leak. Tests that run their fatal errors through
-`clickhouse_run_memory_limit_children()` (287 through 291) need no list
-entry to catch a leak: each child is a separate CLI process that the helper
-starts with LeakSanitizer enabled, so a regular `run-tests.php --asan` run
-fails on a child's leak report.
+Add a test to that list in `.github/workflows/tests.yml` when the leak it
+guards against happens in the test process itself. Tests that run their
+fatal errors in child processes through `clickhouse_run_memory_limit_children()`
+(287 through 293) start each child with LeakSanitizer enabled, so a regular
+`run-tests.php --asan` run already fails on a child's leak report. Of those,
+287 and 288 are also on the list, so `test-fatal-leaks.sh` checks them with
+a plain CLI parent process as well.
 
 ## Code style
 
