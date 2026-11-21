@@ -11,6 +11,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Source builds use C11, with no C++ compiler, Abseil, or direct C++ runtime dependency.
 - The PHP API, configuration, conversion rules, and buffered `selectStream()` behavior remain unchanged.
+- The C backend keeps 0.14.0's fatal-error guarantees. A fatal error in a
+  callback, a conversion, a userland stream, or a `memory_limit` error
+  anywhere in a ClickHouse method leaves the client usable from shutdown
+  functions; an interrupted insert commits its accepted blocks. Native buffers
+  are Zend allocations, so request shutdown reclaims what the fatal error
+  skipped. While PHP defers a `memory_limit` error, no method throws.
+- Native protocol buffers count against `memory_limit`. When one does not
+  fit, the call ends with PHP's "Allowed memory size exhausted" fatal error,
+  as in 0.14.0; `selectStream()` still reports it as a catchable
+  `ClickHouseException`.
+- Decoded String columns no longer keep their read-ahead reserve. A retained
+  `selectStream()` result of 69-byte strings is charged about 77 bytes per
+  row instead of 288.
+- `Decimal256`, which neither backend decodes, fails with "unsupported column
+  type: Decimal(76, S)" as soon as its column arrives, including in an empty
+  result and an INSERT's schema. 0.14.0 failed a non-empty read with "some
+  data was not read" and accepted the empty cases.
+- Errors that name a column type spell it as the server does, for example
+  `Decimal(18, 2)` and `Nothing` where 0.14.0 printed `Decimal(18,2)` and
+  `Void`. A JSON column read without
+  `output_format_native_write_json_as_string=1` reports "unsupported JSON
+  serialization version 0" in place of 0.14.0's wording.
 
 ### For contributors
 
@@ -19,6 +41,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Retained older-server protocol gates instead of adopting the C client's default ClickHouse 23.3 minimum.
 - Retained LZ4 1.9.2 and ZSTD 1.5.5 C sources and their license notices under
   `lib/compression/`.
+- The local clickhouse-c patch doubles String read-ahead buffers instead of
+  growing them eightfold and trims them once a column is loaded. It also
+  rejects a compressed frame whose declared size exceeds what LZ4 or ZSTD can
+  produce from its payload, before reserving that size against
+  `memory_limit`.
+- Tests 276 through 293 come from 0.14.0; the C backend's own tests moved to
+  294 through 303. Tests 304 through 307 step `memory_limit` across each
+  call's whole footprint, since native buffers make C calls larger than the
+  ranges of tests 287 through 291.
+- `scripts/differential-decode.sh` compares the C and C++ backends' decoded
+  output over a type corpus against one server.
 
 ## [0.14.0] - 2026-11-20
 
