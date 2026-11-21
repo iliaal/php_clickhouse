@@ -49,7 +49,10 @@ $native_sql = "SELECT number AS x, {a:String} AS y, {n} AS z FROM numbers(3)";
  * again inside it. Host names longer than the std::string inline buffer. */
 $native_host = "memory-limit-native-options.invalid";
 $native_object = new stdClass();
-$native_options = ["host" => $native_host] + clickhouse_test_config() + [
+/* getenv() allocates while it holds the ZTS environment lock, and a fatal
+ * error there leaves the lock held, so request shutdown blocks on it. */
+$native_config = clickhouse_test_config();
+$native_options = ["host" => $native_host] + $native_config + [
     "send_timeout" => $native_object,
     "connect_timeout_ms" => $native_object,
     "tcp_keepalive_idle" => $native_object,
@@ -124,8 +127,8 @@ $native_calls = [
             "rows" => [[1, 1234567], [2, 2345678]],
         ]], $native_params, 0, $native_qid);
     },
-    "construct" => function () {
-        $config = clickhouse_test_config();
+    "construct" => function () use ($native_config) {
+        $config = $native_config;
         $x = new ClickHouse($config + [
             "database" => "test",
             "endpoints" => [["host" => $config["host"], "port" => $config["port"]]],
