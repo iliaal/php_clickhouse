@@ -67,6 +67,7 @@ if test "$PHP_CLICKHOUSE" != "no"; then
         lib/compression/zstd/compress/zstd_lazy.c \
         lib/compression/zstd/compress/zstd_ldm.c \
         lib/compression/zstd/compress/zstd_opt.c \
+        lib/compression/zstd/compress/zstd_preSplit.c \
         lib/compression/zstd/compress/zstdmt_compress.c \
         lib/compression/zstd/decompress/huf_decompress.c \
         lib/compression/zstd/decompress/zstd_ddict.c \

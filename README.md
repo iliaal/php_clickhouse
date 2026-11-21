@@ -54,7 +54,7 @@ phpize
 make && sudo make install
 ```
 
-Add `extension=clickhouse.so` to your `php.ini`. Source builds need a C11 compiler: GCC or Clang on Unix, or the C11-capable MSVC toolset matching your Windows PHP build. The extension does not require a C++ compiler, Abseil, or a C++ runtime. LZ4 1.9.2 and ZSTD 1.5.5 are vendored under `lib/compression/`; the C client includes the native protocol's CityHash implementation.
+Add `extension=clickhouse.so` to your `php.ini`. Source builds need a C11 compiler: GCC or Clang on Unix, or the C11-capable MSVC toolset matching your Windows PHP build. The extension does not require a C++ compiler, Abseil, or a C++ runtime. LZ4 1.11.1 and ZSTD 1.5.7 are vendored under `lib/compression/`; the C client includes the native protocol's CityHash implementation.
 
 TLS builds link directly to OpenSSL's `libssl` and `libcrypto`. You do not need to enable PHP's OpenSSL extension.
 

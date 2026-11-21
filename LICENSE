@@ -64,7 +64,7 @@ The vendored protocol client at lib/clickhouse-c/ is
 ClickHouse/clickhouse-c, distributed under the Apache License 2.0.
 See lib/clickhouse-c/LICENSE for that license text.
 
-The bundled LZ4 1.9.2 and ZSTD 1.5.5 sources are distributed under the
+The bundled LZ4 1.11.1 and ZSTD 1.5.7 sources are distributed under the
 BSD 2-Clause and BSD 3-Clause licenses, respectively. See
 lib/compression/lz4/LICENSE and lib/compression/zstd/LICENSE.
 

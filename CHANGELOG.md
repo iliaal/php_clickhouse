@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### For contributors
+
+- Updated the bundled LZ4 to 1.11.1 and ZSTD to 1.5.7, and retired the LZ4 empty-dictionary patch that LZ4 1.11.1 makes unnecessary.
+
 ## [0.15.0] - 2026-11-21
 
 ### Changed

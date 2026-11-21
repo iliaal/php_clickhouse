@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Verify documented patches, reverse application, and pristine upstream parity.
-# CLICKHOUSE_C_PRISTINE and CLICKHOUSE_CODECS_PRISTINE can reuse local checkouts.
+# CLICKHOUSE_C_PRISTINE, CLICKHOUSE_LZ4_PRISTINE and CLICKHOUSE_ZSTD_PRISTINE can
+# reuse local checkouts.
 set -Eeuo pipefail
 shopt -s inherit_errexit
 
@@ -29,16 +30,24 @@ copy_sources() {
 	done
 }
 
+# An optional patch set may be empty, and Git drops an empty patch directory,
+# so only then is a missing directory accepted; the ledger must list no patch.
 reverse_patches() {
-	local directory=$1 patch_dir=$2 doc=$3
+	local directory=$1 patch_dir=$2 doc=$3 optional=${4:-}
 	local patch heading count=0
 	local -a patches=()
-	[[ -d "${patch_dir}" ]] || fail "missing ${patch_dir}"
 	[[ -f "${doc}" ]] || fail "missing ${doc}"
+	if [[ -n "${optional}" && ! -e "${patch_dir}" ]]; then
+		if grep -q '^## ' "${doc}"; then
+			fail "${doc} documents a patch but ${patch_dir} is missing"
+		fi
+		return 0
+	fi
+	[[ -d "${patch_dir}" ]] || fail "missing ${patch_dir}"
 	shopt -s nullglob
 	patches=("${patch_dir}"/*.patch)
 	shopt -u nullglob
-	((${#patches[@]} > 0)) || fail "no patch files found in ${patch_dir}"
+	((${#patches[@]} > 0)) || [[ -n "${optional}" ]] || fail "no patch files found in ${patch_dir}"
 	while IFS= read -r heading; do
 		[[ "${heading}" == "## "* ]] || continue
 		heading=${heading#\#\# }
@@ -75,6 +84,27 @@ pristine_tree() {
 	fi
 }
 
+upstream_field() {
+	local manifest=$1 wanted=$2 key value
+	[[ -f "${manifest}" ]] || fail "missing ${manifest}"
+	while IFS=' ' read -r key value; do
+		if [[ "${key}" == "${wanted}:" ]]; then
+			printf '%s\n' "${value}"
+			return 0
+		fi
+	done <"${manifest}"
+	fail "${manifest} has no ${wanted}"
+}
+
+codec_pristine() {
+	local name=$1 checkout=$2 pinned repo
+	pinned=$(upstream_field "${root}/.upstream/${name}.yml" pinned)
+	repo=$(upstream_field "${root}/.upstream/${name}.yml" repo)
+	[[ "${pinned}" =~ ^[0-9]+(\.[0-9]+)+$ ]] || fail "invalid ${name} pinned version"
+	[[ "${repo}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail "invalid ${name} repository"
+	pristine_tree "${work}/${name}-pristine" "${checkout}" "${repo}" "v${pinned}"
+}
+
 main() {
 	local pinned="" repo="" key value rel source
 	local -a sources=()
@@ -98,16 +128,18 @@ main() {
 	fi
 
 	copy_sources "${work}/source" lib/compression/lz4 lib/compression/zstd
-	reverse_patches "${work}/source/compression" "${root}/lib/compression/patches" "${root}/lib/compression/LOCAL_PATCHES.md"
-	pristine_tree "${work}/codec-pristine" "${CLICKHOUSE_CODECS_PRISTINE:-}" ClickHouse/clickhouse-cpp v2.6.2
+	reverse_patches "${work}/source/compression" "${root}/lib/compression/patches" "${root}/lib/compression/LOCAL_PATCHES.md" optional
+	codec_pristine lz4 "${CLICKHOUSE_LZ4_PRISTINE:-}"
+	codec_pristine zstd "${CLICKHOUSE_ZSTD_PRISTINE:-}"
 	for rel in "${sources[@]}"; do
 		source=${rel#lib/compression/}
 		case "${source}" in
-		lz4/*) source="contrib/lz4/lz4/${source#lz4/}" ;;
-		zstd/*) source="contrib/zstd/zstd/${source#zstd/}" ;;
+		lz4/*) source="lz4-pristine/lib/${source#lz4/}" ;;
+		zstd/LICENSE) source="zstd-pristine/LICENSE" ;;
+		zstd/*) source="zstd-pristine/lib/${source#zstd/}" ;;
 		*) fail "unexpected codec source ${rel}" ;;
 		esac
-		if ! cmp -s -- "${work}/source/${rel#lib/}" "${work}/codec-pristine/${source}"; then
+		if ! cmp -s -- "${work}/source/${rel#lib/}" "${work}/${source}"; then
 			fail "${rel} differs from pristine upstream after reversing every patch"
 		fi
 	done

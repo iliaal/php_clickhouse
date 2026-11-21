@@ -8,9 +8,10 @@ work=$(mktemp -d)
 trap 'rm -rf -- "${work}"' EXIT
 fixture="${work}/checkout with spaces"
 pristine="${work}/pristine with spaces"
-codecs="${work}/codec pristine with spaces"
-mkdir -p -- "${fixture}"/{scripts,patches/clickhouse-c,.upstream,lib/clickhouse-c,lib/compression/lz4,lib/compression/patches} \
-	"${pristine}" "${codecs}/contrib/lz4/lz4"
+lz4="${work}/lz4 pristine with spaces"
+zstd="${work}/zstd pristine with spaces"
+mkdir -p -- "${fixture}"/{scripts,patches/clickhouse-c,.upstream,lib/clickhouse-c,lib/compression/lz4,lib/compression/zstd,lib/compression/patches} \
+	"${pristine}" "${lz4}/lib" "${zstd}/lib"
 cp -- "${root}/scripts/check-vendored-patches.sh" "${fixture}/scripts/"
 printf 'original\n' >"${pristine}/example.h"
 printf 'second\n' >"${fixture}/lib/clickhouse-c/example.h"
@@ -41,7 +42,13 @@ cat >"${fixture}/patches/clickhouse-c/0002-second patch.patch" <<'PATCH'
 +## 0002-second patch.patch
 PATCH
 
-printf 'original codec\n' >"${codecs}/contrib/lz4/lz4/example.c"
+printf 'pinned: 1.0.0\nrepo: lz4/lz4\n' >"${fixture}/.upstream/lz4.yml"
+printf 'pinned: 1.0.0\nrepo: facebook/zstd\n' >"${fixture}/.upstream/zstd.yml"
+printf 'original codec\n' >"${lz4}/lib/example.c"
+printf 'zstd codec\n' >"${zstd}/lib/example.c"
+printf 'zstd codec\n' >"${fixture}/lib/compression/zstd/example.c"
+printf 'zstd license\n' >"${zstd}/LICENSE"
+printf 'zstd license\n' >"${fixture}/lib/compression/zstd/LICENSE"
 printf 'patched codec\n' >"${fixture}/lib/compression/lz4/example.c"
 printf '## 0001-codec.patch\n' >"${fixture}/lib/compression/LOCAL_PATCHES.md"
 cat >"${fixture}/lib/compression/patches/0001-codec.patch" <<'PATCH'
@@ -54,7 +61,7 @@ PATCH
 
 git init -q "${fixture}"
 git -C "${fixture}" add .
-checker=(env "CLICKHOUSE_C_PRISTINE=${pristine}" "CLICKHOUSE_CODECS_PRISTINE=${codecs}"
+checker=(env "CLICKHOUSE_C_PRISTINE=${pristine}" "CLICKHOUSE_LZ4_PRISTINE=${lz4}" "CLICKHOUSE_ZSTD_PRISTINE=${zstd}"
 	bash "${fixture}/scripts/check-vendored-patches.sh")
 expect_failure() {
 	local message=$1
@@ -89,7 +96,22 @@ printf 'unexpected codec\n' >"${fixture}/lib/compression/lz4/example.c"
 expect_failure '0001-codec.patch does not reverse-apply'
 printf 'patched codec\n' >"${fixture}/lib/compression/lz4/example.c"
 
-printf 'different upstream codec\n' >"${codecs}/contrib/lz4/lz4/example.c"
+printf 'different upstream codec\n' >"${lz4}/lib/example.c"
+expect_failure 'lib/compression/lz4/example.c differs from pristine upstream'
+printf 'original codec\n' >"${lz4}/lib/example.c"
+
+printf 'different license\n' >"${zstd}/LICENSE"
+expect_failure 'lib/compression/zstd/LICENSE differs from pristine upstream'
+printf 'zstd license\n' >"${zstd}/LICENSE"
+
+# Without codec patches the vendored codec sources must equal upstream as-is.
+mv -- "${fixture}/lib/compression/patches" "${work}/codec-patches"
+printf 'original codec\n' >"${fixture}/lib/compression/lz4/example.c"
+expect_failure 'documents a patch but'
+printf 'No local patches.\n' >"${fixture}/lib/compression/LOCAL_PATCHES.md"
+"${checker[@]}" >"${work}/stdout" 2>"${work}/stderr"
+grep -Fxq 'check-vendored-patches: OK (protocol and codec trees reverse to pristine upstream)' "${work}/stdout"
+printf 'patched codec\n' >"${fixture}/lib/compression/lz4/example.c"
 expect_failure 'lib/compression/lz4/example.c differs from pristine upstream'
 
-printf 'vendored patch checker self-test passed (7 cases)\n'
+printf 'vendored patch checker self-test passed (11 cases)\n'

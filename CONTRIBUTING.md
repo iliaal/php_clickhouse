@@ -173,9 +173,10 @@ a plain CLI parent process as well.
 The retained C compression sources have a separate provenance record in
 [lib/compression/UPSTREAM.md](lib/compression/UPSTREAM.md) and patch ledger in
 [lib/compression/LOCAL_PATCHES.md](lib/compression/LOCAL_PATCHES.md). The guard
-compares them with the sources shipped in ClickHouse/clickhouse-cpp v2.6.2;
-that checkout is a verification input, not a build dependency. Use
-`CLICKHOUSE_CODECS_PRISTINE` to supply it locally.
+compares them with the `lz4/lz4` and `facebook/zstd` tags pinned in
+`.upstream/lz4.yml` and `.upstream/zstd.yml`; those checkouts are
+verification inputs, not build dependencies. Use `CLICKHOUSE_LZ4_PRISTINE`
+and `CLICKHOUSE_ZSTD_PRISTINE` to supply them locally.
 
 ## Releases
 

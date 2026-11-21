@@ -1,8 +1,0 @@
-ADD_LIBRARY (lz4 STATIC
-    lz4.c
-    lz4hc.c
-)
-
-set_property(TARGET lz4 PROPERTY POSITION_INDEPENDENT_CODE ON)
-
-ADD_LIBRARY(lz4::lz4 ALIAS lz4)

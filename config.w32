@@ -34,7 +34,7 @@ if (PHP_CLICKHOUSE != "no") {
     ADD_SOURCES(codec_root + "\\zstd\\common",
         "debug.c entropy_common.c error_private.c fse_decompress.c pool.c threading.c xxhash.c zstd_common.c", "clickhouse");
     ADD_SOURCES(codec_root + "\\zstd\\compress",
-        "fse_compress.c hist.c huf_compress.c zstd_compress.c zstd_compress_literals.c zstd_compress_sequences.c zstd_compress_superblock.c zstd_double_fast.c zstd_fast.c zstd_lazy.c zstd_ldm.c zstd_opt.c zstdmt_compress.c", "clickhouse");
+        "fse_compress.c hist.c huf_compress.c zstd_compress.c zstd_compress_literals.c zstd_compress_sequences.c zstd_compress_superblock.c zstd_double_fast.c zstd_fast.c zstd_lazy.c zstd_ldm.c zstd_opt.c zstd_preSplit.c zstdmt_compress.c", "clickhouse");
     ADD_SOURCES(codec_root + "\\zstd\\decompress",
         "huf_decompress.c zstd_ddict.c zstd_decompress.c zstd_decompress_block.c", "clickhouse");
 }
