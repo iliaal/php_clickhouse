@@ -49,9 +49,11 @@ The patch adds the protocol behavior required by the existing PHP API:
   owned. Empty initializers in implementation headers use C11 syntax.
 - Fixed, String, nullable, array-offset, LowCardinality-index, and compressed
   input buffers grow in steps as preceding bytes arrive. Ioless readers defer
-  allocation until the submitted payload is available. String buffers retain
-  geometric capacity across rows. Valid empty compressed frames are consumed
-  before reading the next data-bearing frame. Block metadata arrays grow as
+  allocation until the submitted payload is available. String buffers double
+  their capacity across rows, then shrink to the loaded size once the column is
+  complete, so a retained block does not keep the reserve. Valid empty
+  compressed frames are consumed before reading the next data-bearing frame.
+  Block metadata arrays grow as
   columns arrive, and cleanup visits only allocated slots. Type-child and Tuple
   field arrays grow geometrically instead of reallocating for every element.
   In PHP compatibility mode, parsed nodes borrow length-delimited names from

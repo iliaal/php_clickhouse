@@ -348,7 +348,7 @@ index 57f472a..0000000
 -          path: /tmp/ch-test-srv*/server.*
 -          if-no-files-found: ignore
 diff --git a/LOCAL_PATCHES.md b/LOCAL_PATCHES.md
-index 27f7296..ceed358 100644
+index d3b7479..a42b5ac 100644
 --- a/LOCAL_PATCHES.md
 +++ b/LOCAL_PATCHES.md
 @@ -1,13 +1,13 @@
@@ -369,7 +369,7 @@ index 27f7296..ceed358 100644
  updating upstream.
 
  ## 0001-php-compatibility.patch
-@@ -98,3 +98,15 @@ at revision 54459, using uncompressed, LZ4, and ZSTD connections and both capped
+@@ -100,3 +100,15 @@ at revision 54459, using uncompressed, LZ4, and ZSTD connections and both capped
  and uncapped chunks. `test/test_php_live.c` repeats the compatible operations
  with `CHC_PHP_COMPAT=1` against a separate disposable server. The standard
  `bash test.sh` runner includes these tests.

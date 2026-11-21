@@ -510,6 +510,44 @@ test_query_coalescing(void)
     }
 }
 
+/* A decoded String column can be retained by its block, so its buffer ends
+ * at the loaded size instead of keeping the read-ahead reserve. */
+static void
+test_string_column_capacity(void)
+{
+    current_test = "string_column_capacity";
+    enum { ROWS = 3000, WIDTH = 69 };
+    static uint8_t data[ROWS * WIDTH];
+    static uint64_t offsets[ROWS];
+    chc_alloc al = chc_alloc_stdlib();
+    chc_err err = {0};
+    test_mem_sink wire = {0};
+    chc_io sink = {.ud = &wire, .write = test_mem_sink_write};
+    test_mem_src src;
+    chc_io source;
+    chc_in in;
+    chc_column *column = NULL;
+    for (size_t i = 0; i < ROWS; ++i) {
+        memset(data + i * WIDTH, 'a' + (int) (i % 26), WIDTH);
+        offsets[i] = (uint64_t) (i + 1) * WIDTH;
+    }
+    CHECK(chc__write_string_body(&sink, offsets, data, ROWS, &err) == CHC_OK);
+    test_mem_src_init(&src, &source, wire.data, wire.len);
+    int rc = chc_in_init(&in, &source, &al, 0, &err);
+    CHECK_OK(rc, err);
+    rc = chc__col_read_string(&in, ROWS, &column, &err);
+    CHECK(rc == CHC_OK);
+    if (rc == CHC_OK) {
+        CHECK_EQ_U64(column->str.bytes, sizeof data);
+        CHECK_EQ_U64(column->str.offsets[ROWS - 1], sizeof data);
+        CHECK(memcmp(column->str.data, data, sizeof data) == 0);
+        chc__column_destroy(column, &al);
+    }
+    chc_in_free(&in);
+out:
+    test_mem_sink_free(&wire);
+}
+
 int main(void)
 {
     test_hello(732);
@@ -521,6 +559,7 @@ int main(void)
     test_empty_type_arguments();
     test_data_coalescing();
     test_query_coalescing();
+    test_string_column_capacity();
     if (fail_count) return 1;
     fprintf(stderr, "all PHP compatibility unit tests passed\n");
     return 0;

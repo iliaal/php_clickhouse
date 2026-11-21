@@ -1059,7 +1059,10 @@ chc__read_growing(chc_in *in, uint8_t **buf, size_t *cap,
     while (loaded < total) {
         if (*cap <= loaded) {
             size_t limit = reserve_ahead ? SIZE_MAX : total;
-            size_t next = loaded > limit / 8 ? limit : loaded * 8;
+            /* A reserve outlives the read, so it doubles; an exact-sized
+             * read grows faster because its final size is known. */
+            size_t factor = reserve_ahead ? 2 : 8;
+            size_t next = loaded > limit / factor ? limit : loaded * factor;
             if (next < first) next = first;
             if (next > total && !reserve_ahead) next = total;
             uint8_t *grown = chc__realloc(in->al, *buf, *cap, next, err);
@@ -2429,6 +2432,15 @@ chc__col_read_string(chc_in *in, size_t n_rows,
         }
         total += (size_t) len;
         c->str.offsets[i] = total;
+    }
+    /* Decoded blocks can be retained, so release the geometric reserve. A
+     * refused shrink keeps the larger buffer and is not an error. */
+    if (c->str.bytes > total && total) {
+        uint8_t *exact = al->realloc(al->ud, c->str.data, c->str.bytes, total);
+        if (exact) {
+            c->str.data = exact;
+            c->str.bytes = total;
+        }
     }
     *out = c;
     return CHC_OK;
