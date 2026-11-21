@@ -8,7 +8,7 @@ pure-PHP HTTP client.
 
 ```sh
 cd bench
-composer update --no-dev          # installs phpClickHouse
+composer install --no-dev
 CLICKHOUSE_HOST=127.0.0.1 \
 CLICKHOUSE_PORT=9000 \
 CLICKHOUSE_HTTP_PORT=8123 \
@@ -16,6 +16,10 @@ CLICKHOUSE_USER=test \
 CLICKHOUSE_PASSWD=test \
 php -d extension=../modules/clickhouse.so bench_mark.php
 ```
+
+Use `composer install` to install the comparator version in the checked-in
+`composer.lock`. `composer update` resolves dependencies again and may change
+the comparator version.
 
 The runner uses one `Memory` table per client. Table creation, truncation,
 and an initial warm-up are outside the measured interval. Each result is
