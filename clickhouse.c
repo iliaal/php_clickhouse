@@ -170,15 +170,6 @@ void ch_native_oom_note(size_t bytes)
 	ch_native_oom_last.bytes = bytes;
 }
 
-bool ch_zend_oom(void)
-{
-#ifdef ZEND_HAS_OOM
-	return ZEND_HAS_OOM();
-#else
-	return false;
-#endif
-}
-
 static bool ch_exit_exception(zend_object *exception)
 {
 #if PHP_VERSION_ID >= 80100

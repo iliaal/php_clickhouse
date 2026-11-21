@@ -136,7 +136,14 @@ void ch_method_run(ch_method_body body, int flags, INTERNAL_FUNCTION_PARAMETERS)
 #define CH_METHOD(name) CH_METHOD_FLAGS(ClickHouse, name, CH_METHOD_GUARD)
 #define CH_PLAIN_METHOD(cls, name) CH_METHOD_FLAGS(cls, name, 0)
 /* True while PHP defers, raises, or has raised a memory_limit error. */
-bool ch_zend_oom(void);
+static inline bool ch_zend_oom(void)
+{
+#ifdef ZEND_HAS_OOM
+	return ZEND_HAS_OOM();
+#else
+	return false;
+#endif
+}
 
 /* ch_query.c: acquire before preparation or callback-capable coercion.
  * Only a caller whose begin succeeded calls end. allow_insert permits
