@@ -20,7 +20,7 @@ require __DIR__ . "/_clickhouse.inc";
  * first shutdown function stops the relay so that the recovery reconnect
  * fails. A relay on the same port then lets the next call reconnect. */
 $relay = <<<'PHP'
-$config = json_decode($argv[1], true);
+$config = ["host" => $argv[1], "port" => $argv[3]];
 $server = stream_socket_server("tcp://127.0.0.1:" . $argv[2], $errno, $error);
 if (!$server) { fwrite(STDERR, "$errno: $error\n"); exit(1); }
 echo substr(strrchr(stream_socket_get_name($server, false), ":"), 1), "\n";
@@ -56,7 +56,8 @@ $child = <<<'PHP'
 require $argv[1];
 $relayFile = $argv[2];
 function relay_start($relayFile, $port) {
-    $process = proc_open([PHP_BINARY, "-n", "-f", $relayFile, json_encode(clickhouse_test_config()), (string)$port],
+    $config = clickhouse_test_config();
+    $process = proc_open([PHP_BINARY, "-n", "-f", $relayFile, $config["host"], (string)$port, (string)$config["port"]],
         [1 => ["pipe", "w"], 2 => ["pipe", "w"]], $pipes);
     return [$process, (int)trim((string)fgets($pipes[1])), $pipes];
 }
@@ -105,10 +106,15 @@ $relayFile = tempnam($dir, "clickhouse-312-relay-");
 $childFile = tempnam($dir, "clickhouse-312-child-");
 file_put_contents($relayFile, "<?php\n" . $relay);
 file_put_contents($childFile, "<?php\n" . $child);
-preg_match('~\s(/\S*clickhouse\.so)$~m', file_get_contents("/proc/self/maps"), $m);
-$php = getenv("TEST_PHP_EXECUTABLE") ?: PHP_BINARY;
-$proc = proc_open([$php, "-n", "-d", "extension=" . $m[1], "-d", "display_errors=1",
-                   $childFile, __DIR__ . "/_clickhouse.inc", $relayFile],
+/* PHP 7.4 may build json, which the extension requires, as a shared module. */
+$args = [getenv("TEST_PHP_EXECUTABLE") ?: PHP_BINARY, "-n"];
+preg_match_all('~\s(/\S*/(json|clickhouse)\.so)$~m', file_get_contents("/proc/self/maps"), $m, PREG_SET_ORDER);
+$loaded = array_column($m, 1, 2);
+foreach (["json", "clickhouse"] as $name) {
+    if (isset($loaded[$name])) array_push($args, "-d", "extension=" . $loaded[$name]);
+}
+$proc = proc_open(array_merge($args, ["-d", "display_errors=1",
+                   $childFile, __DIR__ . "/_clickhouse.inc", $relayFile]),
                   [1 => ["pipe", "w"], 2 => ["redirect", 1]], $pipes);
 $output = stream_get_contents($pipes[1]);
 fclose($pipes[1]);

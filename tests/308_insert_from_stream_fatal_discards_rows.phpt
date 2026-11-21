@@ -70,8 +70,13 @@ echo "unreachable\n";
 PHP;
 $file = tempnam(sys_get_temp_dir(), "clickhouse-308-");
 file_put_contents($file, "<?php\n" . $child);
-preg_match('~\s(/\S*clickhouse\.so)$~m', file_get_contents("/proc/self/maps"), $m);
-$php = getenv("TEST_PHP_EXECUTABLE") ?: PHP_BINARY;
+/* PHP 7.4 may build json, which the extension requires, as a shared module. */
+$args = [getenv("TEST_PHP_EXECUTABLE") ?: PHP_BINARY, "-n"];
+preg_match_all('~\s(/\S*/(json|clickhouse)\.so)$~m', file_get_contents("/proc/self/maps"), $m, PREG_SET_ORDER);
+$loaded = array_column($m, 1, 2);
+foreach (["json", "clickhouse"] as $name) {
+    if (isset($loaded[$name])) array_push($args, "-d", "extension=" . $loaded[$name]);
+}
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
 foreach (["error", "memory", "exception"] as $kind) {
@@ -79,8 +84,8 @@ foreach (["error", "memory", "exception"] as $kind) {
         $table = "test.stream_fatal_308_{$kind}_$shutdown";
         $c->execute("DROP TABLE IF EXISTS $table");
         $c->execute("CREATE TABLE $table (v UInt32) ENGINE = MergeTree ORDER BY tuple()");
-        $proc = proc_open([$php, "-n", "-d", "extension=" . $m[1], "-d", "display_errors=1",
-                           $file, __DIR__ . "/_clickhouse.inc", $table, $kind, $shutdown],
+        $proc = proc_open(array_merge($args, ["-d", "display_errors=1",
+                           $file, __DIR__ . "/_clickhouse.inc", $table, $kind, $shutdown]),
                           [1 => ["pipe", "w"], 2 => ["redirect", 1]], $pipes);
         $output = stream_get_contents($pipes[1]);
         fclose($pipes[1]);
