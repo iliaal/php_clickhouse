@@ -62,7 +62,9 @@ The patch adds the protocol behavior required by the existing PHP API:
   subtree's spelling. Generic upstream mode retains separate terminated names.
 - `CHC_PHP_COMPAT=1` selects the previous column factory's supported types,
   required temporal parameters, diagnostics, and 1 GiB decompressed-frame
-  limit. It validates offsets before consuming their nested values and checks
+  limit. A frame that declares more output than its codec can produce from
+  its compressed bytes is rejected before the output buffer is allocated. It
+  validates offsets before consuming their nested values and checks
   dictionary indexes before returning a block. SimpleAggregateFunction with a
   supported terminal argument becomes that argument's type, matching the old
   factory. LowCardinality dictionaries retain the previous String/FixedString

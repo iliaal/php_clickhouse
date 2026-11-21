@@ -1671,7 +1671,7 @@ index a27b217..49c9fd4 100644
          /* Kind + leading string committed; resume owns the cursor from here.
           * Do NOT rewind/reset on a mid-block would-block: resume re-parses only
 diff --git a/clickhouse-compression.h b/clickhouse-compression.h
-index 3d7a067..525c052 100644
+index 3d7a067..84f4f16 100644
 --- a/clickhouse-compression.h
 +++ b/clickhouse-compression.h
 @@ -181,7 +181,7 @@ chc__city_hash128_with_seed(const char *s, size_t len, chc__u128 seed)
@@ -1768,7 +1768,7 @@ index 3d7a067..525c052 100644
      uint32_t comp_with_hdr, orig;
      memcpy(&comp_with_hdr, header + 1, sizeof comp_with_hdr);
      memcpy(&orig, header + 5, sizeof orig);
-@@ -429,10 +450,15 @@ chc__decomp_read_frame(chc__decomp_src *s, chc_err *err)
+@@ -429,34 +450,51 @@ chc__decomp_read_frame(chc__decomp_src *s, chc_err *err)
      orig = chc__bswap32(orig);
      if (comp_with_hdr < CHC__COMP_HEADER_BYTES)
          return chc__err_set(err, CHC_ERR_PROTOCOL,
@@ -1786,7 +1786,20 @@ index 3d7a067..525c052 100644
      /* LZ4 API sizes are int; reject dst outside domain before (int)
       * narrowing in codec adapter. src side bounded by frame cap above */
      if (method == CHC__COMP_LZ4 && orig > (uint32_t) INT_MAX)
-@@ -441,22 +467,22 @@ chc__decomp_read_frame(chc__decomp_src *s, chc_err *err)
+         return chc__err_set(err, CHC_ERR_PROTOCOL,
+             "LZ4 original size oversized: %u", orig);
++    /* No frame decompresses past its codec's best ratio: LZ4 emits at most
++     * 255 bytes per input byte, and every ZSTD block spends at least three
++     * header bytes on at most 128 KiB. Reject a larger declared size before
++     * reserving the output buffer for it. */
++    if (CHC_PHP_COMPAT) {
++        uint64_t body = comp_with_hdr - CHC__COMP_HEADER_BYTES;
++        uint64_t bound = method == CHC__COMP_LZ4 ? body * 255 + 64 : (body / 3 + 1) * 131072;
++        if (orig > bound)
++            return chc__err_set(err, CHC_ERR_PROTOCOL,
++                "decompressed block size %u exceeds what %u compressed bytes can hold, data is likely corrupted",
++                orig, comp_with_hdr);
++    }
 
      size_t payload = comp_with_hdr - CHC__COMP_HEADER_BYTES;
      /* Capture the bytes hashed: header (9B) + payload. */
@@ -1815,7 +1828,7 @@ index 3d7a067..525c052 100644
 
      if (orig > s->frame_cap) {
          uint8_t *nb = chc__realloc(s->al, s->frame_buf, s->frame_cap,
-@@ -464,6 +490,8 @@ chc__decomp_read_frame(chc__decomp_src *s, chc_err *err)
+@@ -464,6 +502,8 @@ chc__decomp_read_frame(chc__decomp_src *s, chc_err *err)
          if (!nb) return CHC_ERR_OOM;
          s->frame_buf = nb; s->frame_cap = orig;
      }
@@ -1824,7 +1837,7 @@ index 3d7a067..525c052 100644
      switch (method) {
      case CHC__COMP_LZ4:
          if (!s->codec || !s->codec->lz4_decompress)
-@@ -471,7 +499,7 @@ chc__decomp_read_frame(chc__decomp_src *s, chc_err *err)
+@@ -471,7 +511,7 @@ chc__decomp_read_frame(chc__decomp_src *s, chc_err *err)
                  "LZ4 frame received but no codec configured");
          rc = s->codec->lz4_decompress(s->codec->ud,
              s->comp_buf + CHC__COMP_HEADER_BYTES, payload,
@@ -1833,7 +1846,7 @@ index 3d7a067..525c052 100644
          if (rc) return rc;
          break;
      case CHC__COMP_ZSTD:
-@@ -480,12 +508,13 @@ chc__decomp_read_frame(chc__decomp_src *s, chc_err *err)
+@@ -480,12 +520,13 @@ chc__decomp_read_frame(chc__decomp_src *s, chc_err *err)
                  "ZSTD frame received but no codec configured");
          rc = s->codec->zstd_decompress(s->codec->ud,
              s->comp_buf + CHC__COMP_HEADER_BYTES, payload,
@@ -1849,7 +1862,7 @@ index 3d7a067..525c052 100644
      }
      s->frame_pos = 0;
      s->frame_fill = orig;
-@@ -497,7 +526,8 @@ chc__decomp_io_read(void *ud, void *buf, size_t len, size_t *out_n,
+@@ -497,7 +538,8 @@ chc__decomp_io_read(void *ud, void *buf, size_t len, size_t *out_n,
                      chc_err *err)
  {
      chc__decomp_src *s = ud;
@@ -1859,7 +1872,7 @@ index 3d7a067..525c052 100644
          int rc = chc__decomp_read_frame(s, err);
          if (rc) { *out_n = 0; return rc; }
      }
-@@ -558,14 +588,20 @@ chc__lz4_decompress(void *ud, const void *src, size_t src_len,
+@@ -558,14 +600,20 @@ chc__lz4_decompress(void *ud, const void *src, size_t src_len,
      (void) ud;
      int n = LZ4_decompress_safe((const char *) src, (char *) dst,
                                  (int) src_len, (int) original);
@@ -1882,7 +1895,7 @@ index 3d7a067..525c052 100644
 
  void
  chc_lz4_codec_init(chc_codec *out)
-@@ -586,12 +622,16 @@ chc_lz4_codec_init(chc_codec *out)
+@@ -586,12 +634,16 @@ chc_lz4_codec_init(chc_codec *out)
 
  #include <zstd.h>
 
@@ -1900,7 +1913,7 @@ index 3d7a067..525c052 100644
      if (ZSTD_isError(n))
          return chc__err_set(err, CHC_ERR_OOM,
                              "ZSTD_compress failed: %s", ZSTD_getErrorName(n));
-@@ -607,10 +647,12 @@ chc__zstd_decompress(void *ud, const void *src, size_t src_len,
+@@ -607,10 +659,12 @@ chc__zstd_decompress(void *ud, const void *src, size_t src_len,
      size_t n = ZSTD_decompress(dst, original, src, src_len);
      if (ZSTD_isError(n))
          return chc__err_set(err, CHC_ERR_PROTOCOL,
@@ -2834,10 +2847,10 @@ index 0000000..27878c1
 +}
 diff --git a/LOCAL_PATCHES.md b/LOCAL_PATCHES.md
 new file mode 100644
-index 0000000..d3b7479
+index 0000000..19365ed
 --- /dev/null
 +++ b/LOCAL_PATCHES.md
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,104 @@
 +# Local compatibility patch
 +
 +This directory contains ClickHouse/clickhouse-c commit
@@ -2902,7 +2915,9 @@ index 0000000..d3b7479
 +  subtree's spelling. Generic upstream mode retains separate terminated names.
 +- `CHC_PHP_COMPAT=1` selects the previous column factory's supported types,
 +  required temporal parameters, diagnostics, and 1 GiB decompressed-frame
-+  limit. It validates offsets before consuming their nested values and checks
++  limit. A frame that declares more output than its codec can produce from
++  its compressed bytes is rejected before the output buffer is allocated. It
++  validates offsets before consuming their nested values and checks
 +  dictionary indexes before returning a block. SimpleAggregateFunction with a
 +  supported terminal argument becomes that argument's type, matching the old
 +  factory. LowCardinality dictionaries retain the previous String/FixedString

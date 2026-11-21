@@ -464,6 +464,18 @@ chc__decomp_read_frame(chc__decomp_src *s, chc_err *err)
     if (method == CHC__COMP_LZ4 && orig > (uint32_t) INT_MAX)
         return chc__err_set(err, CHC_ERR_PROTOCOL,
             "LZ4 original size oversized: %u", orig);
+    /* No frame decompresses past its codec's best ratio: LZ4 emits at most
+     * 255 bytes per input byte, and every ZSTD block spends at least three
+     * header bytes on at most 128 KiB. Reject a larger declared size before
+     * reserving the output buffer for it. */
+    if (CHC_PHP_COMPAT) {
+        uint64_t body = comp_with_hdr - CHC__COMP_HEADER_BYTES;
+        uint64_t bound = method == CHC__COMP_LZ4 ? body * 255 + 64 : (body / 3 + 1) * 131072;
+        if (orig > bound)
+            return chc__err_set(err, CHC_ERR_PROTOCOL,
+                "decompressed block size %u exceeds what %u compressed bytes can hold, data is likely corrupted",
+                orig, comp_with_hdr);
+    }
 
     size_t payload = comp_with_hdr - CHC__COMP_HEADER_BYTES;
     /* Capture the bytes hashed: header (9B) + payload. */
