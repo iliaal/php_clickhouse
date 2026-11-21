@@ -54,6 +54,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `memory_limit` error: `select()`, `selectStatement()`, and
   `selectWithExternalData()` stop converting rows once the result exceeds
   `memory_limit` and report the "Allowed memory size exhausted" fatal error.
+  No method throws a `ClickHouseException` while that error is pending, so
+  no `catch` block runs before it and PHP reports no second fatal error.
   Before, conversion continued until PHP hit the hard limit and killed the
   process (exit 137 under FrankenPHP).
 

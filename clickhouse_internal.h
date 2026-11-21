@@ -165,13 +165,15 @@ ZEND_NORETURN void clickhouseMethodBailout(const clickhouse_method_state *state)
     static void clickhouse_method_##cls##_##name(INTERNAL_FUNCTION_PARAMETERS)
 #define CLICKHOUSE_METHOD(name) CLICKHOUSE_CLASS_METHOD(ClickHouse, name)
 
-/* True when an operation failed: a PHP exception is set, or a fatal error is
- * unwinding the enclosing ClickHouse method. Callers must not allocate PHP
- * values in either case. */
+/* True when an operation failed: a PHP exception is set, a fatal error is
+ * unwinding the enclosing ClickHouse method, or PHP deferred a memory_limit
+ * error, which suppresses the exception the operation would throw. Callers
+ * must not allocate PHP values in the first two cases. */
 bool clickhouseBailoutPending();
+bool clickhouseOomPending();
 static inline bool clickhouseOperationFailed()
 {
-    return EG(exception) || clickhouseBailoutPending();
+    return EG(exception) || clickhouseBailoutPending() || clickhouseOomPending();
 }
 
 #endif /* PHP_CLICKHOUSE_INTERNAL_H */

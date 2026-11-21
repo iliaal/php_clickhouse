@@ -93,6 +93,32 @@ static thread_local std::vector<ActiveQuery> g_active_queries;
 static thread_local uint64_t g_method_invocations = 0;
 static thread_local uint64_t g_current_method = 0;
 
+/* PHP releases that defer the memory_limit error (ZEND_HAS_OOM) raise it
+ * when the method returns. An exception thrown meanwhile can stay pending
+ * past that fatal error, and PHP then reports it as a second fatal error
+ * ("Couldn't execute method Exception::__toString"), so throw none. */
+bool clickhouseOomPending()
+{
+#ifdef ZEND_HAS_OOM
+    return ZEND_HAS_OOM();
+#else
+    return false;
+#endif
+}
+
+/* Creating the exception can itself reach memory_limit, and a caller's catch
+ * block would run before the deferred error. Once PHP raises that error it
+ * unwinds with its own exit exception, which must stay. */
+static void discardExceptionAfterOom()
+{
+#ifdef ZEND_HAS_OOM
+    if (EG(delayed_oom).state == ZEND_OOM_STATE_PENDING && EG(exception)
+        && !zend_is_unwind_exit(EG(exception)) && !zend_is_graceful_exit(EG(exception))) {
+        zend_clear_exception();
+    }
+#endif
+}
+
 void clickhouseMethodEnter(clickhouse_method_state *state)
 {
     if (UNEXPECTED(g_bailout_pending)) {
@@ -118,6 +144,7 @@ void clickhouseMethodLeave(const clickhouse_method_state *state)
         g_bailout_pending = false;
         zend_bailout();
     }
+    discardExceptionAfterOom();
 }
 
 /* A bailout raised outside clickhouseRunPhpCode (memory_limit in the method
@@ -876,10 +903,14 @@ zend_module_entry clickhouse_module_entry =
  * error unwinds the caller's C++ frames; the method wrapper re-raises it. */
 static void throwClickHouseMessage(const char *msg)
 {
+    if (clickhouseOomPending()) {
+        return;
+    }
     try {
         runPhpCode([&] { zend_throw_exception(clickhouse_exception_ce, msg, 0); });
     } catch (const PhpBailoutPending &) {
     }
+    discardExceptionAfterOom();
 }
 
 /* The handshake takes a literal database name, not a db.table identifier. */
@@ -1670,7 +1701,7 @@ static bool tryResetConnectionReapplyDatabase(zval *this_obj, clickhouse_object 
 /* Only ServerException supplies structured server code/name fields. */
 void throwClickHouseError(const std::exception &e, const std::string &query_id)
 {
-    if (g_bailout_pending) {
+    if (g_bailout_pending || clickhouseOomPending()) {
         return;
     }
     /* Preserve the original PHP exception behind a sentinel C++ throw. */
@@ -1700,6 +1731,7 @@ void throwClickHouseError(const std::exception &e, const std::string &query_id)
         });
     } catch (const PhpBailoutPending &) {
     }
+    discardExceptionAfterOom();
 }
 
 static std::string formatParamValue(zval *v, const std::string &type,
