@@ -54,7 +54,7 @@ typedef union {
 extern zend_module_entry clickhouse_module_entry;
 #define phpext_clickhouse_ptr &clickhouse_module_entry
 
-#define PHP_CLICKHOUSE_VERSION "0.14.0"
+#define PHP_CLICKHOUSE_VERSION "0.15.0"
 
 #define SC_FETCH_ONE 1
 #define SC_FETCH_KEY_PAIR 2

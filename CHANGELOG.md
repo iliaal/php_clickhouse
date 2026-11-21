@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-21
+
 ### Changed
 
 - Source builds use C11, with no C++ compiler, Abseil, or direct C++ runtime dependency.
@@ -1263,7 +1265,8 @@ own way.
   emits a clear "unsupported" warning. Full Windows build of the
   vendored zstd + absl + lz4 + cityhash is a separate project.
 
-[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.14.0...HEAD
+[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.15.0...HEAD
+[0.15.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.15.0
 [0.14.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.14.0
 [0.13.2]: https://github.com/iliaal/php_clickhouse/releases/tag/0.13.2
 [0.13.1]: https://github.com/iliaal/php_clickhouse/releases/tag/0.13.1
