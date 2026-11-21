@@ -79,6 +79,13 @@ foreach (["json", "clickhouse"] as $name) {
 }
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
+/* PHP 8.4 deprecates E_USER_ERROR, but still raises it as a fatal error after
+ * the deprecation notice, so each kind is matched by its own fatal message. */
+$fatal = [
+    "error" => "stream failed",
+    "memory" => "Allowed memory size",
+    "exception" => "Uncaught RuntimeException: stream failed",
+];
 foreach (["error", "memory", "exception"] as $kind) {
     foreach (["0", "1"] as $shutdown) {
         $table = "test.stream_fatal_308_{$kind}_$shutdown";
@@ -92,7 +99,7 @@ foreach (["error", "memory", "exception"] as $kind) {
         proc_close($proc);
         preg_match('~^shutdown .*$~m', $output, $line);
         echo "$kind, shutdown function $shutdown: ",
-            preg_match('~^(PHP )?Fatal error: (Allowed memory size|stream failed|Uncaught RuntimeException: stream failed)~m', $output) ? "fatal" : "no fatal",
+            preg_match('~^(PHP )?Fatal error: ' . $fatal[$kind] . '~m', $output) ? "fatal" : "no fatal",
             ", ", $line ? $line[0] . ", " : "",
             "rows=", $c->select("SELECT count() FROM $table", [], ClickHouse::FETCH_ONE), "\n";
         $c->execute("DROP TABLE $table");

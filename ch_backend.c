@@ -95,6 +95,8 @@ struct ch_connection {
 	chc_io io;
 	chc_codec codec;
 	chc_client *client;
+	/* Successful connects; a reconnect makes older recovery requests moot. */
+	uint64_t generation;
 	chc_server_info server_info;
 	bool has_server_info;
 	uint32_t receive_timeout_ms;
@@ -1165,6 +1167,8 @@ static int ch_connect_endpoint(ch_connection *connection, size_t endpoint_index,
 	}
 	if (status != CHC_OK) {
 		ch_backend_disconnect(connection);
+	} else {
+		++connection->generation;
 	}
 	return status;
 }
@@ -1329,6 +1333,11 @@ int ch_backend_limit_io_timeouts(ch_connection *connection, uint32_t maximum_ms,
 chc_client *ch_backend_client(ch_connection *connection)
 {
 	return connection ? connection->client : NULL;
+}
+
+uint64_t ch_backend_generation(const ch_connection *connection)
+{
+	return connection ? connection->generation : 0;
 }
 
 const ch_backend_endpoint *ch_backend_current_endpoint(const ch_connection *connection)

@@ -209,7 +209,7 @@ static ZEND_NORETURN void ch_method_bailout(zend_execute_data *execute_data,
 		if (obj->query_active && obj->operation_owner == execute_data) {
 			obj->query_active = false;
 			obj->operation_owner = NULL;
-			obj->needs_recovery = true;
+			ch_operation_needs_recovery(obj);
 		}
 	}
 	ch_native_oom_last = *outer;

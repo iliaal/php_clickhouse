@@ -205,6 +205,12 @@ void ch_throw_error(int status, const chc_err *error,
 	zend_throw_exception_object(&exception);
 }
 
+void ch_operation_needs_recovery(clickhouse_object *obj)
+{
+	obj->needs_recovery = true;
+	obj->recovery_generation = ch_backend_generation(obj->backend);
+}
+
 int ch_operation_begin(clickhouse_object *obj, bool allow_insert)
 {
 	if (obj->query_active) {
@@ -215,6 +221,11 @@ int ch_operation_begin(clickhouse_object *obj, bool allow_insert)
 	if (!obj->backend) return ch_fail("ClickHouse client is not initialized");
 	obj->query_active = true;
 	obj->operation_owner = EG(current_execute_data);
+	/* A connect since the request (a retry or ping reconnect in a later
+	 * call) already replaced the connection that needed recovery. */
+	if (obj->needs_recovery && ch_backend_generation(obj->backend) != obj->recovery_generation) {
+		obj->needs_recovery = false;
+	}
 	if (obj->needs_recovery) ch_operation_recover(obj);
 	if (!allow_insert && obj->insert_active) {
 		obj->query_active = false;
@@ -231,7 +242,7 @@ void ch_operation_end(clickhouse_object *obj)
 	obj->operation_owner = NULL;
 	/* Native allocation is refused while a memory_limit error is pending, so
 	 * the operation's own recovery may have left the connection closed. */
-	if (ch_zend_oom()) obj->needs_recovery = true;
+	if (ch_zend_oom()) ch_operation_needs_recovery(obj);
 	ch_failure_clear(obj);
 }
 

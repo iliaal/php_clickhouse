@@ -45,6 +45,8 @@ typedef struct {
 	/* A fatal error, or a memory_limit error, interrupted an operation; the
 	 * next one finalizes its insert or reconnects before it starts. */
 	bool needs_recovery;
+	/* The backend's connect generation when needs_recovery was set. */
+	uint64_t recovery_generation;
 	zend_string *failure_message;
 	zend_long failure_code;
 	ch_stats stats;
@@ -189,6 +191,7 @@ void ch_insert_abandon(clickhouse_object *obj);
 /* Finalize the accepted blocks of an interrupted insert, or reconnect, with
  * callbacks suppressed and no PHP exception. Called by ch_operation_begin(). */
 void ch_operation_recover(clickhouse_object *obj);
+void ch_operation_needs_recovery(clickhouse_object *obj);
 
 /* Root *out before nested allocations; destroy accepts partial state.
  * Snapshot descriptors/rows before conversion can invoke user code. */

@@ -252,7 +252,7 @@ int ch_insert_recover(clickhouse_object *obj, bool finalize)
 	if (result != SUCCESS) {
 		/* The reconnect closes the old connection even when it fails. */
 		result = ch_reset_after_error(obj);
-		if (result != SUCCESS) obj->needs_recovery = true;
+		if (result != SUCCESS) ch_operation_needs_recovery(obj);
 		ch_insert_clear(obj);
 	}
 	ch_failure_clear(obj);
@@ -276,7 +276,7 @@ void ch_operation_recover(clickhouse_object *obj)
 	/* A failed reconnect closed the connection, which ends the server's
 	 * INSERT too; a retained session would only make the client report an
 	 * insert in progress. Retry the reconnect on the next operation. */
-	if (ch_reset_after_error(obj) != SUCCESS) obj->needs_recovery = true;
+	if (ch_reset_after_error(obj) != SUCCESS) ch_operation_needs_recovery(obj);
 	ch_insert_clear(obj);
 }
 

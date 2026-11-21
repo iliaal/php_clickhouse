@@ -96,6 +96,7 @@ int ch_backend_limit_io_timeouts(ch_connection *connection, uint32_t maximum_ms,
 void ch_backend_disconnect(ch_connection *connection);
 void ch_backend_destroy(ch_connection *connection);
 chc_client *ch_backend_client(ch_connection *connection);
+uint64_t ch_backend_generation(const ch_connection *connection);
 const ch_backend_endpoint *ch_backend_current_endpoint(const ch_connection *connection);
 /* Last successfully connected Hello remains available after disconnect or a
  * failed reconnect; the returned strings belong to the connection. */

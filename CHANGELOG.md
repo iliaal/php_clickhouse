@@ -54,7 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tests 276 through 293 come from 0.14.0; the C backend's own tests moved to
   294 through 303. Tests 304 through 307 step `memory_limit` across each
   call's whole footprint, since native buffers make C calls larger than the
-  ranges of tests 287 through 291. Tests 308 through 312 cover inserts
+  ranges of tests 287 through 291. Tests 308 through 313 cover inserts
   interrupted by fatal errors, `selectToStream()` float spelling, compressed
   frame bounds, the `selectStream()` memory message, and failed reconnects.
 - `scripts/differential-decode.sh` compares the C and C++ backends' decoded
