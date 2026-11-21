@@ -170,6 +170,11 @@ void ch_native_oom_note(size_t bytes)
 	ch_native_oom_last.bytes = bytes;
 }
 
+bool ch_native_oom_refused(const zend_execute_data *frame)
+{
+	return frame && ch_native_oom_last.frame == frame;
+}
+
 static bool ch_exit_exception(zend_object *exception)
 {
 #if PHP_VERSION_ID >= 80100

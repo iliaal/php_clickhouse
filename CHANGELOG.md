@@ -14,20 +14,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The C backend keeps 0.14.0's fatal-error guarantees. A fatal error in a
   callback, a conversion, a userland stream, or a `memory_limit` error
   anywhere in a ClickHouse method leaves the client usable from shutdown
-  functions; an interrupted insert commits its accepted blocks. Native buffers
+  functions. As in 0.14.0, a fatal error before `insert()` or
+  `insertAssoc()` has sent its block commits none of that call's rows, a `writeStart()` session commits the
+  blocks its earlier `write()` calls sent, and `insertFromStream()`
+  discards every batch it sent, as it does after a stream read error. Native buffers
   are Zend allocations, so request shutdown reclaims what the fatal error
   skipped. While PHP defers a `memory_limit` error, no method throws.
 - Native protocol buffers count against `memory_limit`. When one does not
   fit, the call ends with PHP's "Allowed memory size exhausted" fatal error,
   as in 0.14.0; `selectStream()` still reports it as a catchable
   `ClickHouseException`.
-- Decoded String columns no longer keep their read-ahead reserve. A retained
-  `selectStream()` result of 69-byte strings is charged about 77 bytes per
-  row instead of 288.
+- A retained `selectStream()` result counts in `memory_get_usage()`: about
+  77 bytes per row for 100,000 69-byte strings, where 0.14.0 kept the result
+  outside PHP's allocator and reported none of it.
 - `Decimal256`, which neither backend decodes, fails with "unsupported column
   type: Decimal(76, S)" as soon as its column arrives, including in an empty
-  result and an INSERT's schema. 0.14.0 failed a non-empty read with "some
-  data was not read" and accepted the empty cases.
+  result and an INSERT's schema. 0.14.0 returned a one-row read such as
+  `toDecimal256(1.5, 2)` as "1.50", lost sync with the server's stream on
+  reads of two or more rows (failing with errors such as "unimplemented 22"),
+  and accepted the empty cases.
 - Errors that name a column type spell it as the server does, for example
   `Decimal(18, 2)` and `Nothing` where 0.14.0 printed `Decimal(18,2)` and
   `Void`. A JSON column read without
@@ -49,7 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tests 276 through 293 come from 0.14.0; the C backend's own tests moved to
   294 through 303. Tests 304 through 307 step `memory_limit` across each
   call's whole footprint, since native buffers make C calls larger than the
-  ranges of tests 287 through 291.
+  ranges of tests 287 through 291. Tests 308 through 312 cover inserts
+  interrupted by fatal errors, `selectToStream()` float spelling, compressed
+  frame bounds, the `selectStream()` memory message, and failed reconnects.
 - `scripts/differential-decode.sh` compares the C and C++ backends' decoded
   output over a type corpus against one server.
 

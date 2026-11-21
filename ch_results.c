@@ -549,6 +549,8 @@ static size_t ch_column_bytes(const chc_column *column)
 	return SIZE_MAX;
 }
 
+#define CH_STREAM_BUFFER_LIMIT "selectStream: buffered result exceeds PHP memory_limit; use selectStreamCallback() for unbounded streaming or raise memory_limit"
+
 typedef struct {
 	clickhouse_iter_object *iterator;
 	zend_string *query_id;
@@ -572,7 +574,7 @@ static ch_block_action ch_collect_blocks(clickhouse_object *obj, chc_block **own
 		for (size_t col = 0; col < columns; ++col) incoming = ch_size_add(incoming, ch_column_bytes(chc_block_column(block, col)));
 		if (floor > incoming) incoming = floor;
 		if (used >= limit || iter->buffered_estimate > limit - used || incoming > limit - used - iter->buffered_estimate) {
-			ch_result_error("selectStream: buffered result exceeds PHP memory_limit; use selectStreamCallback() for unbounded streaming or raise memory_limit", result->query_id);
+			ch_result_error(CH_STREAM_BUFFER_LIMIT, result->query_id);
 			return CH_BLOCK_FAIL;
 		}
 	}
@@ -614,7 +616,15 @@ CH_METHOD_FLAGS(ClickHouse, selectStream, CH_METHOD_GUARD | CH_METHOD_CATCHABLE_
 	if (ch_query_prepare(obj, &query, sql, params, query_id, settings, NULL) == FAILURE) goto done;
 	context.query_id = query.query_id;
 	if (ch_result_start(obj, &query, "select_start", flags, true) == FAILURE) goto done;
-	if (ch_query_run(obj, &query, NULL, 0, ch_collect_blocks, &context) == FAILURE) goto done;
+	if (ch_query_run(obj, &query, NULL, 0, ch_collect_blocks, &context) == FAILURE) {
+		if (ch_native_oom_refused(execute_data) && EG(exception)
+			&& instanceof_function(EG(exception)->ce, clickhouse_exception_ce)) {
+			zend_clear_exception();
+			ch_failure_set(obj, -1, ZEND_STRL(CH_STREAM_BUFFER_LIMIT));
+			ch_result_error(CH_STREAM_BUFFER_LIMIT, query.query_id);
+		}
+		goto done;
+	}
 	if (ch_result_finish(obj, "select_finish", context.blocks, true) == FAILURE) goto done;
 	status = SUCCESS;
 done:
@@ -817,6 +827,17 @@ static int ch_stream_append_cell(smart_str *buffer, zval *cell, ch_stream_format
 {
 	zend_string *text;
 	if (Z_TYPE_P(cell) == IS_NULL) { smart_str_appendl(buffer, "\\N", 2); return SUCCESS; }
+	if (Z_TYPE_P(cell) == IS_DOUBLE) {
+		/* PHP 8.5 warns when zval_get_string() meets NAN. php_gcvt() at the
+		 * precision setting is the same spelling (NAN, INF, -INF, -0, 1.0E+25)
+		 * without that warning. */
+		char number[128];
+		int precision = (int)EG(precision);
+		if (precision > 100) precision = 100;
+		php_gcvt(Z_DVAL_P(cell), precision, '.', 'E', number);
+		smart_str_appends(buffer, number);
+		return SUCCESS;
+	}
 	text = zval_get_string(cell);
 	if (EG(exception)) { if (text) zend_string_release(text); return FAILURE; }
 	if (ch_stream_csv(format)) ch_csv_escape(buffer, ZSTR_VAL(text), ZSTR_LEN(text));

@@ -107,6 +107,7 @@ void ch_insert_clear(clickhouse_object *obj)
 	}
 	obj->insert_started_ns = 0;
 	obj->insert_active = false;
+	obj->insert_discard = false;
 }
 
 int ch_insert_begin(clickhouse_object *obj, ch_query *query)
@@ -249,10 +250,10 @@ int ch_insert_recover(clickhouse_object *obj, bool finalize)
 		result = ch_insert_end(obj);
 	}
 	if (result != SUCCESS) {
+		/* The reconnect closes the old connection even when it fails. */
 		result = ch_reset_after_error(obj);
-		if (result == SUCCESS) {
-			ch_insert_clear(obj);
-		}
+		if (result != SUCCESS) obj->needs_recovery = true;
+		ch_insert_clear(obj);
 	}
 	ch_failure_clear(obj);
 	obj->failure_message = failure_message;
@@ -268,20 +269,21 @@ void ch_operation_recover(clickhouse_object *obj)
 		obj->pending_backend = NULL;
 	}
 	/* Without a schema the server has not accepted the INSERT yet. */
-	if (obj->insert_active && obj->insert_schema && ch_insert_end_impl(obj, false) == SUCCESS) {
+	if (obj->insert_active && obj->insert_schema && !obj->insert_discard
+		&& ch_insert_end_impl(obj, false) == SUCCESS) {
 		return;
 	}
-	if (ch_reset_after_error(obj) == SUCCESS) {
-		ch_insert_clear(obj);
-	} else {
-		obj->needs_recovery = true;
-	}
+	/* A failed reconnect closed the connection, which ends the server's
+	 * INSERT too; a retained session would only make the client report an
+	 * insert in progress. Retry the reconnect on the next operation. */
+	if (ch_reset_after_error(obj) != SUCCESS) obj->needs_recovery = true;
+	ch_insert_clear(obj);
 }
 
 void ch_insert_abandon(clickhouse_object *obj)
 {
 	chc_err error = {0};
-	if (!obj->insert_active || !obj->backend || !ch_backend_client(obj->backend)) {
+	if (!obj->insert_active || obj->insert_discard || !obj->backend || !ch_backend_client(obj->backend)) {
 		return;
 	}
 	if (ch_backend_limit_io_timeouts(obj->backend, 5000, &error) == CHC_OK) {
@@ -1263,6 +1265,7 @@ CH_METHOD(insertFromStream)
 	}
 	obj = Z_CLICKHOUSE_P(getThis());
 	if (ch_insert_guard(obj, query_id) != SUCCESS) return;
+	obj->insert_discard = !obj->insert_active;
 	ch_query_init(&query);
 	ZVAL_COPY_DEREF(&stream_hold, stream_value);
 	ZVAL_UNDEF(&parser.row);
@@ -1336,6 +1339,7 @@ cleanup:
 	if (sql) zend_string_release(sql);
 	zval_ptr_dtor(&stream_hold);
 	ch_query_clear(&query);
+	if (!obj->insert_active) obj->insert_discard = false;
 	ch_operation_end(obj);
 	if (result == SUCCESS) RETVAL_LONG(batch.total);
 }

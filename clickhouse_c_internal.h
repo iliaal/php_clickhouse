@@ -35,6 +35,9 @@ typedef struct {
 	/* Native INSERT outlives one PHP method's reentry guard. The schema can
 	 * be NULL while BeginInsert is still receiving the server's response. */
 	bool insert_active;
+	/* insertFromStream() owns the session: a fatal error must discard its
+	 * sent blocks, as a read error does, instead of committing them. */
+	bool insert_discard;
 	chc_block *insert_schema;
 	bool query_active;
 	/* The method invocation whose operation set query_active. */
@@ -122,6 +125,8 @@ extern zend_class_entry *clickhouse_statement_ce;
  * reports it as a ClickHouseException (selectStream buffering). While PHP
  * defers a memory_limit error (ZEND_HAS_OOM), no method leaves an exception
  * pending other than PHP's own exit. */
+/* True when a native allocation was refused during this method invocation. */
+bool ch_native_oom_refused(const zend_execute_data *frame);
 #define CH_METHOD_GUARD 1
 #define CH_METHOD_CATCHABLE_NATIVE_OOM 2
 typedef void (*ch_method_body)(INTERNAL_FUNCTION_PARAMETERS);
