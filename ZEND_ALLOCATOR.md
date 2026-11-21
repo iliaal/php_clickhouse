@@ -36,9 +36,9 @@ and `CLICKHOUSE_PASSWD` configured:
 NO_INTERACTION=1 php run-tests.php -j1 -d extension="$PWD/modules/clickhouse.so" \
     tests/211_stream_native_memory_limit.phpt \
     tests/213_stream_untyped_null_column.phpt \
-    tests/283_zend_native_memory_accounting.phpt \
-    tests/284_zend_native_memory_shared_limit.phpt \
-    tests/285_zend_native_memory_no_double_charge.phpt
+    tests/301_zend_native_memory_accounting.phpt \
+    tests/302_zend_native_memory_shared_limit.phpt \
+    tests/303_zend_native_memory_no_double_charge.phpt
 ```
 
 The new tests cover retained-byte accounting and release, iterator ownership
