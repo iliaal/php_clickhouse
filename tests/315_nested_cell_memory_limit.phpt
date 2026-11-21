@@ -56,8 +56,10 @@ foreach ($cases as $label => $response) {
     $output = stream_get_contents($pipes[1]);
     fclose($pipes[1]);
     $status = proc_close($child);
+    /* PHP before 8.2 can exit with 1 rather than 255 after a memory_limit
+     * error that leaves the heap over its limit. */
     $fatal = strpos($output, "Allowed memory size of 134217728 bytes exhausted") !== false;
-    echo $label, ": ", $status === 255 && $fatal ? "memory_limit error" : "exit $status " . trim(substr($output, 0, 300)),
+    echo $label, ": ", ($status === 255 || $status === 1) && $fatal ? "memory_limit error" : "exit $status " . trim(substr($output, 0, 300)),
         wire_mock_stop($mock), "\n";
 }
 ?>
