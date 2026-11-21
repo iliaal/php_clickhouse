@@ -20,6 +20,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Retained LZ4 1.9.2 and ZSTD 1.5.5 C sources and their license notices under
   `lib/compression/`.
 
+## [0.14.0] - 2026-11-20
+
+### Added
+
+- Prebuilt PHP 8.6 binaries for Linux (glibc x86_64, arm64) and Windows; macOS PHP 8.6 installs build from source.
+
+### Fixed
+
+- A fatal error during a query no longer leaves the client stuck or leaks
+  native memory. Affected fatal errors happen inside a row, progress,
+  profile, or verbose callback; inside `__toString()` or `jsonSerialize()`
+  while `insert()`, `insertAssoc()`, `write()`, or
+  `selectWithExternalData()` convert values; inside a userland stream
+  wrapper that `insertFromStream()` reads; or on reaching `memory_limit`
+  during `select()`, `selectStatement()`, `selectWithExternalData()`,
+  `selectStreamCallback()`, or `selectToStream()`, or while a
+  `selectStream()` iterator converts rows. Before, every later call on that
+  client, such as calls from shutdown functions, threw "Reentrant operation:
+  another query is already in progress". A fatal error in `insert()`
+  conversion of 200,000 rows also leaked about 5.9 MB. On PHP releases that
+  raise the `memory_limit` error immediately (before 8.2.35, 8.3.36, 8.4.27,
+  and 8.5.12), a `memory_limit` fatal error while `select()` and the
+  streaming readers converted rows leaked up to about 1.9 MB of native result
+  data.
+- A `memory_limit` fatal error outside row conversion no longer leaks native
+  memory. This covers allocations around a query's SQL, bound parameters,
+  settings, and query ID; verbose payloads; result, statement, and exception
+  objects; `__construct()` option parsing, including option values that
+  raise a warning; Nullable cells that `selectToStream()` writes; and the
+  rows that `insert()`, `insertAssoc()`, `write()`, `insertFromStream()`,
+  and `selectWithExternalData()` convert. Before, each such fatal error
+  leaked the call's native state until the process exited: for example
+  355 bytes for a `select()` with one typed placeholder, 53 bytes to about
+  10 KB for a two-row `insert()` depending on where the limit was reached,
+  and the converted block's columns for a `selectStream()` iterator row.
+  Measured under LeakSanitizer on PHP 8.3, 8.4, and 8.5 debug builds that
+  raise the `memory_limit` error immediately.
+- A `memory_limit` fatal error is no longer dropped, with the script
+  running on, when `ClickHouseStatement::__construct()`, `offsetSet()`,
+  `offsetUnset()`, or `fetchKeyPair()` reaches it inside a ClickHouse
+  callback or while a Fiber is suspended inside a ClickHouse method, or when
+  `selectStream()` iteration reaches it inside a `selectStreamCallback()`
+  callback. That iteration could also return `NULL` or crash.
+- `selectStatement()` no longer crashes the process at shutdown after a
+  `memory_limit` fatal error while it builds the statement's statistics.
+- `selectWithExternalData()` and `selectStream()` iteration no longer inherit
+  NULL or nesting-depth state from a conversion that a fatal error, or a
+  reentrant call from `__toString()`, left unfinished. Before, `NULL` was
+  accepted for a non-Nullable external column and nested results failed with
+  "nested-type depth exceeds limit". The state is per thread, so under
+  FrankenPHP and other threaded SAPIs it carried into later requests.
+- PHP 8.2.35, 8.3.36, 8.4.27, 8.5.12, 8.6.0, and later, which defer the
+  `memory_limit` error: `select()`, `selectStatement()`, and
+  `selectWithExternalData()` stop converting rows once the result exceeds
+  `memory_limit` and report the "Allowed memory size exhausted" fatal error.
+  No method throws a `ClickHouseException` while that error is pending, so
+  no `catch` block runs before it and PHP reports no second fatal error.
+  Before, conversion continued until PHP hit the hard limit and killed the
+  process (exit 137 under FrankenPHP).
+
 ## [0.13.2] - 2026-10-26
 
 ### Fixed
@@ -1163,7 +1223,8 @@ own way.
   emits a clear "unsupported" warning. Full Windows build of the
   vendored zstd + absl + lz4 + cityhash is a separate project.
 
-[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.13.2...HEAD
+[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.14.0...HEAD
+[0.14.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.14.0
 [0.13.2]: https://github.com/iliaal/php_clickhouse/releases/tag/0.13.2
 [0.13.1]: https://github.com/iliaal/php_clickhouse/releases/tag/0.13.1
 [0.13.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.13.0

@@ -75,6 +75,51 @@ tests when the server is unreachable; CI uses a separate
 [summary guard](scripts/assert-phpt-summary.sh) to reject an all-skip run
 and unexpected skips.
 
+### Threaded ZTS request regression
+
+The PHP 8.4 ZTS CI cell also builds the shared embed SAPI and runs
+`scripts/test-zts-request-thread.sh`. Unlike CLI PHPTs, this starts module
+initialization on the main thread and constructs `ClickHouse` on fresh
+worker threads. It protects the per-request TSRM cache initialization
+without requiring a ClickHouse server.
+
+To run locally on Linux, build PHP with `--enable-zts --enable-embed=shared`,
+build the extension with that PHP's `phpize` and `php-config`, then run:
+
+```sh
+PHP_CONFIG=/path/to/php-zts/bin/php-config \
+  ./scripts/test-zts-request-thread.sh modules/clickhouse.so
+```
+
+The same cell runs `scripts/test-zts-fatal-state.sh`, which needs the
+ClickHouse server from the CLICKHOUSE_* variables. It runs two requests on
+one worker thread: the first ends in a fatal error inside `insert()`
+conversion, and the second checks that no conversion state carried over.
+Run it locally the same way, with the server variables set.
+
+### Fatal-error leak regressions
+
+Some tests guard against native memory leaked by a fatal error. Their output
+matches either way, so the ASan CI job also runs them through
+`scripts/test-fatal-leaks.sh` with LeakSanitizer enabled:
+
+```sh
+./scripts/test-fatal-leaks.sh /path/to/asan/php modules/clickhouse.so \
+  tests/277_select_memory_limit_deferred_oom.phpt tests/278_fatal_in_row_callback.phpt \
+  tests/285_select_memory_limit_fatal_client_usable.phpt \
+  tests/286_map_memory_limit_fatal_client_usable.phpt \
+  tests/287_memory_limit_fatal_any_allocation.phpt \
+  tests/288_memory_limit_fatal_fiber_interleaved.phpt
+```
+
+Add a test to that list in `.github/workflows/tests.yml` when the leak it
+guards against happens in the test process itself. Tests that run their
+fatal errors in child processes through `clickhouse_run_memory_limit_children()`
+(287 through 293) start each child with LeakSanitizer enabled, so a regular
+`run-tests.php --asan` run already fails on a child's leak report. Of those,
+287 and 288 are also on the list, so `test-fatal-leaks.sh` checks them with
+a plain CLI parent process as well.
+
 ## Code style
 
 - Two-space indent for PHP, four-space for C.

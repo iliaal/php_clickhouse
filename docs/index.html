@@ -560,6 +560,7 @@ $stats = $ch-&gt;getStatistics();
 // blocks, rows_before_limit, applied_limit, elapsed_ms</code></pre>
 <div class="note warn">
 <p>A progress, profile, or streaming row callback that throws unwinds the packet loop. The extension resets the connection before propagating the exception, so the client can be reused immediately.</p>
+<p>A fatal error still ends the request. That covers a fatal error in a callback, in <code>__toString()</code> or <code>jsonSerialize()</code> while values convert for an insert, or in a userland stream wrapper that <code>insertFromStream()</code> reads. The extension first unwinds the query and recovers the connection, so shutdown functions can reuse the client.</p>
 </div>
 
 <h2 id="logging">Query log <a class="anchor" href="#logging">#</a></h2>
