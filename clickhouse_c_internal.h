@@ -37,6 +37,11 @@ typedef struct {
 	bool insert_active;
 	chc_block *insert_schema;
 	bool query_active;
+	/* The method invocation whose operation set query_active. */
+	const zend_execute_data *operation_owner;
+	/* A fatal error, or a memory_limit error, interrupted an operation; the
+	 * next one finalizes its insert or reconnects before it starts. */
+	bool needs_recovery;
 	zend_string *failure_message;
 	zend_long failure_code;
 	ch_stats stats;
@@ -108,6 +113,31 @@ extern zend_class_entry *clickhouse_exception_ce;
 extern zend_class_entry *clickhouse_iter_ce;
 extern zend_class_entry *clickhouse_statement_ce;
 
+/* clickhouse.c: PHP method boundaries. A fatal error (zend_bailout) in PHP
+ * code or a Zend allocation longjmps over the method's C frames. The guarded
+ * runner hands the operation that invocation started to the client's next
+ * operation, then re-raises the fatal error. Native allocations never bail
+ * out: a refused one fails the operation, and the runner turns it into PHP's
+ * memory_limit fatal error once the method returns, except where the method
+ * reports it as a ClickHouseException (selectStream buffering). While PHP
+ * defers a memory_limit error (ZEND_HAS_OOM), no method leaves an exception
+ * pending other than PHP's own exit. */
+#define CH_METHOD_GUARD 1
+#define CH_METHOD_CATCHABLE_NATIVE_OOM 2
+typedef void (*ch_method_body)(INTERNAL_FUNCTION_PARAMETERS);
+void ch_method_run(ch_method_body body, int flags, INTERNAL_FUNCTION_PARAMETERS);
+#define CH_METHOD_FLAGS(cls, name, flags) \
+	static void ch_method_##cls##_##name(INTERNAL_FUNCTION_PARAMETERS); \
+	PHP_METHOD(cls, name) \
+	{ \
+		ch_method_run(ch_method_##cls##_##name, (flags), INTERNAL_FUNCTION_PARAM_PASSTHRU); \
+	} \
+	static void ch_method_##cls##_##name(INTERNAL_FUNCTION_PARAMETERS)
+#define CH_METHOD(name) CH_METHOD_FLAGS(ClickHouse, name, CH_METHOD_GUARD)
+#define CH_PLAIN_METHOD(cls, name) CH_METHOD_FLAGS(cls, name, 0)
+/* True while PHP defers, raises, or has raised a memory_limit error. */
+bool ch_zend_oom(void);
+
 /* ch_query.c: acquire before preparation or callback-capable coercion.
  * Only a caller whose begin succeeded calls end. allow_insert permits
  * write/writeEnd on the existing session; nested calls remain prohibited. */
@@ -143,6 +173,10 @@ int ch_insert_recover(clickhouse_object *obj, bool finalize);
 /* Finalize an abandoned INSERT with the existing 5s I/O cap, suppress
  * callbacks, and never emit a new PHP exception during destruction. */
 void ch_insert_abandon(clickhouse_object *obj);
+
+/* Finalize the accepted blocks of an interrupted insert, or reconnect, with
+ * callbacks suppressed and no PHP exception. Called by ch_operation_begin(). */
+void ch_operation_recover(clickhouse_object *obj);
 
 /* Root *out before nested allocations; destroy accepts partial state.
  * Snapshot descriptors/rows before conversion can invoke user code. */

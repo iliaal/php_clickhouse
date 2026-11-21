@@ -10,8 +10,11 @@ The allocator rejects a request before calling Zend when its worst-case heap
 growth would exceed the available limit. Small allocations may need a new
 2 MiB Zend chunk. Huge allocations also need rounded payload storage and a
 tracking node. Reallocation budgets for the old and new storage to coexist.
-These checks preserve catchable native allocation errors without raising the
-configured limit or catching a Zend bailout.
+These checks keep native code from bailing out mid-protocol. A refused
+allocation fails the operation; when the method returns, the extension raises
+PHP's "Allowed memory size exhausted" fatal error for it, as an allocation in
+PHP code would. `selectStream()` is the exception: it reports a refused
+buffering allocation as a catchable `ClickHouseException`.
 
 This is conservative: an allocation can be rejected while a few MiB remain,
 even if an existing free slot could accommodate it. Physical OS allocation

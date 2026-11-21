@@ -152,11 +152,122 @@ static void clickhouse_mark_not_serializable(zend_class_entry *ce)
 #endif
 }
 
+typedef struct {
+	const zend_execute_data *frame;
+	uint64_t sequence;
+	size_t bytes;
+} ch_native_oom;
+
+/* Per thread: a Fiber switch moves between C stacks, so the method that
+ * recorded a refusal is matched by its frame and entry sequence. */
+ZEND_TLS uint64_t ch_method_sequence;
+ZEND_TLS ch_native_oom ch_native_oom_last;
+
+void ch_native_oom_note(size_t bytes)
+{
+	ch_native_oom_last.frame = EG(current_execute_data);
+	ch_native_oom_last.sequence = ch_method_sequence;
+	ch_native_oom_last.bytes = bytes;
+}
+
+bool ch_zend_oom(void)
+{
+#ifdef ZEND_HAS_OOM
+	return ZEND_HAS_OOM();
+#else
+	return false;
+#endif
+}
+
+static bool ch_exit_exception(zend_object *exception)
+{
+#if PHP_VERSION_ID >= 80100
+	return zend_is_unwind_exit(exception) || zend_is_graceful_exit(exception);
+#elif PHP_VERSION_ID >= 80000
+	return zend_is_unwind_exit(exception);
+#else
+	(void)exception;
+	return false;
+#endif
+}
+
+/* Reports a refused native allocation the way Zend reports its own. Zend
+ * restores memory_limit before it bails out; lifting it first keeps the
+ * report itself from exhausting the limit again. */
+static ZEND_NORETURN void ch_raise_native_oom(size_t bytes)
+{
+	zend_long limit = PG(memory_limit);
+	zend_set_memory_limit(SIZE_MAX);
+	zend_error_noreturn(E_ERROR, "Allowed memory size of " ZEND_LONG_FMT
+		" bytes exhausted (tried to allocate %zu bytes)", limit, bytes);
+}
+
+/* Runs after zend_bailout(), where EG(current_execute_data) is gone and
+ * memory may be exhausted: only plain stores before the bailout resumes. */
+static ZEND_NORETURN void ch_method_bailout(zend_execute_data *execute_data,
+	const ch_native_oom *outer)
+{
+	zval *self = getThis();
+	if (self) {
+		clickhouse_object *obj = Z_CLICKHOUSE_P(self);
+		if (obj->query_active && obj->operation_owner == execute_data) {
+			obj->query_active = false;
+			obj->operation_owner = NULL;
+			obj->needs_recovery = true;
+		}
+	}
+	ch_native_oom_last = *outer;
+	zend_bailout();
+}
+
+static void ch_method_leave(zend_execute_data *execute_data, int flags,
+	uint64_t sequence, const ch_native_oom *outer)
+{
+	ch_native_oom refused = ch_native_oom_last;
+	ch_native_oom_last = *outer;
+	if (refused.frame == execute_data && refused.sequence >= sequence
+		&& !(flags & CH_METHOD_CATCHABLE_NATIVE_OOM) && !ch_zend_oom()) {
+		if (EG(exception)) {
+			if (ch_exit_exception(EG(exception))) return;
+			zend_clear_exception();
+		}
+		ch_raise_native_oom(refused.bytes);
+	}
+#ifdef ZEND_HAS_OOM
+	/* A catch block would run before the deferred error, and an exception
+	 * still pending when PHP raises it becomes a second fatal error. */
+	if (EG(delayed_oom).state == ZEND_OOM_STATE_PENDING && EG(exception)
+		&& !ch_exit_exception(EG(exception))) {
+		zend_clear_exception();
+	}
+#endif
+}
+
+void ch_method_run(ch_method_body body, int flags, INTERNAL_FUNCTION_PARAMETERS)
+{
+	ch_native_oom outer = ch_native_oom_last;
+	uint64_t sequence = ++ch_method_sequence;
+	ch_native_oom_last.frame = NULL;
+	if (flags & CH_METHOD_GUARD) {
+		bool bailed_out = false;
+		zend_try {
+			body(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+		} zend_catch {
+			bailed_out = true;
+		} zend_end_try();
+		if (bailed_out) ch_method_bailout(execute_data, &outer);
+	} else {
+		body(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+	}
+	ch_method_leave(execute_data, flags, sequence, &outer);
+}
+
 PHP_RINIT_FUNCTION(clickhouse)
 {
 #if defined(COMPILE_DL_CLICKHOUSE) && defined(ZTS)
 	ZEND_TSRMLS_CACHE_UPDATE();
 #endif
+	memset(&ch_native_oom_last, 0, sizeof(ch_native_oom_last));
 	return SUCCESS;
 }
 
@@ -742,7 +853,7 @@ static int ch_config_options(HashTable *config, HashTable *strings,
 	return SUCCESS;
 }
 
-PHP_METHOD(ClickHouse, __construct)
+CH_METHOD(__construct)
 {
 	zval *config_input;
 	clickhouse_object *obj;
@@ -763,6 +874,7 @@ PHP_METHOD(ClickHouse, __construct)
 		return;
 	}
 	obj->query_active = true;
+	obj->operation_owner = execute_data;
 	ch_snapshot_array(&config, Z_ARRVAL_P(config_input));
 	zend_hash_init(&strings, 0, NULL, ZVAL_PTR_DTOR, 0);
 	if (ch_config_options(&config, &strings, &options, &endpoints, &ca_files, getThis()) == FAILURE) goto cleanup;
@@ -784,13 +896,14 @@ cleanup:
 	zend_hash_destroy(&strings);
 	zend_hash_destroy(&config);
 	obj->query_active = false;
+	obj->operation_owner = NULL;
 }
 
-PHP_METHOD(ClickHouse, __destruct)
+CH_METHOD(__destruct)
 {
 }
 
-PHP_METHOD(ClickHouse, ping)
+CH_METHOD(ping)
 {
 	clickhouse_object *obj;
 	chc_exception *server_error = NULL;
@@ -806,7 +919,7 @@ PHP_METHOD(ClickHouse, ping)
 	if (!EG(exception)) RETVAL_TRUE;
 }
 
-PHP_METHOD(ClickHouse, setSettings)
+CH_METHOD(setSettings)
 {
 	zval *settings;
 	HashTable snapshot;
@@ -845,7 +958,7 @@ cleanup:
 	if (!EG(exception)) RETVAL_ZVAL(getThis(), 1, 0);
 }
 
-PHP_METHOD(ClickHouse, setSetting)
+CH_METHOD(setSetting)
 {
 	zend_string *key;
 	zend_string *string = NULL;
@@ -877,7 +990,7 @@ PHP_METHOD(ClickHouse, setSetting)
 	zend_string_release(key);
 }
 
-PHP_METHOD(ClickHouse, setDatabase)
+CH_METHOD(setDatabase)
 {
 	zend_string *database;
 	clickhouse_object *obj;
@@ -938,7 +1051,7 @@ static int ch_set_callback(zval *target, zval *callback, const char *name)
 	return EG(exception) ? FAILURE : SUCCESS;
 }
 
-PHP_METHOD(ClickHouse, setProgressCallback)
+CH_METHOD(setProgressCallback)
 {
 	zval *callback;
 	ZEND_PARSE_PARAMETERS_START(1, 1)
@@ -948,7 +1061,7 @@ PHP_METHOD(ClickHouse, setProgressCallback)
 	RETURN_TRUE;
 }
 
-PHP_METHOD(ClickHouse, setProfileCallback)
+CH_METHOD(setProfileCallback)
 {
 	zval *callback;
 	ZEND_PARSE_PARAMETERS_START(1, 1)
@@ -958,7 +1071,7 @@ PHP_METHOD(ClickHouse, setProfileCallback)
 	RETURN_TRUE;
 }
 
-PHP_METHOD(ClickHouse, setVerbose)
+CH_METHOD(setVerbose)
 {
 	zval *sink;
 	zval replacement = {0};
@@ -988,7 +1101,7 @@ PHP_METHOD(ClickHouse, setVerbose)
 	if (!EG(exception)) RETVAL_ZVAL(getThis(), 1, 0);
 }
 
-PHP_METHOD(ClickHouse, resetConnection)
+CH_METHOD(resetConnection)
 {
 	clickhouse_object *obj;
 	chc_exception *server_error = NULL;
@@ -1005,7 +1118,7 @@ PHP_METHOD(ClickHouse, resetConnection)
 	if (!EG(exception)) RETVAL_TRUE;
 }
 
-PHP_METHOD(ClickHouse, getServerInfo)
+CH_METHOD(getServerInfo)
 {
 	clickhouse_object *obj;
 	const chc_server_info *info;
@@ -1030,7 +1143,7 @@ PHP_METHOD(ClickHouse, getServerInfo)
 	add_assoc_stringl(return_value, "timezone", info->full_timezone ? info->full_timezone : "", info->full_timezone_len);
 }
 
-PHP_METHOD(ClickHouse, getCurrentEndpoint)
+CH_METHOD(getCurrentEndpoint)
 {
 	clickhouse_object *obj;
 	const ch_backend_endpoint *endpoint;
@@ -1047,13 +1160,13 @@ PHP_METHOD(ClickHouse, getCurrentEndpoint)
 	add_assoc_long(return_value, "port", endpoint->port);
 }
 
-PHP_METHOD(ClickHouse, getStatistics)
+CH_METHOD(getStatistics)
 {
 	if (zend_parse_parameters_none() == FAILURE) return;
 	ch_stats_array(return_value, &Z_CLICKHOUSE_P(getThis())->stats);
 }
 
-PHP_METHOD(ClickHouse, enableLogQueries)
+CH_METHOD(enableLogQueries)
 {
 	zend_bool enabled = 1;
 	ZEND_PARSE_PARAMETERS_START(0, 1)
@@ -1064,7 +1177,7 @@ PHP_METHOD(ClickHouse, enableLogQueries)
 	RETURN_TRUE;
 }
 
-PHP_METHOD(ClickHouse, getLogQueries)
+CH_METHOD(getLogQueries)
 {
 	clickhouse_object *obj;
 	zval *entry;

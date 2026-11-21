@@ -241,6 +241,16 @@ static void ch_result_record(clickhouse_object *obj, ch_query *query,
 	if (empty) zend_string_release(empty);
 }
 
+/* zend_hash_str_update() counts the new bucket before it allocates the key,
+ * so a memory_limit fatal error there leaves an uninitialized element in a
+ * row that a ClickHouseRowIterator or Statement can still destroy later. */
+static void ch_row_set(zval *row, const char *name, size_t length, zval *cell)
+{
+	zend_string *key = zend_string_init(name, length, 0);
+	zend_symtable_update(Z_ARRVAL_P(row), key, cell);
+	zend_string_release(key);
+}
+
 static int ch_result_row(zval *out, const chc_block *block, size_t row,
 	zend_long flags, zval *positional, zend_string *query_id)
 {
@@ -263,7 +273,7 @@ static int ch_result_row(zval *out, const chc_block *block, size_t row,
 			ZVAL_COPY(&copy, &cell);
 			add_next_index_zval(positional, &copy);
 		}
-		add_assoc_zval_ex(out, name, length, &cell);
+		ch_row_set(out, name, length, &cell);
 	}
 	return SUCCESS;
 }
@@ -335,6 +345,9 @@ static ch_block_action ch_collect_rows(clickhouse_object *obj, chc_block **owned
 	}
 	for (size_t row = 0; row < rows; ++row) {
 		zval value, positional;
+		/* Rows convert without returning to the VM, which raises a deferred
+		 * memory_limit error; stop before the process reaches the hard limit. */
+		if (ch_zend_oom()) return CH_BLOCK_FAIL;
 		ZVAL_UNDEF(&value);
 		ZVAL_UNDEF(&positional);
 		if (result->flags & SC_FETCH_KEY_PAIR) {
@@ -418,7 +431,7 @@ done:
 	return EG(exception) ? FAILURE : status;
 }
 
-PHP_METHOD(ClickHouse, select)
+CH_METHOD(select)
 {
 	zend_string *sql, *query_id = NULL;
 	zval *params = NULL, *settings = NULL;
@@ -434,7 +447,7 @@ PHP_METHOD(ClickHouse, select)
 	ch_select_into(return_value, getThis(), sql, params, flags, query_id, settings, NULL, 0, NULL);
 }
 
-PHP_METHOD(ClickHouse, execute)
+CH_METHOD(execute)
 {
 	zend_string *sql, *query_id = NULL;
 	zval *params = NULL, *settings = NULL;
@@ -449,7 +462,7 @@ PHP_METHOD(ClickHouse, execute)
 	RETURN_TRUE;
 }
 
-PHP_METHOD(ClickHouse, selectWithExternalData)
+CH_METHOD(selectWithExternalData)
 {
 	zend_string *sql, *query_id = NULL;
 	zval *externals, *params = NULL, *settings = NULL;
@@ -479,12 +492,13 @@ PHP_METHOD(ClickHouse, selectWithExternalData)
 	ch_external_tables_destroy(tables);
 }
 
-PHP_METHOD(ClickHouse, selectStatement)
+CH_METHOD(selectStatement)
 {
 	zend_string *sql, *query_id = NULL;
 	zval *params = NULL, *settings = NULL;
 	zend_long flags = 0;
 	clickhouse_statement_object *stmt;
+	zval statistics;
 	ZEND_PARSE_PARAMETERS_START(1, 5)
 		Z_PARAM_STR(sql)
 		Z_PARAM_OPTIONAL
@@ -497,7 +511,9 @@ PHP_METHOD(ClickHouse, selectStatement)
 	stmt = Z_CLICKHOUSE_STATEMENT_P(return_value);
 	if (ch_select_into(&stmt->rows, getThis(), sql, params, flags & SC_FETCH_VALUE_FLAGS,
 		query_id, settings, NULL, 0, &stmt->positional_rows) == FAILURE) { ch_result_clear(return_value); return; }
-	ch_stats_array(&stmt->statistics, &Z_CLICKHOUSE_P(getThis())->stats);
+	/* Built aside: see ch_row_set(). The statement outlives a fatal error. */
+	ch_stats_array(&statistics, &Z_CLICKHOUSE_P(getThis())->stats);
+	ZVAL_COPY_VALUE(&stmt->statistics, &statistics);
 }
 static size_t ch_size_add(size_t left, size_t right)
 {
@@ -572,7 +588,7 @@ static ch_block_action ch_collect_blocks(clickhouse_object *obj, chc_block **own
 	return CH_BLOCK_CONTINUE;
 }
 
-PHP_METHOD(ClickHouse, selectStream)
+CH_METHOD_FLAGS(ClickHouse, selectStream, CH_METHOD_GUARD | CH_METHOD_CATCHABLE_NATIVE_OOM)
 {
 	zend_string *sql, *query_id = NULL;
 	zval *params = NULL, *settings = NULL;
@@ -643,7 +659,7 @@ static ch_block_action ch_callback_rows(clickhouse_object *obj, chc_block **owne
 	return CH_BLOCK_CONTINUE;
 }
 
-PHP_METHOD(ClickHouse, selectStreamCallback)
+CH_METHOD(selectStreamCallback)
 {
 	zend_string *sql, *query_id = NULL;
 	zval *callback, *params = NULL, *settings = NULL;
@@ -699,7 +715,7 @@ PHP_METHOD(ClickHouseRowIterator, valid)
 	RETURN_BOOL(iter->block_idx < iter->block_count && iter->row_idx < chc_block_n_rows(iter->blocks[iter->block_idx]));
 }
 
-PHP_METHOD(ClickHouseRowIterator, current)
+CH_PLAIN_METHOD(ClickHouseRowIterator, current)
 {
 	clickhouse_iter_object *iter;
 	if (zend_parse_parameters_none() == FAILURE) return;
@@ -895,7 +911,7 @@ static ch_block_action ch_stream_rows(clickhouse_object *obj, chc_block **owned,
 	return ch_stream_flush(&result->buffer, &result->resource, result->query_id, obj) == SUCCESS ? CH_BLOCK_CONTINUE : CH_BLOCK_FAIL;
 }
 
-PHP_METHOD(ClickHouse, selectToStream)
+CH_METHOD(selectToStream)
 {
 	zend_string *sql, *format = NULL, *query_id = NULL;
 	zval *params, *stream, *settings = NULL;
@@ -941,7 +957,7 @@ done:
 	RETURN_LONG(context.total_rows);
 }
 
-PHP_METHOD(ClickHouseStatement, __construct)
+CH_PLAIN_METHOD(ClickHouseStatement, __construct)
 {
     zend_throw_exception(clickhouse_exception_ce,
         "ClickHouseStatement is constructed by ClickHouse::selectStatement(); direct construction is not allowed",
@@ -1062,13 +1078,13 @@ PHP_METHOD(ClickHouseStatement, offsetGet)
     ZVAL_COPY(return_value, v);
 }
 
-PHP_METHOD(ClickHouseStatement, offsetSet)
+CH_PLAIN_METHOD(ClickHouseStatement, offsetSet)
 {
     zend_throw_exception(clickhouse_exception_ce,
         "ClickHouseStatement is read-only; offsetSet is not supported", 0);
 }
 
-PHP_METHOD(ClickHouseStatement, offsetUnset)
+CH_PLAIN_METHOD(ClickHouseStatement, offsetUnset)
 {
     zend_throw_exception(clickhouse_exception_ce,
         "ClickHouseStatement is read-only; offsetUnset is not supported", 0);
@@ -1142,7 +1158,7 @@ PHP_METHOD(ClickHouseStatement, fetchOne)
     ZVAL_COPY(return_value, first);
 }
 
-PHP_METHOD(ClickHouseStatement, fetchKeyPair)
+CH_PLAIN_METHOD(ClickHouseStatement, fetchKeyPair)
 {
     if (zend_parse_parameters_none() == FAILURE) return;
     clickhouse_statement_object *stmt = Z_CLICKHOUSE_STATEMENT_P(getThis());

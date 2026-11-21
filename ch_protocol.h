@@ -5,4 +5,7 @@
 #define CHC_ERR_MSG_LEN 4098
 #include "lib/clickhouse-c/clickhouse-client.h"
 
+/* Records a refused native allocation for the PHP method boundary (clickhouse.c). */
+void ch_native_oom_note(size_t bytes);
+
 #endif

@@ -87,10 +87,20 @@ static bool ch_native_allocation_fits(size_t bytes)
     return used < (size_t)configured && growth <= (size_t)configured - used;
 }
 
+static void ch_native_refuse(size_t bytes)
+{
+#ifdef ZEND_HAS_OOM
+    /* PHP raises the error it has already queued. */
+    if (ZEND_HAS_OOM()) return;
+#endif
+    ch_native_oom_note(bytes);
+}
+
 static void *ch_native_alloc(void *context, size_t bytes)
 {
     (void)context;
     if (!ch_native_allocation_fits(bytes)) {
+        ch_native_refuse(bytes);
         return NULL;
     }
 #ifdef ZEND_HAS_OOM
@@ -104,8 +114,9 @@ static void *ch_native_realloc(void *context, void *pointer,
                               size_t old_bytes, size_t new_bytes)
 {
     (void)context;
-    (void)old_bytes;
     if (!ch_native_allocation_fits(new_bytes)) {
+        /* A refused shrink leaves the caller its larger allocation. */
+        if (new_bytes > old_bytes) ch_native_refuse(new_bytes);
         return NULL;
     }
 #ifdef ZEND_HAS_OOM

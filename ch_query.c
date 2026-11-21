@@ -213,15 +213,25 @@ int ch_operation_begin(clickhouse_object *obj, bool allow_insert)
 			"inside row / progress / profile / verbose callbacks.");
 	}
 	if (!obj->backend) return ch_fail("ClickHouse client is not initialized");
-	if (!allow_insert && obj->insert_active) return ch_fail("The insert operation is now in progress");
-	ch_failure_clear(obj);
 	obj->query_active = true;
+	obj->operation_owner = EG(current_execute_data);
+	if (obj->needs_recovery) ch_operation_recover(obj);
+	if (!allow_insert && obj->insert_active) {
+		obj->query_active = false;
+		obj->operation_owner = NULL;
+		return ch_fail("The insert operation is now in progress");
+	}
+	ch_failure_clear(obj);
 	return SUCCESS;
 }
 
 void ch_operation_end(clickhouse_object *obj)
 {
 	obj->query_active = false;
+	obj->operation_owner = NULL;
+	/* Native allocation is refused while a memory_limit error is pending, so
+	 * the operation's own recovery may have left the connection closed. */
+	if (ch_zend_oom()) obj->needs_recovery = true;
 	ch_failure_clear(obj);
 }
 

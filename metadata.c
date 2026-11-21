@@ -248,7 +248,7 @@ failure:
 	return FAILURE;
 }
 
-PHP_METHOD(ClickHouse, databaseSize)
+CH_METHOD(databaseSize)
 {
 	zend_string *db = NULL, *dbname = NULL;
 	ZEND_PARSE_PARAMETERS_START(0, 1)
@@ -268,7 +268,7 @@ PHP_METHOD(ClickHouse, databaseSize)
 	ch_metadata_select(return_value, getThis(), &sql, 0, true);
 }
 
-PHP_METHOD(ClickHouse, tablesSize)
+CH_METHOD(tablesSize)
 {
 	zend_string *db = NULL, *dbname = NULL;
 	ZEND_PARSE_PARAMETERS_START(0, 1)
@@ -290,7 +290,7 @@ PHP_METHOD(ClickHouse, tablesSize)
 	ch_metadata_select(return_value, getThis(), &sql, 0, false);
 }
 
-PHP_METHOD(ClickHouse, partitions)
+CH_METHOD(partitions)
 {
 	zend_string *table = NULL, *dbname = NULL, *tname = NULL;
 	ZEND_PARSE_PARAMETERS_START(1, 1)
@@ -312,7 +312,7 @@ PHP_METHOD(ClickHouse, partitions)
 	ch_metadata_select(return_value, getThis(), &sql, 0, false);
 }
 
-PHP_METHOD(ClickHouse, showTables)
+CH_METHOD(showTables)
 {
 	zend_string *db = NULL, *like = NULL, *dbname = NULL;
 	ZEND_PARSE_PARAMETERS_START(0, 2)
@@ -333,7 +333,7 @@ PHP_METHOD(ClickHouse, showTables)
 	ch_metadata_select(return_value, getThis(), &sql, SC_FETCH_COLUMN, false);
 }
 
-PHP_METHOD(ClickHouse, showCreateTable)
+CH_METHOD(showCreateTable)
 {
 	zend_string *table = NULL;
 	ZEND_PARSE_PARAMETERS_START(1, 1)
@@ -346,14 +346,14 @@ PHP_METHOD(ClickHouse, showCreateTable)
 	ch_metadata_select(return_value, getThis(), &sql, SC_FETCH_ONE | SC_FETCH_COLUMN, false);
 }
 
-PHP_METHOD(ClickHouse, getServerUptime)
+CH_METHOD(getServerUptime)
 {
 	if (zend_parse_parameters_none() == FAILURE) return;
 	ch_metadata_literal_select(return_value, getThis(), ZEND_STRL("SELECT uptime() AS uptime"),
 		SC_FETCH_ONE | SC_FETCH_COLUMN);
 }
 
-PHP_METHOD(ClickHouse, isExists)
+CH_METHOD(isExists)
 {
 	zend_string *db = NULL, *table = NULL;
 	ZEND_PARSE_PARAMETERS_START(2, 2)
@@ -378,7 +378,7 @@ PHP_METHOD(ClickHouse, isExists)
 	RETURN_BOOL(exists);
 }
 
-PHP_METHOD(ClickHouse, showDatabases)
+CH_METHOD(showDatabases)
 {
 	if (zend_parse_parameters_none() == FAILURE) return;
 	ch_metadata_literal_select(return_value, getThis(),
@@ -387,7 +387,7 @@ PHP_METHOD(ClickHouse, showDatabases)
 
 /* The fixed projection avoids the wider Map(LowCardinality(String), ...)
  * fields from system.processes, preserving the existing return shape. */
-PHP_METHOD(ClickHouse, showProcesslist)
+CH_METHOD(showProcesslist)
 {
 	if (zend_parse_parameters_none() == FAILURE) return;
 	ch_metadata_literal_select(return_value, getThis(), ZEND_STRL(
@@ -399,7 +399,7 @@ PHP_METHOD(ClickHouse, showProcesslist)
 		"memory_usage, peak_memory_usage FROM system.processes"), 0);
 }
 
-PHP_METHOD(ClickHouse, getServerVersion)
+CH_METHOD(getServerVersion)
 {
 	if (zend_parse_parameters_none() == FAILURE) return;
 	zend_string *sql = zend_string_init(ZEND_STRL("SELECT version() AS v"), 0);
@@ -420,7 +420,7 @@ PHP_METHOD(ClickHouse, getServerVersion)
 	RETURN_EMPTY_STRING();
 }
 
-PHP_METHOD(ClickHouse, tableSize)
+CH_METHOD(tableSize)
 {
 	zend_string *table = NULL, *dbname = NULL, *tname = NULL;
 	ZEND_PARSE_PARAMETERS_START(1, 1)
@@ -440,7 +440,7 @@ PHP_METHOD(ClickHouse, tableSize)
 	ch_metadata_select(return_value, getThis(), &sql, 0, true);
 }
 
-PHP_METHOD(ClickHouse, truncateTable)
+CH_METHOD(truncateTable)
 {
 	zend_string *table = NULL;
 	ZEND_PARSE_PARAMETERS_START(1, 1)
@@ -458,7 +458,7 @@ PHP_METHOD(ClickHouse, truncateTable)
 
 /* The partition argument is a quoted string value; integer partitions and
  * partition IDs remain the caller's responsibility through execute(). */
-PHP_METHOD(ClickHouse, dropPartition)
+CH_METHOD(dropPartition)
 {
 	zend_string *table = NULL, *part = NULL;
 	ZEND_PARSE_PARAMETERS_START(2, 2)

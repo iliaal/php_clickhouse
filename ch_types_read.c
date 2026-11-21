@@ -505,7 +505,13 @@ static zval *ch_read_map_add(HashTable *table, zval *key, zval *value)
 	}
 	zend_ulong index;
 	if (ZEND_HANDLE_NUMERIC_STR(bytes, length, index)) return zend_hash_index_add(table, index, value);
-	return zend_hash_str_add(table, bytes, length, value);
+	/* Allocate the key before the insert counts its bucket: a memory_limit
+	 * fatal error inside zend_hash_str_add() leaves that bucket unset. */
+	if (Z_TYPE_P(key) == IS_STRING) return zend_hash_add(table, Z_STR_P(key), value);
+	zend_string *owned = zend_string_init(bytes, length, 0);
+	zval *added = zend_hash_add(table, owned, value);
+	zend_string_release(owned);
+	return added;
 }
 
 static int ch_read_map(zval *out, const chc_type *type, const chc_column *column,

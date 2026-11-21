@@ -260,6 +260,24 @@ int ch_insert_recover(clickhouse_object *obj, bool finalize)
 	return result;
 }
 
+void ch_operation_recover(clickhouse_object *obj)
+{
+	obj->needs_recovery = false;
+	if (obj->pending_backend) {
+		ch_backend_destroy(obj->pending_backend);
+		obj->pending_backend = NULL;
+	}
+	/* Without a schema the server has not accepted the INSERT yet. */
+	if (obj->insert_active && obj->insert_schema && ch_insert_end_impl(obj, false) == SUCCESS) {
+		return;
+	}
+	if (ch_reset_after_error(obj) == SUCCESS) {
+		ch_insert_clear(obj);
+	} else {
+		obj->needs_recovery = true;
+	}
+}
+
 void ch_insert_abandon(clickhouse_object *obj)
 {
 	chc_err error = {0};
@@ -693,7 +711,7 @@ cleanup:
 	return result;
 }
 
-PHP_METHOD(ClickHouse, insert)
+CH_METHOD(insert)
 {
 	zend_string *table, *query_id = NULL;
 	zval *columns, *values, *settings = NULL;
@@ -709,7 +727,7 @@ PHP_METHOD(ClickHouse, insert)
 	RETURN_TRUE;
 }
 
-PHP_METHOD(ClickHouse, writeStart)
+CH_METHOD(writeStart)
 {
 	zend_string *table, *query_id = NULL, *sql = NULL;
 	zval *columns, *settings = NULL;
@@ -745,7 +763,7 @@ cleanup:
 	if (result == SUCCESS) RETVAL_TRUE;
 }
 
-PHP_METHOD(ClickHouse, write)
+CH_METHOD(write)
 {
 	zval *values, rows;
 	ch_insert_block block = {0};
@@ -798,7 +816,7 @@ cleanup:
 	if (result == SUCCESS) RETVAL_TRUE;
 }
 
-PHP_METHOD(ClickHouse, writeEnd)
+CH_METHOD(writeEnd)
 {
 	clickhouse_object *obj;
 	zend_string *sql = NULL, *query_id = NULL;
@@ -829,7 +847,7 @@ cleanup:
 	if (result == SUCCESS) RETVAL_TRUE;
 }
 
-PHP_METHOD(ClickHouse, insertAssoc)
+CH_METHOD(insertAssoc)
 {
 	zend_string *table, *query_id = NULL;
 	zval *rows, *settings = NULL, *row, *first = NULL, *value;
@@ -1198,7 +1216,7 @@ static int ch_stream_finish(ch_stream_parser *parser)
 	return SUCCESS;
 }
 
-PHP_METHOD(ClickHouse, insertFromStream)
+CH_METHOD(insertFromStream)
 {
 	zend_string *table, *format = NULL, *query_id = NULL, *sql = NULL;
 	zval *columns, *stream_value, *settings = NULL;
