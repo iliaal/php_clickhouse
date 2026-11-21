@@ -382,15 +382,41 @@ static int ch_read_scalar(zval *out, const chc_type *type, const chc_column *col
 	return SUCCESS;
 }
 
-static int ch_read_array_init(zval *out, size_t count, const char *what)
+static size_t ch_read_table_bytes(size_t count, bool packed)
+{
+	size_t size = HT_MIN_SIZE;
+	while (size < count) size <<= 1;
+#if PHP_VERSION_ID >= 80200
+	if (packed) return size * sizeof(zval);
+#endif
+	return size * sizeof(Bucket) + (packed ? 2 : size * 2) * sizeof(uint32_t);
+}
+
+/* The server picks count. Zend allocates the table it sizes unconditionally,
+ * and with a hard memory limit one oversized request ends the process, so a
+ * large table is first checked against memory_limit like a native buffer. */
+static int ch_read_array_init(zval *out, size_t count, bool packed, const char *what)
 {
 	if (count >= (size_t)HT_MAX_SIZE) {
 		if (!EG(exception)) zend_throw_exception_ex(clickhouse_exception_ce, 0,
 			"%s: element count exceeds the PHP array limit", what);
 		return FAILURE;
 	}
+	size_t bytes = ch_read_table_bytes(count, packed);
+	if (bytes > ZEND_MM_MAX_LARGE_SIZE && !ch_native_reserve(bytes)) {
+		if (!EG(exception)) zend_throw_exception_ex(clickhouse_exception_ce, 0,
+			"%s: %zu elements exceed memory_limit", what, count);
+		return FAILURE;
+	}
 	array_init_size(out, (uint32_t)count);
 	return SUCCESS;
+}
+
+/* Conversion runs without returning to the VM, which raises a deferred
+ * memory_limit error; stop a large cell before it reaches the hard limit. */
+static int ch_read_check_oom(void)
+{
+	return ch_zend_oom() ? ch_read_error("memory_limit exhausted during conversion") : SUCCESS;
 }
 
 static int ch_read_array_range(const chc_column *column, size_t row, size_t *begin, size_t *end)
@@ -414,9 +440,10 @@ static int ch_read_array(zval *out, const chc_type *type, const chc_column *colu
 {
 	size_t begin, end;
 	if (ch_read_array_range(column, row, &begin, &end) == FAILURE) return FAILURE;
-	if (ch_read_array_init(out, end - begin, "Array read") == FAILURE) return FAILURE;
+	if (ch_read_array_init(out, end - begin, true, "Array read") == FAILURE) return FAILURE;
 	for (size_t i = begin; i < end; ++i) {
 		zval value;
+		if (ch_read_check_oom() == FAILURE) return FAILURE;
 		if (ch_read_value_context(&value, chc_type_child(type, 0), column->array.values, i,
 			flags & SC_FETCH_VALUE_FLAGS, depth + 1, true) == FAILURE) return FAILURE;
 		add_next_index_zval(out, &value);
@@ -430,7 +457,7 @@ static int ch_read_tuple(zval *out, const chc_type *type, const chc_column *colu
 	size_t arity = chc_type_n_children(type);
 	if (column->layout != CHC_COL_TUPLE || column->tuple.arity != arity ||
 		(arity && !column->tuple.children)) return ch_read_error("Tuple read: column type mismatch");
-	if (ch_read_array_init(out, arity, "Tuple read") == FAILURE) return FAILURE;
+	if (ch_read_array_init(out, arity, true, "Tuple read") == FAILURE) return FAILURE;
 	for (size_t i = 0; i < arity; ++i) {
 		zval value;
 		if (ch_read_value_context(&value, chc_type_child(type, i), column->tuple.children[i], row,
@@ -529,9 +556,10 @@ static int ch_read_map(zval *out, const chc_type *type, const chc_column *column
 		if (!ch_read_map_scalar(chc_type_kind(key_type))) return ch_read_type_error("Map read: unsupported key type ", key_type);
 		if (!ch_read_map_scalar(chc_type_kind(value_type))) return ch_read_type_error("Map read: unsupported value type ", value_type);
 	}
-	if (ch_read_array_init(out, end - begin, "Map read") == FAILURE) return FAILURE;
+	if (ch_read_array_init(out, end - begin, (flags & SC_FETCH_MAP_AS_PAIRS) != 0, "Map read") == FAILURE) return FAILURE;
 	for (size_t i = begin; i < end; ++i) {
 		zval key, value;
+		if (ch_read_check_oom() == FAILURE) return FAILURE;
 		unsigned child_depth = (flags & SC_FETCH_MAP_AS_PAIRS) ? depth + 1 : depth;
 		if (ch_read_value_context(&key, key_type, keys, i, flags & SC_FETCH_VALUE_FLAGS, child_depth, true) == FAILURE) return FAILURE;
 		if (ch_read_value_context(&value, value_type, values, i, flags & SC_FETCH_VALUE_FLAGS, child_depth, true) == FAILURE) {
@@ -562,9 +590,10 @@ static int ch_read_geo(zval *out, const chc_column *column, size_t row, unsigned
 	if (arrays) {
 		size_t begin, end;
 		if (ch_read_array_range(column, row, &begin, &end) == FAILURE) return FAILURE;
-		if (ch_read_array_init(out, end - begin, "Geometry read") == FAILURE) return FAILURE;
+		if (ch_read_array_init(out, end - begin, true, "Geometry read") == FAILURE) return FAILURE;
 		for (size_t i = begin; i < end; ++i) {
 			zval value;
+			if (ch_read_check_oom() == FAILURE) return FAILURE;
 			ZVAL_UNDEF(&value);
 			if (ch_read_geo(&value, column->array.values, i, arrays - 1) == FAILURE) {
 				if (!Z_ISUNDEF(value)) zval_ptr_dtor(&value);

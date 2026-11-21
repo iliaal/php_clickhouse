@@ -142,15 +142,6 @@ void ch_method_run(ch_method_body body, int flags, INTERNAL_FUNCTION_PARAMETERS)
 	static void ch_method_##cls##_##name(INTERNAL_FUNCTION_PARAMETERS)
 #define CH_METHOD(name) CH_METHOD_FLAGS(ClickHouse, name, CH_METHOD_GUARD)
 #define CH_PLAIN_METHOD(cls, name) CH_METHOD_FLAGS(cls, name, 0)
-/* True while PHP defers, raises, or has raised a memory_limit error. */
-static inline bool ch_zend_oom(void)
-{
-#ifdef ZEND_HAS_OOM
-	return ZEND_HAS_OOM();
-#else
-	return false;
-#endif
-}
 
 /* ch_query.c: acquire before preparation or callback-capable coercion.
  * Only a caller whose begin succeeded calls end. allow_insert permits
@@ -167,6 +158,10 @@ zend_string *ch_sanitize_error(const char *text, size_t length);
 int ch_query_event(clickhouse_object *obj, const chc_packet *packet,
 	zend_string *query_id, bool callbacks);
 int ch_validate_block(const chc_block *block, chc_err *error);
+/* A server that floods packets never blocks, so receive_timeout cannot end the
+ * loop; each packet loop caps consecutive packets that carry no rows. */
+#define CH_MAX_IDLE_PACKETS 1000000
+int ch_count_idle_packet(const chc_packet *packet, size_t *idle, chc_err *error);
 int ch_query_run(clickhouse_object *obj, ch_query *query,
 	const ch_external_table *externals, size_t external_count,
 	ch_on_block on_block, void *context);

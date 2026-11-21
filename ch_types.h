@@ -8,6 +8,16 @@
 extern zend_class_entry *clickhouse_exception_ce;
 extern const chc_alloc ch_php_allocator;
 
+/* True while PHP defers, raises, or has raised a memory_limit error. */
+static inline bool ch_zend_oom(void)
+{
+#ifdef ZEND_HAS_OOM
+	return ZEND_HAS_OOM();
+#else
+	return false;
+#endif
+}
+
 typedef struct ch_owned_column ch_owned_column;
 
 /* Writer failures distinguish new validation errors from user exceptions. */

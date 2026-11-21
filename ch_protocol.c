@@ -41,6 +41,8 @@
 #define CHC_MAX_TYPE_DEPTH 512
 #define CHC_MAX_NUM_COLUMNS SIZE_MAX
 #define CHC_MAX_NUM_ROWS SIZE_MAX
+/* 2,048 sparse 8-byte columns at the server's default 65,409-row block. */
+#define CHC_MAX_SPARSE_DEFAULT_BYTES ((size_t)1 << 30)
 #include "ch_protocol.h"
 
 /* Reject before Zend queues or raises an OOM. A new chunk may be needed even
@@ -94,6 +96,13 @@ static void ch_native_refuse(size_t bytes)
     if (ZEND_HAS_OOM()) return;
 #endif
     ch_native_oom_note(bytes);
+}
+
+bool ch_native_reserve(size_t bytes)
+{
+    if (ch_native_allocation_fits(bytes)) return true;
+    ch_native_refuse(bytes);
+    return false;
 }
 
 static void *ch_native_alloc(void *context, size_t bytes)

@@ -418,11 +418,12 @@ test_rejects(void)
     chc_err err = {};
     chc_in in;
     chc_column *c = NULL;
+    size_t defaults = 0;
     if (chc_type_parse("UInt8", 5, &al, &t, &err) || chc_in_init_ioless(&in, &al)) {
         fail_count++;
         return;
     }
-    CHECK(chc__col_read_sparse(&in, t, SIZE_MAX / 4, &c, &err) == CHC_ERR_PROTOCOL);
+    CHECK(chc__col_read_sparse(&in, t, SIZE_MAX / 4, &defaults, &c, &err) == CHC_ERR_PROTOCOL);
     CHECK(c == NULL);
     chc_in_free(&in);
     chc_type_destroy(t, &al);

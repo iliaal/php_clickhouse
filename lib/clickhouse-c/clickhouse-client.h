@@ -433,7 +433,13 @@ chc__client_setup(chc_client *c, const chc_client_opts *opts)
     c->codec       = opts->codec;
 }
 
-/* Reads chained exception. Caller frees via chc_exception_free. */
+#ifndef CHC_MAX_NESTED_EXCEPTIONS
+#define CHC_MAX_NESTED_EXCEPTIONS 64u
+#endif
+
+/* Reads chained exception, keeping the outermost; nested ones are consumed so
+ * their bytes never parse as the next packet. Caller frees via
+ * chc_exception_free. */
 static int
 chc__read_exception(chc_client *c, chc_exception **out, chc_err *err)
 {
@@ -445,12 +451,29 @@ chc__read_exception(chc_client *c, chc_exception **out, chc_err *err)
         (rc = chc__read_string (&c->in, &e->name,         &e->name_len,         err)) ||
         (rc = chc__read_string (&c->in, &e->display_text, &e->display_text_len, err)) ||
         (rc = chc__read_string (&c->in, &e->stack_trace,  &e->stack_trace_len,  err)) ||
-        (rc = chc__read_byte   (&c->in, &has_nested, err))) {
-        chc_exception_free(e, c->al);
-        return rc;
+        (rc = chc__read_byte   (&c->in, &has_nested, err)))
+        goto fail;
+    for (unsigned depth = 0; has_nested; depth++) {
+        int32_t code;
+        if (depth == CHC_MAX_NESTED_EXCEPTIONS) {
+            rc = chc__err_set(err, CHC_ERR_PROTOCOL,
+                "server exception nests more than %u levels", CHC_MAX_NESTED_EXCEPTIONS);
+            goto fail;
+        }
+        if ((rc = chc__read_i32_le(&c->in, &code, err))) goto fail;
+        for (int field = 0; field < 3; field++) {
+            char *text;
+            size_t text_len;
+            if ((rc = chc__read_string(&c->in, &text, &text_len, err))) goto fail;
+            c->al->free(c->al->ud, text, text_len + 1);
+        }
+        if ((rc = chc__read_byte(&c->in, &has_nested, err))) goto fail;
     }
     *out = e;
     return CHC_OK;
+fail:
+    chc_exception_free(e, c->al);
+    return rc;
 }
 
 static int
@@ -992,6 +1015,15 @@ chc__recv_block_compressed_resume(chc_client *c, const chc_block_opts *opts,
     }
 }
 
+/* A block-bearing packet whose block hits EOF before its first byte is
+ * truncated; only the Native file reader treats that boundary as clean. */
+static int
+chc__recv_require_block(const chc_packet *out, chc_err *err)
+{
+    if (out->block) return CHC_OK;
+    return chc__err_set(err, CHC_ERR_EOF, "connection closed before the packet's block");
+}
+
 /* Resumable packet decoder shared by chc_client_recv_packet and
  * chc_async_recv_packet. For io-backed `in` refill blocks inside the reader.
  * Ioless-gated checkpoints/resets are skipped, and a packet always completes
@@ -1147,7 +1179,7 @@ chc__recv_packet_resumable(chc_client *c, chc_packet *out, chc_err *err)
         c->recv_partial = NULL;
         c->recv_next_col = 0;
         if (ioless) chc_in_reset(&c->in);
-        return CHC_OK;
+        return chc__recv_require_block(out, err);
     }
 
     /* Compressed Data. ioless: frame-granularity resume over a persisted
@@ -1162,14 +1194,14 @@ chc__recv_packet_resumable(chc_client *c, chc_packet *out, chc_err *err)
         c->recv_partial = NULL;
         c->recv_next_col = 0;
         chc_in_reset(&c->in);
-        return CHC_OK;
+        return chc__recv_require_block(out, err);
     }
 
     rc = chc__recv_block_compressed(c, opts, &out->block, err);
     if (rc == CHC_WOULD_BLOCK) return rc;
     c->recv_in_block = 0;
     if (rc != CHC_OK) return rc;
-    return CHC_OK;
+    return chc__recv_require_block(out, err);
 
 control_done:
     if (ioless) chc_in_reset(&c->in);

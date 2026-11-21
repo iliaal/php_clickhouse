@@ -135,9 +135,10 @@ int ch_insert_begin(clickhouse_object *obj, ch_query *query)
 		ch_throw_error(status, &error, NULL, query->query_id);
 		return FAILURE;
 	}
-	for (;;) {
+	for (size_t idle = 0;;) {
 		chc_packet packet = {0};
 		status = chc_client_recv_packet(client, &packet, &error);
+		if (status == CHC_OK && packet.kind != CHC_PKT_DATA) status = ch_count_idle_packet(&packet, &idle, &error);
 		if (status != CHC_OK) {
 			if (!EG(exception)) ch_failure_native(obj, status, &error, NULL);
 			ch_throw_error(status, &error, NULL, query->query_id);
@@ -197,6 +198,7 @@ static int ch_insert_end_impl(clickhouse_object *obj, bool report_error)
 		if (report_error) ch_insert_checked(ch_insert_error("ClickHouse client is not initialized"), obj->insert_query_id);
 		return FAILURE;
 	}
+	ch_backend_begin_operation(obj->backend);
 	status = chc_client_send_data(client, NULL, &error);
 	if (status != CHC_OK) {
 		if (report_error) {
@@ -205,9 +207,12 @@ static int ch_insert_end_impl(clickhouse_object *obj, bool report_error)
 		}
 		return FAILURE;
 	}
-	for (;;) {
+	for (size_t idle = 0;;) {
 		chc_packet packet = {0};
 		status = chc_client_recv_packet(client, &packet, &error);
+		if (status == CHC_OK && packet.kind != CHC_PKT_END_OF_STREAM) {
+			status = ch_count_idle_packet(&packet, &idle, &error);
+		}
 		if (status != CHC_OK) {
 			if (report_error) {
 				if (!EG(exception)) ch_failure_native(obj, status, &error, NULL);
@@ -283,7 +288,9 @@ void ch_operation_recover(clickhouse_object *obj)
 void ch_insert_abandon(clickhouse_object *obj)
 {
 	chc_err error = {0};
-	if (!obj->insert_active || obj->insert_discard || !obj->backend || !ch_backend_client(obj->backend)) {
+	/* Without a schema the server has not accepted the INSERT yet. */
+	if (!obj->insert_active || !obj->insert_schema || obj->insert_discard || !obj->backend
+		|| !ch_backend_client(obj->backend)) {
 		return;
 	}
 	if (ch_backend_limit_io_timeouts(obj->backend, 5000, &error) == CHC_OK) {

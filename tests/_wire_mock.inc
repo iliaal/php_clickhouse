@@ -10,7 +10,8 @@ function wire_mock_code(): string
 {
     return <<<'PHP'
 $hello = hex2bin($argv[1]);
-$response = hex2bin($argv[2]);
+/* "@path" names a file holding the raw response, for replies too large for argv. */
+$response = $argv[2] !== "" && $argv[2][0] === "@" ? file_get_contents(substr($argv[2], 1)) : hex2bin($argv[2]);
 $server = stream_socket_server("tcp://127.0.0.1:0", $errno, $error);
 if (!$server) {
     fwrite(STDERR, "$errno: $error\n");
@@ -93,6 +94,35 @@ function wire_mock_start(string $helloHex, string $responseHex): array
         throw new RuntimeException("mock did not publish a valid port: " . $error);
     }
     return [$process, $pipes, $port];
+}
+
+/* PHP command line for a child that loads this process's json and clickhouse
+ * modules, for cases that end the child in a fatal error. Needs /proc. */
+function wire_child_php(array $ini): array
+{
+    $args = [PHP_BINARY, "-n"];
+    foreach ($ini as $name => $value) array_push($args, "-d", "$name=$value");
+    $loaded = [];
+    foreach (file("/proc/self/maps") as $line) {
+        if (preg_match('#\s(/\S+/(json|clickhouse)\.so)$#', trim($line), $m)) $loaded[$m[2]] = $m[1];
+    }
+    foreach (["json", "clickhouse"] as $name) {
+        if (isset($loaded[$name])) array_push($args, "-d", "extension=" . $loaded[$name]);
+    }
+    return $args;
+}
+
+/* Pass the result as wire_mock_start()'s response for a raw reply of any size. */
+function wire_response_file(string $response): string
+{
+    $file = tempnam(sys_get_temp_dir(), "clickhouse-wire-response-");
+    if ($file === false || file_put_contents($file, $response) === false) {
+        throw new RuntimeException("response file creation failed");
+    }
+    register_shutdown_function(function () use ($file) {
+        @unlink($file);
+    });
+    return "@" . $file;
 }
 
 function wire_mock_stop(array $mock): string

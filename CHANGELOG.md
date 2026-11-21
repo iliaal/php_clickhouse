@@ -7,9 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `receive_timeout` now defaults to 300 seconds, the `clickhouse-client`
+  default, where it used to be 0 (no limit). It now bounds the total time
+  one operation waits for the server, not each read: a query, the start of
+  an insert, `writeEnd()`, a ping, or a connect fails with "read timed out"
+  once its waits add up to the limit, even while the server keeps sending
+  Progress packets. Time spent in callbacks and in converting rows does not
+  count. Raise `receive_timeout` or `receive_timeout_ms` for queries that
+  run longer, or set it to 0 for no limit. A server that sends one byte just
+  inside each read's timeout can no longer hold a worker indefinitely.
+- Destroying a client with an unfinished insert waits for the server at most
+  five seconds in total, writes included. The five seconds used to apply to
+  each read and write separately.
+
+### Fixed
+
+- A malicious server, or an attacker on an unverified connection, can no
+  longer exhaust memory or end the PHP process with a few bytes:
+  - Sparse columns expand at most 1 GiB of default rows per block, counting
+    at least eight bytes per row. A 75-byte response used to make the client
+    allocate and zero-fill 256 MiB and then build a PHP row for each of its
+    2^28 declared rows, or end the request in a `memory_limit` error.
+  - A block that declares rows but no columns fails. `select()` used to
+    build an empty row for each declared row until `memory_limit` ended the
+    request.
+  - An Array, Map, or geometry cell whose PHP array does not fit
+    `memory_limit` ends in PHP's "Allowed memory size exhausted" error before
+    PHP allocates it, and conversion stops inside a cell once PHP has
+    deferred a `memory_limit` error. On PHP builds with a hard memory limit,
+    a 16 MiB Array response used to exit the process with status 137.
+  - More than 1,000,000 consecutive packets without rows (Progress, Log,
+    ProfileEvents, or empty Data blocks) fail the operation, and more than
+    64 consecutive empty compressed frames fail the read. A flood of them
+    never makes the client wait, so no timeout ended it.
+- A Data packet whose block never arrives fails with "connection closed
+  before the packet's block". `writeStart()` used to take the missing block
+  as the INSERT's schema and return.
+- A nested server exception is read with the exception packet that carries
+  it. Its bytes used to stay buffered and be read as the response to the
+  client's next query.
+- Destroying a client after a fatal error interrupted `writeStart()`,
+  `insert()`, or `insertFromStream()` before the server sent the INSERT's
+  schema closes the connection. It used to send the INSERT's end-of-data
+  block to a server that had not accepted the INSERT.
+
 ### For contributors
 
 - Updated the bundled LZ4 to 1.11.1 and ZSTD to 1.5.7, and retired the LZ4 empty-dictionary patch that LZ4 1.11.1 makes unnecessary.
+- The new local clickhouse-c patch `0003-hostile-server-limits.patch` adds
+  the sparse default-row limit, the zero-column check, the end-of-stream
+  check for block packets, nested exception reading, and the empty-frame
+  limit. Each is documented in `lib/clickhouse-c/LOCAL_PATCHES.md`.
+- `tests/_wire_mock.inc` takes a raw response from a file through
+  `wire_response_file()`, and `wire_child_php()` builds the command line
+  for a child process that is expected to end in a fatal error. Tests 314
+  through 321 cover the fixes above with scripted peers.
 
 ## [0.15.0] - 2026-11-21
 

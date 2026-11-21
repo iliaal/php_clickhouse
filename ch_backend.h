@@ -90,6 +90,11 @@ int ch_backend_connect(ch_connection *connection, chc_exception **exception, chc
 int ch_backend_reset(ch_connection *connection, chc_exception **exception, chc_err *error);
 int ch_backend_before_query(ch_connection *connection, chc_exception **exception, chc_err *error);
 int ch_backend_ping(ch_connection *connection, chc_exception **exception, chc_err *error);
+/* Starts an operation: receive_timeout_ms bounds its total socket wait, not
+ * each read. before_query, ping, and connect start one themselves. */
+void ch_backend_begin_operation(ch_connection *connection);
+/* Starts an operation whose I/O, writes included, waits at most maximum_ms in
+ * total. */
 int ch_backend_limit_io_timeouts(ch_connection *connection, uint32_t maximum_ms, chc_err *error);
 
 /* The query owner finalizes an abandoned insert before destroying its backend. */

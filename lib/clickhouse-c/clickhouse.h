@@ -742,6 +742,11 @@ chc_alloc chc_alloc_stdlib(void) {
 #ifndef CHC_MAX_NUM_ROWS
 #define CHC_MAX_NUM_ROWS          1000000000000ULL
 #endif
+/* Sparse default rows have no wire bytes; this bounds what one block's sparse
+ * columns may expand, counting at least eight bytes per default row. */
+#ifndef CHC_MAX_SPARSE_DEFAULT_BYTES
+#define CHC_MAX_SPARSE_DEFAULT_BYTES SIZE_MAX
+#endif
 #ifndef CHC_MAX_FIXEDSTRING_SIZE
 #define CHC_MAX_FIXEDSTRING_SIZE  0xFFFFFFULL
 #endif
@@ -2556,8 +2561,8 @@ chc__serial_type(const chc_type *t)
 #define CHC__SPARSE_END (UINT64_C(1) << 62)
 
 static int chc__col_read_kinds(chc_in *in, const chc_type *t, size_t n_rows,
-                               const uint8_t **kinds, chc_column **out,
-                               chc_err *err);
+                               const uint8_t **kinds, size_t *sparse_defaults,
+                               chc_column **out, chc_err *err);
 
 /* Byte-swap a host-typed uint64/keys array in place on BE hosts. No-op on LE. */
 static void
@@ -2586,7 +2591,8 @@ chc__swap_keys(CHC_MAYBE_UNUSED void *p, CHC_MAYBE_UNUSED size_t n,
  * kinds NULL when dense */
 static int
 chc__col_read_tuple(chc_in *in, const chc_type *t, size_t n_rows,
-                    const uint8_t **kinds, chc_column **out, chc_err *err)
+                    const uint8_t **kinds, size_t *sparse_defaults,
+                    chc_column **out, chc_err *err)
 {
     const chc_alloc *al = in->al;
     chc_column *c = chc__calloc(al, sizeof *c, err);
@@ -2600,7 +2606,8 @@ chc__col_read_tuple(chc_in *in, const chc_type *t, size_t n_rows,
     }
     for (size_t i = 0; i < t->n_children; i++) {
         chc_column **slot = &c->tuple.children[i];
-        int rc = kinds ? chc__col_read_kinds(in, t->children[i], n_rows, kinds, slot, err)
+        int rc = kinds ? chc__col_read_kinds(in, t->children[i], n_rows, kinds,
+                                             sparse_defaults, slot, err)
                        : chc__col_read(in, t->children[i], n_rows, slot, err);
         if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
     }
@@ -2613,7 +2620,7 @@ chc__col_read_tuple(chc_in *in, const chc_type *t, size_t n_rows,
  * ColumnSparse storage default even where type default differs (Enum) */
 static int
 chc__col_read_sparse(chc_in *in, const chc_type *t, size_t n_rows,
-                     chc_column **out, chc_err *err)
+                     size_t *sparse_defaults, chc_column **out, chc_err *err)
 {
     const chc_alloc *al = in->al;
     size_t es = chc_type_elem_size(t);
@@ -2657,6 +2664,15 @@ chc__col_read_sparse(chc_in *in, const chc_type *t, size_t n_rows,
             "sparse offsets end at row %zu of %zu", row, n_rows);
         goto fail;
     }
+    /* bytes bounds n_rows * unit, so the product cannot wrap */
+    size_t defaults = (n_rows - n) * unit;
+    if (defaults > CHC_MAX_SPARSE_DEFAULT_BYTES - *sparse_defaults) {
+        rc = chc__err_set(err, CHC_ERR_PROTOCOL,
+            "sparse columns declare more default rows than a block may expand (%zu rows of %zu)",
+            n_rows - n, n_rows);
+        goto fail;
+    }
+    *sparse_defaults += defaults;
 
     rc = chc__col_read(in, t, n, &c, err);
     if (rc != CHC_OK) goto fail;
@@ -2696,12 +2712,15 @@ fail:
  * element's */
 static int
 chc__col_read_kinds(chc_in *in, const chc_type *t, size_t n_rows,
-                    const uint8_t **kinds, chc_column **out, chc_err *err)
+                    const uint8_t **kinds, size_t *sparse_defaults,
+                    chc_column **out, chc_err *err)
 {
     t = chc__serial_type(t);
     uint8_t kind = *(*kinds)++;
-    if (t->kind == CHC_TUPLE) return chc__col_read_tuple(in, t, n_rows, kinds, out, err);
-    if (kind == CHC__KIND_SPARSE) return chc__col_read_sparse(in, t, n_rows, out, err);
+    if (t->kind == CHC_TUPLE)
+        return chc__col_read_tuple(in, t, n_rows, kinds, sparse_defaults, out, err);
+    if (kind == CHC__KIND_SPARSE)
+        return chc__col_read_sparse(in, t, n_rows, sparse_defaults, out, err);
     return chc__col_read(in, t, n_rows, out, err);
 }
 
@@ -2793,14 +2812,14 @@ chc__col_read(chc_in *in, const chc_type *t,
         /* ClickHouse sends Map and Nested values as arrays of tuples */
         int rc = t->kind == CHC_ARRAY
             ? chc__col_read(in, t->children[0], (size_t) total, &c->array.values, err)
-            : chc__col_read_tuple(in, t, (size_t) total, NULL, &c->array.values, err);
+            : chc__col_read_tuple(in, t, (size_t) total, NULL, NULL, &c->array.values, err);
         if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
         *out = c;
         return CHC_OK;
     }
 
     case CHC_TUPLE:
-        return chc__col_read_tuple(in, t, n_rows, NULL, out, err);
+        return chc__col_read_tuple(in, t, n_rows, NULL, NULL, out, err);
 
     case CHC_QBIT: {
         /* Wire form is Tuple(FixedString(ceil(N/8)) x element_size): one
@@ -3049,6 +3068,7 @@ struct chc_block {
     size_t        n_rows;
     bool          is_overflows;
     int32_t       bucket_num;
+    size_t        sparse_defaults;
     char        **names;
     size_t       *name_lens;
     chc_type    **types;
@@ -3224,6 +3244,12 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
                 "suspiciously many rows: %llu", (unsigned long long) nrows);
             goto header_fail;
         }
+        /* Rows live in columns; without one, nothing on the wire backs them. */
+        if (ncols == 0 && nrows != 0) {
+            rc = chc__err_set(err, CHC_ERR_PROTOCOL,
+                "block declares %llu rows but no columns", (unsigned long long) nrows);
+            goto header_fail;
+        }
 
         b->n_columns = (size_t) ncols;
         b->n_rows    = (size_t) nrows;
@@ -3237,6 +3263,7 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
     for (size_t i = *next_col; i < b->n_columns; i++) {
         char *type_name; size_t type_len;
         uint8_t *kinds = NULL; size_t kinds_len = 0;
+        size_t sparse_mark = b->sparse_defaults;
         rc = chc__block_reserve_column(b, i, al, err);
         if (rc != CHC_OK) goto col_fail;
 
@@ -3264,7 +3291,8 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
             if (rc != CHC_OK) goto col_fail;
 
             const uint8_t *cursor = kinds;
-            rc = kinds ? chc__col_read_kinds(in, b->types[i], nrows, &cursor, &b->columns[i], err)
+            rc = kinds ? chc__col_read_kinds(in, b->types[i], nrows, &cursor,
+                                             &b->sparse_defaults, &b->columns[i], err)
                        : chc__col_read(in, b->types[i], nrows, &b->columns[i], err);
             if (CHC_PHP_COMPAT && rc == CHC_OK &&
                 chc_column_validate(b->columns[i], err) != CHC_OK)
@@ -3294,6 +3322,7 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
             b->types[i] = NULL;
             chc__column_destroy(b->columns[i], al);
             b->columns[i] = NULL;
+            b->sparse_defaults = sparse_mark;
             chc__in_rewind(in);
             *next_col = i;
             return CHC_WOULD_BLOCK;

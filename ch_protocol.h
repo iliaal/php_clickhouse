@@ -7,5 +7,8 @@
 
 /* Records a refused native allocation for the PHP method boundary (clickhouse.c). */
 void ch_native_oom_note(size_t bytes);
+/* True when a Zend allocation of bytes fits memory_limit; a refusal is recorded
+ * as a native one, so the method boundary reports it the same way. */
+bool ch_native_reserve(size_t bytes);
 
 #endif

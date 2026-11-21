@@ -428,7 +428,14 @@ typedef struct chc__decomp_src {
     size_t           frame_fill;
     uint8_t         *comp_buf;
     size_t           comp_cap;
+    size_t           empty_frames;
 } chc__decomp_src;
+
+/* Valid empty frames carry nothing, so an endless run of them never makes
+ * progress or waits for the peer. */
+#ifndef CHC_MAX_EMPTY_FRAMES
+#define CHC_MAX_EMPTY_FRAMES 64u
+#endif
 
 static int
 chc__decomp_read_frame(chc__decomp_src *s, chc_err *err)
@@ -530,6 +537,12 @@ chc__decomp_read_frame(chc__decomp_src *s, chc_err *err)
     }
     s->frame_pos = 0;
     s->frame_fill = orig;
+    if (orig) {
+        s->empty_frames = 0;
+    } else if (++s->empty_frames > CHC_MAX_EMPTY_FRAMES) {
+        return chc__err_set(err, CHC_ERR_PROTOCOL,
+            "more than %u consecutive empty compressed frames", CHC_MAX_EMPTY_FRAMES);
+    }
     return CHC_OK;
 }
 

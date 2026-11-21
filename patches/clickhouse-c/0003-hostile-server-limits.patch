@@ -1,0 +1,331 @@
+diff --git a/LOCAL_PATCHES.md b/LOCAL_PATCHES.md
+index 3270faf..580df16 100644
+--- a/LOCAL_PATCHES.md
++++ b/LOCAL_PATCHES.md
+@@ -114,3 +114,26 @@ extension's active workflows remain under the repository-root
+ The patch retains the complete omitted files. Reversing the patches in reverse
+ filename order restores the complete pinned upstream tree, including these
+ workflow definitions, for the existing vendor-integrity check.
++
++## 0003-hostile-server-limits.patch
++
++The patch bounds the work a malicious server can make the client do with a
++few bytes:
++
++- `CHC_MAX_SPARSE_DEFAULT_BYTES` limits the default rows one block's sparse
++  columns may expand, counting at least eight bytes per default row. The
++  default rows of a sparse column carry no wire bytes, so this is the only
++  bound on them. Generic upstream mode leaves it unlimited; the PHP adapter
++  sets 1 GiB. A resumed ioless read restores the count of the column it
++  rewinds. `test/test_sparse.c` passes the count to the sparse reader.
++- A block that declares rows but no columns is rejected: rows live in
++  columns, so nothing on the wire backs such a count.
++- A Data, Log, or ProfileEvents packet whose block reaches end of stream
++  before its first byte fails with `CHC_ERR_EOF` instead of returning success
++  with a NULL block. `chc_block_read()` keeps its clean-EOF result for the
++  Native file reader.
++- Exception packets consume their nested exceptions, keeping the outermost.
++  The bytes of a nested exception no longer remain in the input buffer to be
++  read as the next packet. `CHC_MAX_NESTED_EXCEPTIONS` (64) bounds the chain.
++- More than `CHC_MAX_EMPTY_FRAMES` (64) consecutive empty compressed frames
++  fail the read. A valid empty frame still precedes data as before.
+diff --git a/clickhouse-client.h b/clickhouse-client.h
+index 49c9fd4..e83e08b 100644
+--- a/clickhouse-client.h
++++ b/clickhouse-client.h
+@@ -433,7 +433,13 @@ chc__client_setup(chc_client *c, const chc_client_opts *opts)
+     c->codec       = opts->codec;
+ }
+ 
+-/* Reads chained exception. Caller frees via chc_exception_free. */
++#ifndef CHC_MAX_NESTED_EXCEPTIONS
++#define CHC_MAX_NESTED_EXCEPTIONS 64u
++#endif
++
++/* Reads chained exception, keeping the outermost; nested ones are consumed so
++ * their bytes never parse as the next packet. Caller frees via
++ * chc_exception_free. */
+ static int
+ chc__read_exception(chc_client *c, chc_exception **out, chc_err *err)
+ {
+@@ -445,12 +451,29 @@ chc__read_exception(chc_client *c, chc_exception **out, chc_err *err)
+         (rc = chc__read_string (&c->in, &e->name,         &e->name_len,         err)) ||
+         (rc = chc__read_string (&c->in, &e->display_text, &e->display_text_len, err)) ||
+         (rc = chc__read_string (&c->in, &e->stack_trace,  &e->stack_trace_len,  err)) ||
+-        (rc = chc__read_byte   (&c->in, &has_nested, err))) {
+-        chc_exception_free(e, c->al);
+-        return rc;
++        (rc = chc__read_byte   (&c->in, &has_nested, err)))
++        goto fail;
++    for (unsigned depth = 0; has_nested; depth++) {
++        int32_t code;
++        if (depth == CHC_MAX_NESTED_EXCEPTIONS) {
++            rc = chc__err_set(err, CHC_ERR_PROTOCOL,
++                "server exception nests more than %u levels", CHC_MAX_NESTED_EXCEPTIONS);
++            goto fail;
++        }
++        if ((rc = chc__read_i32_le(&c->in, &code, err))) goto fail;
++        for (int field = 0; field < 3; field++) {
++            char *text;
++            size_t text_len;
++            if ((rc = chc__read_string(&c->in, &text, &text_len, err))) goto fail;
++            c->al->free(c->al->ud, text, text_len + 1);
++        }
++        if ((rc = chc__read_byte(&c->in, &has_nested, err))) goto fail;
+     }
+     *out = e;
+     return CHC_OK;
++fail:
++    chc_exception_free(e, c->al);
++    return rc;
+ }
+ 
+ static int
+@@ -992,6 +1015,15 @@ chc__recv_block_compressed_resume(chc_client *c, const chc_block_opts *opts,
+     }
+ }
+ 
++/* A block-bearing packet whose block hits EOF before its first byte is
++ * truncated; only the Native file reader treats that boundary as clean. */
++static int
++chc__recv_require_block(const chc_packet *out, chc_err *err)
++{
++    if (out->block) return CHC_OK;
++    return chc__err_set(err, CHC_ERR_EOF, "connection closed before the packet's block");
++}
++
+ /* Resumable packet decoder shared by chc_client_recv_packet and
+  * chc_async_recv_packet. For io-backed `in` refill blocks inside the reader.
+  * Ioless-gated checkpoints/resets are skipped, and a packet always completes
+@@ -1147,7 +1179,7 @@ chc__recv_packet_resumable(chc_client *c, chc_packet *out, chc_err *err)
+         c->recv_partial = NULL;
+         c->recv_next_col = 0;
+         if (ioless) chc_in_reset(&c->in);
+-        return CHC_OK;
++        return chc__recv_require_block(out, err);
+     }
+ 
+     /* Compressed Data. ioless: frame-granularity resume over a persisted
+@@ -1162,14 +1194,14 @@ chc__recv_packet_resumable(chc_client *c, chc_packet *out, chc_err *err)
+         c->recv_partial = NULL;
+         c->recv_next_col = 0;
+         chc_in_reset(&c->in);
+-        return CHC_OK;
++        return chc__recv_require_block(out, err);
+     }
+ 
+     rc = chc__recv_block_compressed(c, opts, &out->block, err);
+     if (rc == CHC_WOULD_BLOCK) return rc;
+     c->recv_in_block = 0;
+     if (rc != CHC_OK) return rc;
+-    return CHC_OK;
++    return chc__recv_require_block(out, err);
+ 
+ control_done:
+     if (ioless) chc_in_reset(&c->in);
+diff --git a/clickhouse-compression.h b/clickhouse-compression.h
+index 84f4f16..4ed07b8 100644
+--- a/clickhouse-compression.h
++++ b/clickhouse-compression.h
+@@ -428,8 +428,15 @@ typedef struct chc__decomp_src {
+     size_t           frame_fill;
+     uint8_t         *comp_buf;
+     size_t           comp_cap;
++    size_t           empty_frames;
+ } chc__decomp_src;
+ 
++/* Valid empty frames carry nothing, so an endless run of them never makes
++ * progress or waits for the peer. */
++#ifndef CHC_MAX_EMPTY_FRAMES
++#define CHC_MAX_EMPTY_FRAMES 64u
++#endif
++
+ static int
+ chc__decomp_read_frame(chc__decomp_src *s, chc_err *err)
+ {
+@@ -530,6 +537,12 @@ chc__decomp_read_frame(chc__decomp_src *s, chc_err *err)
+     }
+     s->frame_pos = 0;
+     s->frame_fill = orig;
++    if (orig) {
++        s->empty_frames = 0;
++    } else if (++s->empty_frames > CHC_MAX_EMPTY_FRAMES) {
++        return chc__err_set(err, CHC_ERR_PROTOCOL,
++            "more than %u consecutive empty compressed frames", CHC_MAX_EMPTY_FRAMES);
++    }
+     return CHC_OK;
+ }
+ 
+diff --git a/clickhouse.h b/clickhouse.h
+index 7a59fa7..821b372 100644
+--- a/clickhouse.h
++++ b/clickhouse.h
+@@ -742,6 +742,11 @@ chc_alloc chc_alloc_stdlib(void) {
+ #ifndef CHC_MAX_NUM_ROWS
+ #define CHC_MAX_NUM_ROWS          1000000000000ULL
+ #endif
++/* Sparse default rows have no wire bytes; this bounds what one block's sparse
++ * columns may expand, counting at least eight bytes per default row. */
++#ifndef CHC_MAX_SPARSE_DEFAULT_BYTES
++#define CHC_MAX_SPARSE_DEFAULT_BYTES SIZE_MAX
++#endif
+ #ifndef CHC_MAX_FIXEDSTRING_SIZE
+ #define CHC_MAX_FIXEDSTRING_SIZE  0xFFFFFFULL
+ #endif
+@@ -2556,8 +2561,8 @@ chc__serial_type(const chc_type *t)
+ #define CHC__SPARSE_END (UINT64_C(1) << 62)
+ 
+ static int chc__col_read_kinds(chc_in *in, const chc_type *t, size_t n_rows,
+-                               const uint8_t **kinds, chc_column **out,
+-                               chc_err *err);
++                               const uint8_t **kinds, size_t *sparse_defaults,
++                               chc_column **out, chc_err *err);
+ 
+ /* Byte-swap a host-typed uint64/keys array in place on BE hosts. No-op on LE. */
+ static void
+@@ -2586,7 +2591,8 @@ chc__swap_keys(CHC_MAYBE_UNUSED void *p, CHC_MAYBE_UNUSED size_t n,
+  * kinds NULL when dense */
+ static int
+ chc__col_read_tuple(chc_in *in, const chc_type *t, size_t n_rows,
+-                    const uint8_t **kinds, chc_column **out, chc_err *err)
++                    const uint8_t **kinds, size_t *sparse_defaults,
++                    chc_column **out, chc_err *err)
+ {
+     const chc_alloc *al = in->al;
+     chc_column *c = chc__calloc(al, sizeof *c, err);
+@@ -2600,7 +2606,8 @@ chc__col_read_tuple(chc_in *in, const chc_type *t, size_t n_rows,
+     }
+     for (size_t i = 0; i < t->n_children; i++) {
+         chc_column **slot = &c->tuple.children[i];
+-        int rc = kinds ? chc__col_read_kinds(in, t->children[i], n_rows, kinds, slot, err)
++        int rc = kinds ? chc__col_read_kinds(in, t->children[i], n_rows, kinds,
++                                             sparse_defaults, slot, err)
+                        : chc__col_read(in, t->children[i], n_rows, slot, err);
+         if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
+     }
+@@ -2613,7 +2620,7 @@ chc__col_read_tuple(chc_in *in, const chc_type *t, size_t n_rows,
+  * ColumnSparse storage default even where type default differs (Enum) */
+ static int
+ chc__col_read_sparse(chc_in *in, const chc_type *t, size_t n_rows,
+-                     chc_column **out, chc_err *err)
++                     size_t *sparse_defaults, chc_column **out, chc_err *err)
+ {
+     const chc_alloc *al = in->al;
+     size_t es = chc_type_elem_size(t);
+@@ -2657,6 +2664,15 @@ chc__col_read_sparse(chc_in *in, const chc_type *t, size_t n_rows,
+             "sparse offsets end at row %zu of %zu", row, n_rows);
+         goto fail;
+     }
++    /* bytes bounds n_rows * unit, so the product cannot wrap */
++    size_t defaults = (n_rows - n) * unit;
++    if (defaults > CHC_MAX_SPARSE_DEFAULT_BYTES - *sparse_defaults) {
++        rc = chc__err_set(err, CHC_ERR_PROTOCOL,
++            "sparse columns declare more default rows than a block may expand (%zu rows of %zu)",
++            n_rows - n, n_rows);
++        goto fail;
++    }
++    *sparse_defaults += defaults;
+ 
+     rc = chc__col_read(in, t, n, &c, err);
+     if (rc != CHC_OK) goto fail;
+@@ -2696,12 +2712,15 @@ fail:
+  * element's */
+ static int
+ chc__col_read_kinds(chc_in *in, const chc_type *t, size_t n_rows,
+-                    const uint8_t **kinds, chc_column **out, chc_err *err)
++                    const uint8_t **kinds, size_t *sparse_defaults,
++                    chc_column **out, chc_err *err)
+ {
+     t = chc__serial_type(t);
+     uint8_t kind = *(*kinds)++;
+-    if (t->kind == CHC_TUPLE) return chc__col_read_tuple(in, t, n_rows, kinds, out, err);
+-    if (kind == CHC__KIND_SPARSE) return chc__col_read_sparse(in, t, n_rows, out, err);
++    if (t->kind == CHC_TUPLE)
++        return chc__col_read_tuple(in, t, n_rows, kinds, sparse_defaults, out, err);
++    if (kind == CHC__KIND_SPARSE)
++        return chc__col_read_sparse(in, t, n_rows, sparse_defaults, out, err);
+     return chc__col_read(in, t, n_rows, out, err);
+ }
+ 
+@@ -2793,14 +2812,14 @@ chc__col_read(chc_in *in, const chc_type *t,
+         /* ClickHouse sends Map and Nested values as arrays of tuples */
+         int rc = t->kind == CHC_ARRAY
+             ? chc__col_read(in, t->children[0], (size_t) total, &c->array.values, err)
+-            : chc__col_read_tuple(in, t, (size_t) total, NULL, &c->array.values, err);
++            : chc__col_read_tuple(in, t, (size_t) total, NULL, NULL, &c->array.values, err);
+         if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
+         *out = c;
+         return CHC_OK;
+     }
+ 
+     case CHC_TUPLE:
+-        return chc__col_read_tuple(in, t, n_rows, NULL, out, err);
++        return chc__col_read_tuple(in, t, n_rows, NULL, NULL, out, err);
+ 
+     case CHC_QBIT: {
+         /* Wire form is Tuple(FixedString(ceil(N/8)) x element_size): one
+@@ -3049,6 +3068,7 @@ struct chc_block {
+     size_t        n_rows;
+     bool          is_overflows;
+     int32_t       bucket_num;
++    size_t        sparse_defaults;
+     char        **names;
+     size_t       *name_lens;
+     chc_type    **types;
+@@ -3224,6 +3244,12 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
+                 "suspiciously many rows: %llu", (unsigned long long) nrows);
+             goto header_fail;
+         }
++        /* Rows live in columns; without one, nothing on the wire backs them. */
++        if (ncols == 0 && nrows != 0) {
++            rc = chc__err_set(err, CHC_ERR_PROTOCOL,
++                "block declares %llu rows but no columns", (unsigned long long) nrows);
++            goto header_fail;
++        }
+ 
+         b->n_columns = (size_t) ncols;
+         b->n_rows    = (size_t) nrows;
+@@ -3237,6 +3263,7 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
+     for (size_t i = *next_col; i < b->n_columns; i++) {
+         char *type_name; size_t type_len;
+         uint8_t *kinds = NULL; size_t kinds_len = 0;
++        size_t sparse_mark = b->sparse_defaults;
+         rc = chc__block_reserve_column(b, i, al, err);
+         if (rc != CHC_OK) goto col_fail;
+ 
+@@ -3264,7 +3291,8 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
+             if (rc != CHC_OK) goto col_fail;
+ 
+             const uint8_t *cursor = kinds;
+-            rc = kinds ? chc__col_read_kinds(in, b->types[i], nrows, &cursor, &b->columns[i], err)
++            rc = kinds ? chc__col_read_kinds(in, b->types[i], nrows, &cursor,
++                                             &b->sparse_defaults, &b->columns[i], err)
+                        : chc__col_read(in, b->types[i], nrows, &b->columns[i], err);
+             if (CHC_PHP_COMPAT && rc == CHC_OK &&
+                 chc_column_validate(b->columns[i], err) != CHC_OK)
+@@ -3294,6 +3322,7 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
+             b->types[i] = NULL;
+             chc__column_destroy(b->columns[i], al);
+             b->columns[i] = NULL;
++            b->sparse_defaults = sparse_mark;
+             chc__in_rewind(in);
+             *next_col = i;
+             return CHC_WOULD_BLOCK;
+diff --git a/test/test_sparse.c b/test/test_sparse.c
+index bcf4480..b2a5700 100644
+--- a/test/test_sparse.c
++++ b/test/test_sparse.c
+@@ -418,11 +418,12 @@ test_rejects(void)
+     chc_err err = {};
+     chc_in in;
+     chc_column *c = NULL;
++    size_t defaults = 0;
+     if (chc_type_parse("UInt8", 5, &al, &t, &err) || chc_in_init_ioless(&in, &al)) {
+         fail_count++;
+         return;
+     }
+-    CHECK(chc__col_read_sparse(&in, t, SIZE_MAX / 4, &c, &err) == CHC_ERR_PROTOCOL);
++    CHECK(chc__col_read_sparse(&in, t, SIZE_MAX / 4, &defaults, &c, &err) == CHC_ERR_PROTOCOL);
+     CHECK(c == NULL);
+     chc_in_free(&in);
+     chc_type_destroy(t, &al);

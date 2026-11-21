@@ -956,6 +956,19 @@ int ch_query_event(clickhouse_object *obj, const chc_packet *packet, zend_string
 	}
 }
 
+int ch_count_idle_packet(const chc_packet *packet, size_t *idle, chc_err *error)
+{
+	if (packet->kind == CHC_PKT_EXCEPTION) return CHC_OK;
+	if (packet->kind == CHC_PKT_DATA && chc_block_n_rows(packet->block)) {
+		*idle = 0;
+		return CHC_OK;
+	}
+	if (++*idle <= CH_MAX_IDLE_PACKETS) return CHC_OK;
+	snprintf(error->msg, sizeof(error->msg), "server sent more than %u packets without rows",
+		(unsigned)CH_MAX_IDLE_PACKETS);
+	return CHC_ERR_PROTOCOL;
+}
+
 int ch_validate_block(const chc_block *block, chc_err *error)
 {
 	size_t columns = chc_block_n_columns(block);
@@ -998,6 +1011,7 @@ int ch_query_run(clickhouse_object *obj, ch_query *query,
 	chc_exception *exception = NULL;
 	chc_client *client;
 	uint64_t started = ch_monotonic_ns();
+	size_t idle = 0;
 	bool cancelled = false, reset = true;
 	int status = ch_backend_before_query(obj->backend, &exception, &error);
 	if (status != CHC_OK) {
@@ -1028,6 +1042,8 @@ int ch_query_run(clickhouse_object *obj, ch_query *query,
 			obj->stats.elapsed_ms = (double)(ch_monotonic_ns() - started) / 1000000.0;
 			return SUCCESS;
 		}
+		status = ch_count_idle_packet(&packet, &idle, &error);
+		if (status != CHC_OK) { chc_packet_clear(client, &packet); goto native_failed; }
 		if (packet.kind == CHC_PKT_DATA || packet.kind == CHC_PKT_TOTALS || packet.kind == CHC_PKT_EXTREMES
 			|| packet.kind == CHC_PKT_LOG || packet.kind == CHC_PKT_PROFILE_EVENTS) {
 			status = ch_validate_block(packet.block, &error);
