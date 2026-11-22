@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-11-22
+
 ### Changed
 
 - `receive_timeout` and `send_timeout` now default to 300 seconds, as in
