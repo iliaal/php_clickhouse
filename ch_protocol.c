@@ -41,8 +41,13 @@
 #define CHC_MAX_TYPE_DEPTH 512
 #define CHC_MAX_NUM_COLUMNS SIZE_MAX
 #define CHC_MAX_NUM_ROWS SIZE_MAX
-/* 2,048 sparse 8-byte columns at the server's default 65,409-row block. */
-#define CHC_MAX_SPARSE_DEFAULT_BYTES ((size_t)1 << 30)
+/* Sparse default rows cost a server no bytes. 2^20 rows covers the largest
+ * block ClickHouse forms by default (min_insert_block_size_rows, 1,048,449),
+ * 16 times its default max_block_size; 64 MiB covers 128 sparse 8-byte
+ * columns at that max_block_size. A server from 23.8 on sends no sparse
+ * columns at the revision this client negotiates. */
+#define CHC_MAX_SPARSE_DEFAULT_ROWS ((size_t)1 << 20)
+#define CHC_MAX_SPARSE_DEFAULT_BYTES ((size_t)64 << 20)
 #include "ch_protocol.h"
 
 /* Reject before Zend queues or raises an OOM. A new chunk may be needed even

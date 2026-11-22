@@ -3,13 +3,14 @@
  * request with $first and waits for the client's next bytes when $first is
  * not empty. It then sends $packet $count times, $interval microseconds apart,
  * or with $split each byte of $packet that far apart, and finally $tail. It
- * stops early once the client hangs up. */
+ * stops early once the client hangs up. With $stall it instead stops reading
+ * after $first for that many seconds and then hangs up. */
 require_once __DIR__ . "/_wire_mock.inc";
 
 function paced_mock_code(): string
 {
     return <<<'PHP'
-list(, $hello, $first, $packet, $count, $interval, $split, $tail) = $argv;
+list(, $hello, $first, $packet, $count, $interval, $split, $tail, $stall) = $argv;
 $server = stream_socket_server("tcp://127.0.0.1:0", $errno, $error);
 if (!$server) {
     fwrite(STDERR, "$errno: $error\n");
@@ -36,6 +37,12 @@ fwrite($peer, hex2bin($hello));
 idle($peer, 5000000);
 if ($first !== "") {
     fwrite($peer, hex2bin($first));
+    if ((int)$stall) {
+        sleep((int)$stall);
+        fclose($peer);
+        fclose($server);
+        exit(0);
+    }
     idle($peer, 5000000);
 }
 $pieces = $split ? str_split(hex2bin($packet)) : array_fill(0, (int)$count, hex2bin($packet));
@@ -63,9 +70,11 @@ function paced_run(array $args, array $config, callable $op): array
             @unlink($file);
         });
     }
-    $args += ["first" => "", "packet" => "", "count" => 0, "interval" => 0, "split" => false, "tail" => "05"];
+    $args += ["first" => "", "packet" => "", "count" => 0, "interval" => 0, "split" => false, "tail" => "05",
+        "stall" => 0];
     $process = proc_open([PHP_BINARY, "-n", "-f", $file, wire_default_hello_hex(), $args["first"], $args["packet"],
-        (string)$args["count"], (string)$args["interval"], $args["split"] ? "1" : "", $args["tail"]],
+        (string)$args["count"], (string)$args["interval"], $args["split"] ? "1" : "", $args["tail"],
+        (string)$args["stall"]],
         [0 => ["pipe", "r"], 1 => ["pipe", "w"], 2 => ["pipe", "w"]], $pipes);
     $port = (int)trim((string)fgets($pipes[1]));
     $started = microtime(true);

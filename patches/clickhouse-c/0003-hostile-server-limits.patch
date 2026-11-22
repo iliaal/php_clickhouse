@@ -1,8 +1,8 @@
 diff --git a/LOCAL_PATCHES.md b/LOCAL_PATCHES.md
-index 3270faf..580df16 100644
+index 3270faf..d6ec214 100644
 --- a/LOCAL_PATCHES.md
 +++ b/LOCAL_PATCHES.md
-@@ -114,3 +114,26 @@ extension's active workflows remain under the repository-root
+@@ -114,3 +114,28 @@ extension's active workflows remain under the repository-root
  The patch retains the complete omitted files. Reversing the patches in reverse
  filename order restores the complete pinned upstream tree, including these
  workflow definitions, for the existing vendor-integrity check.
@@ -12,17 +12,19 @@ index 3270faf..580df16 100644
 +The patch bounds the work a malicious server can make the client do with a
 +few bytes:
 +
-+- `CHC_MAX_SPARSE_DEFAULT_BYTES` limits the default rows one block's sparse
-+  columns may expand, counting at least eight bytes per default row. The
-+  default rows of a sparse column carry no wire bytes, so this is the only
-+  bound on them. Generic upstream mode leaves it unlimited; the PHP adapter
-+  sets 1 GiB. A resumed ioless read restores the count of the column it
++- The default rows of a sparse column carry no wire bytes, so nothing else
++  bounds them. `CHC_MAX_SPARSE_DEFAULT_ROWS` limits one sparse column's
++  default rows, and `CHC_MAX_SPARSE_DEFAULT_BYTES` limits the zero-filled
++  values and String offsets one block's sparse columns expand them to.
++  Generic upstream mode leaves both unlimited; the PHP adapter sets 2^20 rows
++  and 64 MiB. A resumed ioless read restores the byte count of the column it
 +  rewinds. `test/test_sparse.c` passes the count to the sparse reader.
 +- A block that declares rows but no columns is rejected: rows live in
 +  columns, so nothing on the wire backs such a count.
-+- A Data, Log, or ProfileEvents packet whose block reaches end of stream
-+  before its first byte fails with `CHC_ERR_EOF` instead of returning success
-+  with a NULL block. `chc_block_read()` keeps its clean-EOF result for the
++- A Data, Totals, Extremes, Log, or ProfileEvents packet whose block reaches
++  end of stream before its first byte fails with `CHC_ERR_EOF` instead of
++  returning success with a NULL block. PHP compatibility mode rejects Totals
++  and Extremes before their blocks, so there the check covers the others. `chc_block_read()` keeps its clean-EOF result for the
 +  Native file reader.
 +- Exception packets consume their nested exceptions, keeping the outermost.
 +  The bytes of a nested exception no longer remain in the input buffer to be
@@ -157,22 +159,25 @@ index 84f4f16..4ed07b8 100644
  }
  
 diff --git a/clickhouse.h b/clickhouse.h
-index 7a59fa7..821b372 100644
+index 7a59fa7..d55f513 100644
 --- a/clickhouse.h
 +++ b/clickhouse.h
-@@ -742,6 +742,11 @@ chc_alloc chc_alloc_stdlib(void) {
+@@ -742,6 +742,14 @@ chc_alloc chc_alloc_stdlib(void) {
  #ifndef CHC_MAX_NUM_ROWS
  #define CHC_MAX_NUM_ROWS          1000000000000ULL
  #endif
-+/* Sparse default rows have no wire bytes; this bounds what one block's sparse
-+ * columns may expand, counting at least eight bytes per default row. */
++/* Sparse default rows have no wire bytes. These bound the default rows of one
++ * sparse column and the bytes one block's sparse columns expand them to. */
++#ifndef CHC_MAX_SPARSE_DEFAULT_ROWS
++#define CHC_MAX_SPARSE_DEFAULT_ROWS SIZE_MAX
++#endif
 +#ifndef CHC_MAX_SPARSE_DEFAULT_BYTES
 +#define CHC_MAX_SPARSE_DEFAULT_BYTES SIZE_MAX
 +#endif
  #ifndef CHC_MAX_FIXEDSTRING_SIZE
  #define CHC_MAX_FIXEDSTRING_SIZE  0xFFFFFFULL
  #endif
-@@ -2556,8 +2561,8 @@ chc__serial_type(const chc_type *t)
+@@ -2556,8 +2564,8 @@ chc__serial_type(const chc_type *t)
  #define CHC__SPARSE_END (UINT64_C(1) << 62)
  
  static int chc__col_read_kinds(chc_in *in, const chc_type *t, size_t n_rows,
@@ -183,7 +188,7 @@ index 7a59fa7..821b372 100644
  
  /* Byte-swap a host-typed uint64/keys array in place on BE hosts. No-op on LE. */
  static void
-@@ -2586,7 +2591,8 @@ chc__swap_keys(CHC_MAYBE_UNUSED void *p, CHC_MAYBE_UNUSED size_t n,
+@@ -2586,7 +2594,8 @@ chc__swap_keys(CHC_MAYBE_UNUSED void *p, CHC_MAYBE_UNUSED size_t n,
   * kinds NULL when dense */
  static int
  chc__col_read_tuple(chc_in *in, const chc_type *t, size_t n_rows,
@@ -193,7 +198,7 @@ index 7a59fa7..821b372 100644
  {
      const chc_alloc *al = in->al;
      chc_column *c = chc__calloc(al, sizeof *c, err);
-@@ -2600,7 +2606,8 @@ chc__col_read_tuple(chc_in *in, const chc_type *t, size_t n_rows,
+@@ -2600,7 +2609,8 @@ chc__col_read_tuple(chc_in *in, const chc_type *t, size_t n_rows,
      }
      for (size_t i = 0; i < t->n_children; i++) {
          chc_column **slot = &c->tuple.children[i];
@@ -203,7 +208,7 @@ index 7a59fa7..821b372 100644
                         : chc__col_read(in, t->children[i], n_rows, slot, err);
          if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
      }
-@@ -2613,7 +2620,7 @@ chc__col_read_tuple(chc_in *in, const chc_type *t, size_t n_rows,
+@@ -2613,7 +2623,7 @@ chc__col_read_tuple(chc_in *in, const chc_type *t, size_t n_rows,
   * ColumnSparse storage default even where type default differs (Enum) */
  static int
  chc__col_read_sparse(chc_in *in, const chc_type *t, size_t n_rows,
@@ -212,23 +217,30 @@ index 7a59fa7..821b372 100644
  {
      const chc_alloc *al = in->al;
      size_t es = chc_type_elem_size(t);
-@@ -2657,6 +2664,15 @@ chc__col_read_sparse(chc_in *in, const chc_type *t, size_t n_rows,
+@@ -2657,6 +2667,22 @@ chc__col_read_sparse(chc_in *in, const chc_type *t, size_t n_rows,
              "sparse offsets end at row %zu of %zu", row, n_rows);
          goto fail;
      }
-+    /* bytes bounds n_rows * unit, so the product cannot wrap */
-+    size_t defaults = (n_rows - n) * unit;
-+    if (defaults > CHC_MAX_SPARSE_DEFAULT_BYTES - *sparse_defaults) {
++    size_t defaults = n_rows - n;
++    if (defaults > CHC_MAX_SPARSE_DEFAULT_ROWS) {
 +        rc = chc__err_set(err, CHC_ERR_PROTOCOL,
-+            "sparse columns declare more default rows than a block may expand (%zu rows of %zu)",
-+            n_rows - n, n_rows);
++            "sparse column declares %zu default rows, more than %zu", defaults,
++            (size_t) CHC_MAX_SPARSE_DEFAULT_ROWS);
 +        goto fail;
 +    }
-+    *sparse_defaults += defaults;
++    /* bytes bounds n_rows * unit, so the product cannot wrap */
++    size_t expansion = defaults * (es ? es : t->kind == CHC_STRING ? sizeof(uint64_t) : 0);
++    if (expansion > CHC_MAX_SPARSE_DEFAULT_BYTES - *sparse_defaults) {
++        rc = chc__err_set(err, CHC_ERR_PROTOCOL,
++            "sparse columns of one block expand past %zu bytes of default rows",
++            (size_t) CHC_MAX_SPARSE_DEFAULT_BYTES);
++        goto fail;
++    }
++    *sparse_defaults += expansion;
  
      rc = chc__col_read(in, t, n, &c, err);
      if (rc != CHC_OK) goto fail;
-@@ -2696,12 +2712,15 @@ fail:
+@@ -2696,12 +2722,15 @@ fail:
   * element's */
  static int
  chc__col_read_kinds(chc_in *in, const chc_type *t, size_t n_rows,
@@ -247,7 +259,7 @@ index 7a59fa7..821b372 100644
      return chc__col_read(in, t, n_rows, out, err);
  }
  
-@@ -2793,14 +2812,14 @@ chc__col_read(chc_in *in, const chc_type *t,
+@@ -2793,14 +2822,14 @@ chc__col_read(chc_in *in, const chc_type *t,
          /* ClickHouse sends Map and Nested values as arrays of tuples */
          int rc = t->kind == CHC_ARRAY
              ? chc__col_read(in, t->children[0], (size_t) total, &c->array.values, err)
@@ -264,7 +276,7 @@ index 7a59fa7..821b372 100644
  
      case CHC_QBIT: {
          /* Wire form is Tuple(FixedString(ceil(N/8)) x element_size): one
-@@ -3049,6 +3068,7 @@ struct chc_block {
+@@ -3049,6 +3078,7 @@ struct chc_block {
      size_t        n_rows;
      bool          is_overflows;
      int32_t       bucket_num;
@@ -272,7 +284,7 @@ index 7a59fa7..821b372 100644
      char        **names;
      size_t       *name_lens;
      chc_type    **types;
-@@ -3224,6 +3244,12 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
+@@ -3224,6 +3254,12 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
                  "suspiciously many rows: %llu", (unsigned long long) nrows);
              goto header_fail;
          }
@@ -285,7 +297,7 @@ index 7a59fa7..821b372 100644
  
          b->n_columns = (size_t) ncols;
          b->n_rows    = (size_t) nrows;
-@@ -3237,6 +3263,7 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
+@@ -3237,6 +3273,7 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
      for (size_t i = *next_col; i < b->n_columns; i++) {
          char *type_name; size_t type_len;
          uint8_t *kinds = NULL; size_t kinds_len = 0;
@@ -293,7 +305,7 @@ index 7a59fa7..821b372 100644
          rc = chc__block_reserve_column(b, i, al, err);
          if (rc != CHC_OK) goto col_fail;
  
-@@ -3264,7 +3291,8 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
+@@ -3264,7 +3301,8 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
              if (rc != CHC_OK) goto col_fail;
  
              const uint8_t *cursor = kinds;
@@ -303,7 +315,7 @@ index 7a59fa7..821b372 100644
                         : chc__col_read(in, b->types[i], nrows, &b->columns[i], err);
              if (CHC_PHP_COMPAT && rc == CHC_OK &&
                  chc_column_validate(b->columns[i], err) != CHC_OK)
-@@ -3294,6 +3322,7 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
+@@ -3294,6 +3332,7 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
              b->types[i] = NULL;
              chc__column_destroy(b->columns[i], al);
              b->columns[i] = NULL;

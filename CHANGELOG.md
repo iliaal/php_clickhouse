@@ -9,29 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `receive_timeout` now defaults to 300 seconds, the `clickhouse-client`
-  default, where 0.14.0 and 0.15.0 waited without limit. It now bounds each
-  server packet as a whole, from its first byte to its last, instead of each
-  read, so a server that trickles bytes can no longer hold a worker. Every
-  complete packet, Progress included, starts a new window, so a long query
-  that keeps reporting progress still runs to completion. Set it to 0 for no
-  limit.
-- The new `operation_timeout` and `operation_timeout_ms` options bound the
-  total time one operation waits for the server: a query, the start of an
-  insert, `writeEnd()`, a ping, or a connect. Time spent in callbacks and in
-  converting rows does not count. The default, 0, sets no limit.
-- Destroying a client with an unfinished insert waits for the server at most
-  five seconds in total, writes included. The five seconds used to apply to
-  each read and write separately.
+- `receive_timeout` and `send_timeout` now default to 300 seconds, as in
+  `clickhouse-client`; 0.14.0 and 0.15.0 waited without limit. Each bounds
+  one server packet, or one buffer sent, as a whole, from its first byte to
+  its last, instead of each read or write, so a server can no longer stretch
+  a packet by trickling bytes. A server that completes one packet every
+  `receive_timeout`, Progress included, keeps an operation alive, so long
+  queries that report progress still finish. Set either to 0 for no limit.
+- The new `operation_timeout` and `operation_timeout_ms` options are the hard
+  cap: the total time one operation waits for the server, reading and
+  writing. An operation is a query, the start of an insert, one block sent,
+  `writeEnd()`, a ping, or a connect. Time spent in callbacks and in
+  converting rows does not count, except in `writeEnd()`, which runs no
+  callbacks and counts decoding too. The default, 0, sets no limit.
+- Destroying a client with an unfinished insert gives the server five
+  seconds in total, decoding and writes included, to end the INSERT. The
+  five seconds used to apply to each read and write separately.
 
 ### Fixed
 
 - A malicious server, or an attacker on an unverified connection, can no
   longer exhaust memory or end the PHP process with a few bytes:
-  - Sparse columns expand at most 1 GiB of default rows per block, counting
-    at least eight bytes per row. A 75-byte response used to make the client
-    allocate and zero-fill 256 MiB and then build a PHP row for each of its
-    2^28 declared rows, or end the request in a `memory_limit` error.
+  - A sparse column may leave at most 2^20 rows at their default value, and
+    one block's sparse columns may expand at most 64 MiB of such values. A
+    75-byte response used to make the client allocate and zero-fill 256 MiB
+    and then build a PHP row for each of its 2^28 declared rows, or end the
+    request in a `memory_limit` error. ClickHouse 23.8 and later send no
+    sparse columns to this client; with an older server, lower
+    `max_block_size` if a block exceeds the limits.
   - A block that declares rows but no columns fails. `select()` used to
     build an empty row for each declared row until `memory_limit` ended the
     request.
@@ -43,7 +48,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - More than 1,000,000 consecutive packets without rows (Progress, Log,
     ProfileEvents, or empty Data blocks) fail the operation, and more than
     64 consecutive empty compressed frames fail the read. A flood of them
-    never makes the client wait, so no timeout ended it.
+    never makes the client wait, so no timeout ended it. The server sends
+    Progress at most every 100 ms by default (`interactive_delay`), so only
+    a query that returns no rows for more than about a day reaches the cap.
+- Finalizing an insert, in `writeEnd()` or when a client with an unfinished
+  insert is destroyed, fails on a Data packet from the server. It used to
+  decode and drop each one, so a server sending small Data packets declaring
+  many rows kept a destructor running for minutes.
 - A Data packet whose block never arrives fails with "connection closed
   before the packet's block". `writeStart()` used to take the missing block
   as the INSERT's schema and return.
@@ -66,7 +77,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `wire_response_file()`, and `wire_child_php()` builds the command line
   for a child process that is expected to end in a fatal error, and
   `tests/_paced_mock.inc` runs a peer that paces its reply. Tests 314 through
-  322 cover the fixes above with scripted peers.
+  323 cover the fixes above with scripted peers.
 
 ## [0.15.0] - 2026-11-21
 

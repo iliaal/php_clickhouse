@@ -176,6 +176,7 @@ int ch_insert_send(clickhouse_object *obj, const chc_block_builder *block)
 	if (!obj->insert_active || !ch_backend_client(obj->backend)) {
 		return ch_insert_checked(ch_insert_error("illegal to send insert data without first calling BeginInsert"), obj->insert_query_id);
 	}
+	ch_backend_begin_operation(obj->backend);
 	status = chc_client_send_data(ch_backend_client(obj->backend), block, &error);
 	if (status != CHC_OK) {
 		if (!EG(exception)) ch_failure_native(obj, status, &error, NULL);
@@ -199,6 +200,7 @@ static int ch_insert_end_impl(clickhouse_object *obj, bool report_error)
 		return FAILURE;
 	}
 	ch_backend_begin_operation(obj->backend);
+	ch_backend_begin_deadline(obj->backend);
 	status = chc_client_send_data(client, NULL, &error);
 	if (status != CHC_OK) {
 		if (report_error) {
@@ -210,7 +212,11 @@ static int ch_insert_end_impl(clickhouse_object *obj, bool report_error)
 	for (size_t idle = 0;;) {
 		chc_packet packet = {0};
 		status = ch_backend_recv_packet(obj->backend, &packet, &error);
-		if (status == CHC_OK && packet.kind != CHC_PKT_END_OF_STREAM) {
+		/* The server sends no rows after the end of INSERT data. */
+		if (status == CHC_OK && packet.kind == CHC_PKT_DATA) {
+			snprintf(error.msg, sizeof(error.msg), "%s", "server sent a Data packet after the end of INSERT data");
+			status = CHC_ERR_PROTOCOL;
+		} else if (status == CHC_OK && packet.kind != CHC_PKT_END_OF_STREAM) {
 			status = ch_count_idle_packet(&packet, &idle, &error);
 		}
 		if (status != CHC_OK) {

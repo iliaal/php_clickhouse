@@ -804,7 +804,7 @@ static int ch_config_options(HashTable *config, HashTable *strings,
 	options->connect_timeout_ms = (uint32_t)number * 1000U;
 	if (ch_config_property_long(config, object, "receive_timeout", UINT_MAX / 1000U, &number) == FAILURE) return FAILURE;
 	options->receive_timeout_ms = (uint32_t)number * 1000U;
-	number = 0;
+	number = 300;
 	if (ch_config_long(config, "send_timeout", UINT_MAX / 1000U, &number) == FAILURE) return FAILURE;
 	options->send_timeout_ms = (uint32_t)number * 1000U;
 	number = 0;

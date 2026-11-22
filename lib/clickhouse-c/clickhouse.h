@@ -742,8 +742,11 @@ chc_alloc chc_alloc_stdlib(void) {
 #ifndef CHC_MAX_NUM_ROWS
 #define CHC_MAX_NUM_ROWS          1000000000000ULL
 #endif
-/* Sparse default rows have no wire bytes; this bounds what one block's sparse
- * columns may expand, counting at least eight bytes per default row. */
+/* Sparse default rows have no wire bytes. These bound the default rows of one
+ * sparse column and the bytes one block's sparse columns expand them to. */
+#ifndef CHC_MAX_SPARSE_DEFAULT_ROWS
+#define CHC_MAX_SPARSE_DEFAULT_ROWS SIZE_MAX
+#endif
 #ifndef CHC_MAX_SPARSE_DEFAULT_BYTES
 #define CHC_MAX_SPARSE_DEFAULT_BYTES SIZE_MAX
 #endif
@@ -2664,15 +2667,22 @@ chc__col_read_sparse(chc_in *in, const chc_type *t, size_t n_rows,
             "sparse offsets end at row %zu of %zu", row, n_rows);
         goto fail;
     }
-    /* bytes bounds n_rows * unit, so the product cannot wrap */
-    size_t defaults = (n_rows - n) * unit;
-    if (defaults > CHC_MAX_SPARSE_DEFAULT_BYTES - *sparse_defaults) {
+    size_t defaults = n_rows - n;
+    if (defaults > CHC_MAX_SPARSE_DEFAULT_ROWS) {
         rc = chc__err_set(err, CHC_ERR_PROTOCOL,
-            "sparse columns declare more default rows than a block may expand (%zu rows of %zu)",
-            n_rows - n, n_rows);
+            "sparse column declares %zu default rows, more than %zu", defaults,
+            (size_t) CHC_MAX_SPARSE_DEFAULT_ROWS);
         goto fail;
     }
-    *sparse_defaults += defaults;
+    /* bytes bounds n_rows * unit, so the product cannot wrap */
+    size_t expansion = defaults * (es ? es : t->kind == CHC_STRING ? sizeof(uint64_t) : 0);
+    if (expansion > CHC_MAX_SPARSE_DEFAULT_BYTES - *sparse_defaults) {
+        rc = chc__err_set(err, CHC_ERR_PROTOCOL,
+            "sparse columns of one block expand past %zu bytes of default rows",
+            (size_t) CHC_MAX_SPARSE_DEFAULT_BYTES);
+        goto fail;
+    }
+    *sparse_defaults += expansion;
 
     rc = chc__col_read(in, t, n, &c, err);
     if (rc != CHC_OK) goto fail;

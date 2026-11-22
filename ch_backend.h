@@ -91,9 +91,12 @@ int ch_backend_connect(ch_connection *connection, chc_exception **exception, chc
 int ch_backend_reset(ch_connection *connection, chc_exception **exception, chc_err *error);
 int ch_backend_before_query(ch_connection *connection, chc_exception **exception, chc_err *error);
 int ch_backend_ping(ch_connection *connection, chc_exception **exception, chc_err *error);
-/* Starts an operation: operation_timeout_ms bounds its total socket wait for
- * replies. before_query, ping, and connect start one themselves. */
+/* Starts an operation: operation_timeout_ms bounds its total socket wait,
+ * reads and writes. before_query, ping, and connect start one themselves. */
 void ch_backend_begin_operation(ch_connection *connection);
+/* Also bounds the operation by operation_timeout_ms of wall-clock time, decoding
+ * included; only for operations that run no callbacks. */
+void ch_backend_begin_deadline(ch_connection *connection);
 /* Receives one packet; receive_timeout_ms bounds the socket wait for the whole
  * packet, not each read. */
 int ch_backend_recv_packet(ch_connection *connection, chc_packet *out, chc_err *error);

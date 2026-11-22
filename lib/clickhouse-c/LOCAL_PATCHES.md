@@ -120,17 +120,19 @@ workflow definitions, for the existing vendor-integrity check.
 The patch bounds the work a malicious server can make the client do with a
 few bytes:
 
-- `CHC_MAX_SPARSE_DEFAULT_BYTES` limits the default rows one block's sparse
-  columns may expand, counting at least eight bytes per default row. The
-  default rows of a sparse column carry no wire bytes, so this is the only
-  bound on them. Generic upstream mode leaves it unlimited; the PHP adapter
-  sets 1 GiB. A resumed ioless read restores the count of the column it
+- The default rows of a sparse column carry no wire bytes, so nothing else
+  bounds them. `CHC_MAX_SPARSE_DEFAULT_ROWS` limits one sparse column's
+  default rows, and `CHC_MAX_SPARSE_DEFAULT_BYTES` limits the zero-filled
+  values and String offsets one block's sparse columns expand them to.
+  Generic upstream mode leaves both unlimited; the PHP adapter sets 2^20 rows
+  and 64 MiB. A resumed ioless read restores the byte count of the column it
   rewinds. `test/test_sparse.c` passes the count to the sparse reader.
 - A block that declares rows but no columns is rejected: rows live in
   columns, so nothing on the wire backs such a count.
-- A Data, Log, or ProfileEvents packet whose block reaches end of stream
-  before its first byte fails with `CHC_ERR_EOF` instead of returning success
-  with a NULL block. `chc_block_read()` keeps its clean-EOF result for the
+- A Data, Totals, Extremes, Log, or ProfileEvents packet whose block reaches
+  end of stream before its first byte fails with `CHC_ERR_EOF` instead of
+  returning success with a NULL block. PHP compatibility mode rejects Totals
+  and Extremes before their blocks, so there the check covers the others. `chc_block_read()` keeps its clean-EOF result for the
   Native file reader.
 - Exception packets consume their nested exceptions, keeping the outermost.
   The bytes of a nested exception no longer remain in the input buffer to be
