@@ -8,14 +8,14 @@ HTTP-only features (sessions, curl options, file-based `WHERE IN`/write-to-file,
 
 ### Totals / Extremes capture
 
-`SELECT ... WITH TOTALS` and `SETTINGS extremes=1` currently throw `unimplemented 7` / `unimplemented 8` from the vendored library. clickhouse-cpp (through at least v2.6.2) doesn't dispatch the Totals / Extremes packet types ([upstream issue #297](https://github.com/ClickHouse/clickhouse-cpp/issues/297)).
+The PHP API has no result representation for Totals or Extremes. Queries
+that return these packets (`SELECT ... WITH TOTALS` or
+`SETTINGS extremes=1`) retain the existing `unimplemented 7` /
+`unimplemented 8` errors.
 
-Scope: vendor blocker. Two paths:
-
-1. Local patch: extend `BlockInfo` and add the two cases to the packet dispatch (~30-50 LOC). Ships in `lib/clickhouse-cpp/LOCAL_PATCHES.md`.
-2. Wait for upstream.
-
-Once decoded, surface via `getTotals()` / `getExtremes()` methods on `ClickHouse`.
+The C protocol client can decode both packet types. Exposing their values
+requires separate PHP API work; the compatibility migration preserves
+rejection instead of silently discarding them.
 
 ## Deferred porting friction (smi2 -> php_clickhouse)
 

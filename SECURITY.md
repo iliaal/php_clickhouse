@@ -33,15 +33,17 @@ fix is released the advisory becomes public.
 
 ## Scope
 
-php_clickhouse is a thin binding to the official ClickHouse/clickhouse-cpp
-client library. Vulnerabilities in the vendored client (LZ4 / ZSTD /
-cityhash / absl int128 / clickhouse-cpp itself) are reported to their
+php_clickhouse uses the official ClickHouse/clickhouse-c protocol client
+with C bindings and transport code. Vulnerabilities in the vendored client
+and its LZ4, ZSTD, and CityHash dependencies are reported to their
 respective upstream projects; we'll re-vendor as soon as a fix is tagged.
 
 User input passes from PHP into the wire protocol via the typed column
-machinery in `typesToPhp.cpp`. Bugs in that layer (out-of-bounds reads,
-use-after-free, integer truncation that leads to incorrect SQL) are
-in scope.
+conversion in `ch_types_write.c`; `ch_types_read.c` converts server results
+to PHP values. These paths use portable wide-integer arithmetic in
+`ch_wide.c`. Bugs in the extension's bindings, conversion, and transport
+code (out-of-bounds reads, use-after-free, integer truncation that leads
+to incorrect SQL) are in scope.
 
 The TLS/SSL build (`--enable-clickhouse-openssl`) links against the
 system OpenSSL. Misuse of `ssl_skip_verify => true` is documented as a

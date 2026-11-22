@@ -26,7 +26,7 @@ final class ClickHouse
     protected int $compression = 0;
     protected int $retry_timeout = 5;
     protected int $retry_count = 1;
-    protected int $receive_timeout = 0;
+    protected int $receive_timeout = 300;
     protected int $connect_timeout = 5;
 
     public function __construct(#[\SensitiveParameter] array $connectParams) {}

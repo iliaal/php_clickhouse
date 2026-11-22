@@ -1,0 +1,6 @@
+.vscode/
+/coverage/
+__pycache__/
+*.gcda
+*.gcno
+*.gcov

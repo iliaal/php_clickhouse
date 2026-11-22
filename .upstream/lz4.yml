@@ -1,0 +1,5 @@
+pinned: 1.11.1
+vendored_at: lib/compression/lz4
+resolver: github
+repo: lz4/lz4
+note: "Sources from lib/ at tag v1.11.1, no local patches; see lib/compression/UPSTREAM.md"

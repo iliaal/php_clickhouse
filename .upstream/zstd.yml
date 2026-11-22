@@ -1,0 +1,5 @@
+pinned: 1.5.7
+vendored_at: lib/compression/zstd
+resolver: github
+repo: facebook/zstd
+note: "Sources from lib/ at tag v1.5.7, no local patches; see lib/compression/UPSTREAM.md"

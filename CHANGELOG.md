@@ -7,6 +7,135 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-11-22
+
+### Changed
+
+- `receive_timeout` and `send_timeout` now default to 300 seconds, as in
+  `clickhouse-client`; 0.14.0 and 0.15.0 waited without limit. Each bounds
+  one server packet, or one buffer sent, as a whole, from its first byte to
+  its last, instead of each read or write, so a server can no longer stretch
+  a packet by trickling bytes. A server that completes one packet every
+  `receive_timeout`, Progress included, keeps an operation alive, so long
+  queries that report progress still finish. Set either to 0 for no limit.
+- The new `operation_timeout` and `operation_timeout_ms` options are the hard
+  cap: the total time one operation waits for the server, reading and
+  writing. An operation is a query, the start of an insert, one block sent,
+  `writeEnd()`, a ping, or a connect. Time spent in callbacks and in
+  converting rows does not count, except in `writeEnd()`, which runs no
+  callbacks and counts decoding too. The default, 0, sets no limit.
+- Destroying a client with an unfinished insert gives the server five
+  seconds in total, decoding and writes included, to end the INSERT. The
+  five seconds used to apply to each read and write separately.
+
+### Fixed
+
+- A malicious server, or an attacker on an unverified connection, can no
+  longer exhaust memory or end the PHP process with a few bytes:
+  - A sparse column may leave at most 2^20 rows at their default value, and
+    one block's sparse columns may expand at most 64 MiB of such values. A
+    75-byte response used to make the client allocate and zero-fill 256 MiB
+    and then build a PHP row for each of its 2^28 declared rows, or end the
+    request in a `memory_limit` error. ClickHouse 23.8 and later send no
+    sparse columns to this client; with an older server, lower
+    `max_block_size` if a block exceeds the limits.
+  - A block that declares rows but no columns fails. `select()` used to
+    build an empty row for each declared row until `memory_limit` ended the
+    request.
+  - An Array, Map, or geometry cell whose PHP array does not fit
+    `memory_limit` ends in PHP's "Allowed memory size exhausted" error before
+    PHP allocates it, and conversion stops inside a cell once PHP has
+    deferred a `memory_limit` error. On PHP builds with a hard memory limit,
+    a 16 MiB Array response used to exit the process with status 137.
+  - More than 1,000,000 consecutive packets without rows (Progress, Log,
+    ProfileEvents, or empty Data blocks) fail the operation, and more than
+    64 consecutive empty compressed frames fail the read. A flood of them
+    never makes the client wait, so no timeout ended it. The server sends
+    Progress at most every 100 ms by default (`interactive_delay`), so only
+    a query that returns no rows for more than about a day reaches the cap.
+- Finalizing an insert, in `writeEnd()` or when a client with an unfinished
+  insert is destroyed, fails on a Data packet from the server. It used to
+  decode and drop each one, so a server sending small Data packets declaring
+  many rows kept a destructor running for minutes.
+- A Data packet whose block never arrives fails with "connection closed
+  before the packet's block". `writeStart()` used to take the missing block
+  as the INSERT's schema and return.
+- A nested server exception is read with the exception packet that carries
+  it. Its bytes used to stay buffered and be read as the response to the
+  client's next query.
+- Destroying a client after a fatal error interrupted `writeStart()`,
+  `insert()`, or `insertFromStream()` before the server sent the INSERT's
+  schema closes the connection. It used to send the INSERT's end-of-data
+  block to a server that had not accepted the INSERT.
+
+### For contributors
+
+- Updated the bundled LZ4 to 1.11.1 and ZSTD to 1.5.7, and retired the LZ4 empty-dictionary patch that LZ4 1.11.1 makes unnecessary.
+- The new local clickhouse-c patch `0003-hostile-server-limits.patch` adds
+  the sparse default-row limit, the zero-column check, the end-of-stream
+  check for block packets, nested exception reading, and the empty-frame
+  limit. Each is documented in `lib/clickhouse-c/LOCAL_PATCHES.md`.
+- `tests/_wire_mock.inc` takes a raw response from a file through
+  `wire_response_file()`, and `wire_child_php()` builds the command line
+  for a child process that is expected to end in a fatal error, and
+  `tests/_paced_mock.inc` runs a peer that paces its reply. Tests 314 through
+  323 cover the fixes above with scripted peers.
+
+## [0.15.0] - 2026-11-21
+
+### Changed
+
+- Source builds use C11, with no C++ compiler, Abseil, or direct C++ runtime dependency.
+- The PHP API, configuration, conversion rules, and buffered `selectStream()` behavior remain unchanged.
+- The C backend keeps 0.14.0's fatal-error guarantees. A fatal error in a
+  callback, a conversion, a userland stream, or a `memory_limit` error
+  anywhere in a ClickHouse method leaves the client usable from shutdown
+  functions. As in 0.14.0, a fatal error before `insert()` or
+  `insertAssoc()` has sent its block commits none of that call's rows, a `writeStart()` session commits the
+  blocks its earlier `write()` calls sent, and `insertFromStream()`
+  discards every batch it sent, as it does after a stream read error. Native buffers
+  are Zend allocations, so request shutdown reclaims what the fatal error
+  skipped. While PHP defers a `memory_limit` error, no method throws.
+- Native protocol buffers count against `memory_limit`. When one does not
+  fit, the call ends with PHP's "Allowed memory size exhausted" fatal error,
+  as in 0.14.0; `selectStream()` still reports it as a catchable
+  `ClickHouseException`.
+- A retained `selectStream()` result counts in `memory_get_usage()`: about
+  77 bytes per row for 100,000 69-byte strings, where 0.14.0 kept the result
+  outside PHP's allocator and reported none of it.
+- `Decimal256`, which neither backend decodes, fails with "unsupported column
+  type: Decimal(76, S)" as soon as its column arrives, including in an empty
+  result and an INSERT's schema. 0.14.0 returned a one-row read such as
+  `toDecimal256(1.5, 2)` as "1.50", lost sync with the server's stream on
+  reads of two or more rows (failing with errors such as "unimplemented 22"),
+  and accepted the empty cases.
+- Errors that name a column type spell it as the server does, for example
+  `Decimal(18, 2)` and `Nothing` where 0.14.0 printed `Decimal(18,2)` and
+  `Void`. A JSON column read without
+  `output_format_native_write_json_as_string=1` reports "unsupported JSON
+  serialization version 0" in place of 0.14.0's wording.
+
+### For contributors
+
+- Replaced clickhouse-cpp with ClickHouse/clickhouse-c at
+  `084498e63a8e814d8f8ab9a32b923d7d6c3c7d9f`.
+- Retained older-server protocol gates instead of adopting the C client's default ClickHouse 23.3 minimum.
+- Retained LZ4 1.9.2 and ZSTD 1.5.5 C sources and their license notices under
+  `lib/compression/`.
+- The local clickhouse-c patch doubles String read-ahead buffers instead of
+  growing them eightfold and trims them once a column is loaded. It also
+  rejects a compressed frame whose declared size exceeds what LZ4 or ZSTD can
+  produce from its payload, before reserving that size against
+  `memory_limit`.
+- Tests 276 through 293 come from 0.14.0; the C backend's own tests moved to
+  294 through 303. Tests 304 through 307 step `memory_limit` across each
+  call's whole footprint, since native buffers make C calls larger than the
+  ranges of tests 287 through 291. Tests 308 through 313 cover inserts
+  interrupted by fatal errors, `selectToStream()` float spelling, compressed
+  frame bounds, the `selectStream()` memory message, and failed reconnects.
+- `scripts/differential-decode.sh` compares the C and C++ backends' decoded
+  output over a type corpus against one server.
+
 ## [0.14.0] - 2026-11-20
 
 ### Added
@@ -1210,7 +1339,8 @@ own way.
   emits a clear "unsupported" warning. Full Windows build of the
   vendored zstd + absl + lz4 + cityhash is a separate project.
 
-[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.14.0...HEAD
+[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.15.0...HEAD
+[0.15.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.15.0
 [0.14.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.14.0
 [0.13.2]: https://github.com/iliaal/php_clickhouse/releases/tag/0.13.2
 [0.13.1]: https://github.com/iliaal/php_clickhouse/releases/tag/0.13.1

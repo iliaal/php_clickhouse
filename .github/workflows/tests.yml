@@ -2,7 +2,7 @@ name: Tests
 
 on:
   push:
-    branches: [master]
+    branches: [master, c_lib]
   pull_request:
     branches: [master]
 
@@ -26,6 +26,13 @@ jobs:
         run: ./scripts/test-exported-symbols.sh
       - name: Test PHPT summary guard
         run: ./scripts/test-phpt-summary.sh
+      - name: Test C adapter compatibility contracts
+        run: bash lib/clickhouse-c/test.sh php_compat
+      - name: Test transport socket options
+        run: |
+          cc -std=c11 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
+            scripts/test-transport-socket-options.c -Wl,--gc-sections -o "$RUNNER_TEMP/clickhouse-socket-options"
+          "$RUNNER_TEMP/clickhouse-socket-options"
       # setup-php main until a release marks PHP 8.6 stable; return to a tagged release then.
       - uses: shivammathur/setup-php@2001cd3148dcbaf467b7fa06cd7155ebb6d4cacf # main # zizmor: ignore[stale-action-refs,ref-version-mismatch]
         with:
@@ -125,7 +132,7 @@ jobs:
           ./scripts/check-no-seasclick.sh
           ./scripts/test-release-binary.sh
 
-      # Every hand-edit under lib/clickhouse-cpp must have a patch file and a
+      # Every hand-edit under lib/clickhouse-c must have a patch file and a
       # LOCAL_PATCHES.md entry, or the next library bump drops it silently.
       - name: Vendored patch-set integrity
         run: |
@@ -188,7 +195,7 @@ jobs:
           # error without running shutdown functions, which these tests need.
           oom_skips=""
           if [ "$(php -n -d display_errors=0 tests/_oom_shutdown_probe.php 2>&1)" != ok ]; then
-            oom_skips="tests/277_select_memory_limit_deferred_oom.phpt tests/285_select_memory_limit_fatal_client_usable.phpt tests/286_map_memory_limit_fatal_client_usable.phpt tests/287_memory_limit_fatal_any_allocation.phpt tests/288_memory_limit_fatal_fiber_interleaved.phpt tests/289_memory_limit_fatal_native_state.phpt tests/290_memory_limit_fatal_native_reads.phpt tests/291_memory_limit_fatal_native_writes.phpt tests/292_memory_limit_fatal_statement_in_callback.phpt tests/293_memory_limit_fatal_statement_beside_fiber.phpt"
+            oom_skips="tests/277_select_memory_limit_deferred_oom.phpt tests/285_select_memory_limit_fatal_client_usable.phpt tests/286_map_memory_limit_fatal_client_usable.phpt tests/287_memory_limit_fatal_any_allocation.phpt tests/288_memory_limit_fatal_fiber_interleaved.phpt tests/289_memory_limit_fatal_native_state.phpt tests/290_memory_limit_fatal_native_reads.phpt tests/291_memory_limit_fatal_native_writes.phpt tests/292_memory_limit_fatal_statement_in_callback.phpt tests/293_memory_limit_fatal_statement_beside_fiber.phpt tests/304_memory_limit_fatal_c_query_footprint.phpt tests/305_memory_limit_fatal_c_stream_footprint.phpt tests/306_memory_limit_fatal_c_read_footprint.phpt tests/307_memory_limit_fatal_c_insert_footprint.phpt tests/308_insert_from_stream_fatal_discards_rows.phpt"
           fi
           scripts/assert-phpt-summary.sh "$RUNNER_TEMP/phpt.out" \
             $version_skips $oom_skips \
@@ -285,6 +292,51 @@ jobs:
           fi
 
           docker rm -f clickhouse-tls
+
+  linux-32bit:
+    name: PHP 8.2 - Linux i386
+    # Ubuntu 26.04's Docker blocks i386 socketcall: actions/runner-images#14790.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    needs: validate
+    services:
+      clickhouse:
+        image: clickhouse/clickhouse-server@sha256:fdc22372465a336fa47e9deab61fad8277b9e2f2473234a1294b33b53f01d377
+        ports:
+          - 9000:9000
+          - 8123:8123
+        env:
+          CLICKHOUSE_USER: test
+          CLICKHOUSE_PASSWORD: test
+        options: >-
+          --ulimit nofile=262144:262144
+          --health-cmd "wget -qO- http://localhost:8123/ping || exit 1"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Run live 32-bit suite
+        env:
+          CLICKHOUSE_HOST: 127.0.0.1
+          CLICKHOUSE_PORT: 9000
+          CLICKHOUSE_USER: test
+          CLICKHOUSE_PASSWD: test
+        run: |
+          set -o pipefail
+          scripts/run-tests-32bit.sh | tee "$RUNNER_TEMP/phpt-i386.out"
+          scripts/assert-phpt-summary.sh "$RUNNER_TEMP/phpt-i386.out" \
+            tests/027.phpt tests/064.phpt tests/070.phpt tests/188.phpt \
+            tests/207_reentrant_ssl_ca_files.phpt \
+            tests/216_ssl_ca_files_invalid_type.phpt \
+            tests/230_ssl_bool_strict_parse.phpt \
+            tests/233_ssl_ca_path_validation.phpt \
+            tests/234_ssl_options_require_ssl.phpt \
+            tests/242_datetime64_epoch_extremes.phpt \
+            tests/265_tls_handshake_tarpit_failover.phpt \
+            tests/266_tls_handshake_tarpit_timeout.phpt
 
   linux-zts:
     name: PHP ${{ matrix.php }} ZTS - Linux
@@ -418,10 +470,10 @@ jobs:
           /tmp/php-zts/bin/php run-tests.php -j1 --show-diff -g FAIL,BORK,LEAK,XLEAK,SKIP tests/ \
             | tee "$RUNNER_TEMP/phpt-zts.out"
           # 232 needs #[\SensitiveParameter], which PHP 8.2 introduced.
-          # 287 through 293 run their children under the tracked allocator,
+          # 287 through 293 and 304 through 307 run their children under the tracked allocator,
           # which PHP 8.0 introduced; 288 and 293 also need Fibers, which
           # PHP 8.1 introduced.
-          version_skips=$(/tmp/php-zts/bin/php -r 'echo PHP_VERSION_ID < 80200 ? "tests/232_construct_sensitive_parameter.phpt" : "", PHP_VERSION_ID < 80000 ? " tests/287_memory_limit_fatal_any_allocation.phpt tests/289_memory_limit_fatal_native_state.phpt tests/290_memory_limit_fatal_native_reads.phpt tests/291_memory_limit_fatal_native_writes.phpt tests/292_memory_limit_fatal_statement_in_callback.phpt" : "", PHP_VERSION_ID < 80100 ? " tests/288_memory_limit_fatal_fiber_interleaved.phpt tests/293_memory_limit_fatal_statement_beside_fiber.phpt" : "";')
+          version_skips=$(/tmp/php-zts/bin/php -r 'echo PHP_VERSION_ID < 80200 ? "tests/232_construct_sensitive_parameter.phpt" : "", PHP_VERSION_ID < 80000 ? " tests/287_memory_limit_fatal_any_allocation.phpt tests/289_memory_limit_fatal_native_state.phpt tests/290_memory_limit_fatal_native_reads.phpt tests/291_memory_limit_fatal_native_writes.phpt tests/292_memory_limit_fatal_statement_in_callback.phpt tests/304_memory_limit_fatal_c_query_footprint.phpt tests/305_memory_limit_fatal_c_stream_footprint.phpt tests/306_memory_limit_fatal_c_read_footprint.phpt tests/307_memory_limit_fatal_c_insert_footprint.phpt" : "", PHP_VERSION_ID < 80100 ? " tests/288_memory_limit_fatal_fiber_interleaved.phpt tests/293_memory_limit_fatal_statement_beside_fiber.phpt" : "";')
           scripts/assert-phpt-summary.sh "$RUNNER_TEMP/phpt-zts.out" \
             $version_skips \
             tests/027.phpt tests/064.phpt tests/070.phpt tests/188.phpt \
@@ -489,6 +541,71 @@ jobs:
           run-tests: 'true'
           test-runner: scripts/run-tests-guard.php
 
+  windows-tls:
+    name: Windows TLS PHP ${{ matrix.php }} ${{ matrix.arch }}
+    runs-on: windows-2022
+    needs: validate
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.3', '8.5']
+        arch: ['x64', 'x86']
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: php/php-windows-builder
+          ref: e03e5d39879adaeb61ed2225f0f4eae7db8c1df8 # 1.8.1
+          path: .ci-windows-builder
+          persist-credentials: false
+      - name: Build and load TLS extension with MSVC
+        shell: pwsh
+        env:
+          PHP_BUILD_VERSION: ${{ matrix.php }}
+          PHP_BUILD_ARCH: ${{ matrix.arch }}
+          RUN_TESTS: 'true'
+          TEST_RUNNER: scripts/run-tests-guard.php
+          TEST_WORKERS: '8'
+          REQUIRED_PHPT_TESTS: ${{ matrix.arch == 'x86' && 'tests/051.phpt tests/209_windows_x86_config_bounds.phpt' || 'tests/051.phpt' }}
+        run: |
+          Import-Module "$env:GITHUB_WORKSPACE/.ci-windows-builder/extension/BuildPhpExtension/BuildPhpExtension.psm1"
+          Invoke-PhpBuildExtension -PhpVersion "$env:PHP_BUILD_VERSION" -Arch "$env:PHP_BUILD_ARCH" -Ts ts -Libraries openssl -Args '--enable-clickhouse --enable-clickhouse-openssl'
+
+  macos:
+    name: macOS C backend build
+    runs-on: macos-15
+    needs: validate
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.4'
+          tools: phpize, php-config
+          coverage: none
+      - name: Test transport socket options
+        run: |
+          cc -std=c11 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
+            scripts/test-transport-socket-options.c -Wl,-dead_strip -o "$RUNNER_TEMP/clickhouse-socket-options"
+          "$RUNNER_TEMP/clickhouse-socket-options"
+      - name: Build and load extension
+        run: |
+          phpize
+          clickhouse_openssl_prefix="$(brew --prefix openssl@3)"
+          CPPFLAGS="-I$clickhouse_openssl_prefix/include" LDFLAGS="-L$clickhouse_openssl_prefix/lib" \
+            ./configure --enable-clickhouse --enable-clickhouse-openssl
+          make -j3
+          exports="$(nm -gU modules/clickhouse.so | awk '{print $NF}')"
+          test "$exports" = '_get_module'
+          NO_INTERACTION=1 REQUIRED_PHPT_TESTS=tests/051.phpt \
+            TEST_PHP_ARGS="-n -d extension=$PWD/modules/clickhouse.so" \
+            php scripts/run-tests-guard.php -j1 tests/051.phpt
+
   asan:
     name: PHP ${{ matrix.php }} - ASAN
     runs-on: ubuntu-latest
@@ -519,11 +636,9 @@ jobs:
       # detect_leaks=0: PHP's PHPT runner/tracer does not provide a reliable
       #   LeakSanitizer process boundary. A separate client lifecycle probe below
       #   runs with leak detection enabled.
-      # detect_odr_violation=0: clickhouse-cpp templates produce duplicate
-      #   symbols across translation units, harmless but noisy.
       # exitcode=139: keep ASan abort on the conventional SIGSEGV exit code so
       #   run-tests.php classifies failures as crashes, not silent skips.
-      ASAN_OPTIONS: exitcode=139:detect_odr_violation=0:detect_leaks=0
+      ASAN_OPTIONS: exitcode=139:detect_leaks=0
       PHP_VERSION: ${{ matrix.php }}
       UBSAN_OPTIONS: print_stacktrace=1
       USE_ZEND_ALLOC: 0
@@ -565,13 +680,9 @@ jobs:
           git -C /tmp/php-src checkout "$PHP_SRC_SHA"
           cd /tmp/php-src
           ./buildconf --force
-          # -shared-libasan: link ASan as a shared library so the dynamic
-          # linker can resolve interceptors (notably __cxa_throw) across the
-          # dlopen'd extension boundary. With static asan, the extension's
-          # interceptor for __cxa_throw never finds the real libstdc++
-          # symbol and ASan aborts the moment the wrapper throws.
-          CC=clang CXX=clang++ \
-          CFLAGS="-fsanitize=address,undefined -fno-sanitize=function,vptr -shared-libasan -DZEND_TRACK_ARENA_ALLOC" \
+          # Share the sanitizer runtime across PHP and the loaded extension.
+          CC=clang \
+          CFLAGS="-fsanitize=address,undefined -fno-sanitize=function -shared-libasan -DZEND_TRACK_ARENA_ALLOC" \
           LDFLAGS="-fsanitize=address,undefined -shared-libasan" \
           ./configure \
             --enable-debug \
@@ -588,16 +699,10 @@ jobs:
         run: |
           export PATH="/tmp/php-asan/bin:$PATH"
           phpize
-          # Match PHP's exact -fsanitize / -fno-sanitize / -shared-libasan
-          # set so the runtime ABI lines up. Disable `function` (PHP's own
-          # build does) and `vptr` (the vptr check needs
-          # __ubsan_vptr_type_cache, which the dlopen'd extension can't
-          # resolve against the host PHP's runtime). The vendored LZ4 NULL+0
-          # expression is patched locally, so pointer-overflow stays enabled
-          # for both extension and vendor sources.
-          CC=clang CXX=clang++ \
-          CFLAGS="-fsanitize=address,undefined -fno-sanitize=function,vptr -shared-libasan -DZEND_TRACK_ARENA_ALLOC" \
-          CXXFLAGS="-fsanitize=address,undefined -fno-sanitize=function,vptr -shared-libasan -DZEND_TRACK_ARENA_ALLOC" \
+          # Match PHP's sanitizer flags. The retained LZ4 fix permits
+          # pointer-overflow checking for extension and codec sources.
+          CC=clang \
+          CFLAGS="-fsanitize=address,undefined -fno-sanitize=function -shared-libasan -DZEND_TRACK_ARENA_ALLOC" \
           LDFLAGS="-fsanitize=address,undefined -shared-libasan" \
           ./configure --enable-clickhouse --with-php-config=/tmp/php-asan/bin/php-config
           make -j$(nproc)
@@ -633,7 +738,32 @@ jobs:
             tests/233_ssl_ca_path_validation.phpt \
             tests/234_ssl_options_require_ssl.phpt \
             tests/265_tls_handshake_tarpit_failover.phpt \
-            tests/266_tls_handshake_tarpit_timeout.phpt
+            tests/266_tls_handshake_tarpit_timeout.phpt \
+            tests/301_zend_native_memory_accounting.phpt \
+            tests/302_zend_native_memory_shared_limit.phpt \
+            tests/303_zend_native_memory_no_double_charge.phpt
+
+      - name: Verify Zend-managed native memory under ASAN
+        env:
+          LD_LIBRARY_PATH: ${{ steps.clang_rt.outputs.dir }}
+          CLICKHOUSE_HOST: 127.0.0.1
+          CLICKHOUSE_PORT: 9000
+          CLICKHOUSE_USER: test
+          CLICKHOUSE_PASSWD: test
+          NO_INTERACTION: 1
+          USE_ZEND_ALLOC: 1
+        run: |
+          export TEST_PHP_EXECUTABLE=/tmp/php-asan/bin/php
+          set -Eeuo pipefail
+          zend_asan_output="${RUNNER_TEMP:?}/phpt-zend-asan.out"
+          /tmp/php-asan/bin/php run-tests.php -j1 --show-diff -g FAIL,BORK,LEAK,XLEAK,SKIP \
+            tests/211_stream_native_memory_limit.phpt \
+            tests/213_stream_untyped_null_column.phpt \
+            tests/301_zend_native_memory_accounting.phpt \
+            tests/302_zend_native_memory_shared_limit.phpt \
+            tests/303_zend_native_memory_no_double_charge.phpt |
+            tee "${zend_asan_output}"
+          scripts/assert-phpt-summary.sh "${zend_asan_output}"
 
       - name: Run leak-enabled client lifecycle probe
         env:
@@ -642,7 +772,7 @@ jobs:
           CLICKHOUSE_PORT: 9000
           CLICKHOUSE_USER: test
           CLICKHOUSE_PASSWD: test
-          ASAN_OPTIONS: exitcode=139:detect_odr_violation=0:detect_leaks=1
+          ASAN_OPTIONS: exitcode=139:detect_leaks=1
           LSAN_OPTIONS: exitcode=23
         run: |
           /tmp/php-asan/bin/php -n -d extension="$PWD/modules/clickhouse.so" -r '

@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: ae72b123a28232e57181121acaf30b147531f671 */
+ * Stub hash: 91ec8640c5372c3143f043453b61fcb4a5dee9de */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_ClickHouse___construct, 0, 0, 1)
 	ZEND_ARG_TYPE_INFO(0, connectParams, IS_ARRAY, 0)
@@ -512,7 +512,7 @@ static zend_class_entry *register_class_ClickHouse(void)
 	zend_string_release(property_retry_count_name);
 
 	zval property_receive_timeout_default_value;
-	ZVAL_LONG(&property_receive_timeout_default_value, 0);
+	ZVAL_LONG(&property_receive_timeout_default_value, 300);
 	zend_string *property_receive_timeout_name = zend_string_init("receive_timeout", sizeof("receive_timeout") - 1, 1);
 	zend_declare_typed_property(class_entry, property_receive_timeout_name, &property_receive_timeout_default_value, ZEND_ACC_PROTECTED, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_LONG));
 	zend_string_release(property_receive_timeout_name);

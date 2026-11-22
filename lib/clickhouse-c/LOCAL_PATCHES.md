@@ -1,0 +1,141 @@
+# Local patches
+
+This directory contains ClickHouse/clickhouse-c commit
+`084498e63a8e814d8f8ab9a32b923d7d6c3c7d9f`, including its license,
+documentation, examples, and tests. The migration retains the revision examined
+in the original analysis. No newer upstream implementation is mixed into it.
+
+Import the complete upstream tree, then apply `patches/clickhouse-c/*.patch`
+with `git apply` in filename order to reproduce the local changes. Patch paths
+are relative to this directory. Reapply or explicitly retire each patch when
+updating upstream.
+
+## 0001-php-compatibility.patch
+
+The patch adds the protocol behavior required by the existing PHP API:
+
+- `chc_client_opts.protocol_revision` selects an advertised revision no greater
+  than 54465. Zero preserves upstream's default. The PHP adapter uses 54459,
+  matching its previous client. `allow_legacy_server` enables the Hello,
+  ClientInfo, settings, parameter, progress, and block feature gates needed for
+  older peers. It does not change the default 54462 minimum.
+- `skip_init_ping` allows the adapter to preserve the constructor's existing
+  handshake. Zero retains upstream's Ping probe. Both synchronous and async
+  clients apply these options.
+- The Hello identity and credentials, settings, and parameters accept explicit
+  lengths when `strings_have_lengths` is true. Default callers retain their
+  NUL-terminated string behavior.
+- `chc_server_info.server_revision` preserves the server's actual revision.
+  `revision` remains the negotiated revision. The client owns the `full_name`,
+  `full_timezone`, and `full_display_name` strings and their length fields;
+  callers borrow them until close, or until a timezone update replaces that
+  field. Existing fixed arrays remain truncated compatibility views. The
+  default 4096-byte Hello string limit remains available. The PHP translation
+  unit sets `CHC_MAX_HELLO_STRING_SIZE` and `CHC_MAX_PROTOCOL_STRING_SIZE` to
+  `0x00FFFFFF`, preserving its previous metadata limit. Metadata strings grow
+  only as bytes arrive, preserving the previous client's allocation behavior.
+- `defer_data_terminator` and `chc_client_send_data_named()` allow callers to
+  send external tables before the final unnamed empty Data block. Ordinary
+  queries retain automatic finalization.
+- Block writers use the type parser's complete stored name. The former
+  256-byte staging buffer is removed. Its rejection test now checks a valid
+  long type's complete roundtrip.
+- `has_max_compression_chunk_size` selects a runtime compression chunk limit.
+  When present, zero means no configured cap; wire and codec size limits still
+  apply. When absent, upstream's 65535-byte default remains. Size calculations
+  are checked before frame allocation and wire narrowing.
+- `chc_column_destroy()` exposes the existing owned-column destructor. Columns
+  borrowed from blocks remain owned by their block; types remain separately
+  owned. Empty initializers in implementation headers use C11 syntax.
+- Fixed, String, nullable, array-offset, LowCardinality-index, and compressed
+  input buffers grow in steps as preceding bytes arrive. Ioless readers defer
+  allocation until the submitted payload is available. String buffers double
+  their capacity across rows, then shrink to the loaded size once the column is
+  complete, so a retained block does not keep the reserve. Valid empty
+  compressed frames are consumed before reading the next data-bearing frame.
+  Block metadata arrays grow as
+  columns arrive, and cleanup visits only allocated slots. Type-child and Tuple
+  field arrays grow geometrically instead of reallocating for every element.
+  In PHP compatibility mode, parsed nodes borrow length-delimited names from
+  one immutable, reference-counted spelling buffer. Partial parsing and
+  SimpleAggregateFunction unwrapping preserve ownership without copying every
+  subtree's spelling. Generic upstream mode retains separate terminated names.
+- `CHC_PHP_COMPAT=1` selects the previous column factory's supported types,
+  required temporal parameters, diagnostics, and 1 GiB decompressed-frame
+  limit. A frame that declares more output than its codec can produce from
+  its compressed bytes is rejected before the output buffer is allocated. It
+  validates offsets before consuming their nested values and checks
+  dictionary indexes before returning a block. SimpleAggregateFunction with a
+  supported terminal argument becomes that argument's type, matching the old
+  factory. LowCardinality dictionaries retain the previous String/FixedString
+  restriction beneath Nullable wrappers. Incoming DateTime timezones and named
+  Tuple fields remain intact. Empty Tuple factory errors retain their original
+  diagnostic, including inside LowCardinality dictionaries.
+  Empty DateTime, DateTime64, Time64, and fixed-width Decimal argument lists
+  retain the previous zero-precision defaults and canonical wire names. Required
+  argument failures are deferred until the factory constructs the affected node,
+  preserving both their diagnostics and outer-type rejection precedence.
+  Outgoing PHP-specific normalization belongs to the binding's column builder.
+- In PHP compatibility mode, ClientInfo uses the same owned identity bytes as
+  Hello. `CHC_ZSTD_COMPRESSION_LEVEL=1` restores the previous encoder level;
+  without an override, the upstream ZSTD default remains available.
+- PHP Query and uncompressed Data packets coalesce small writes in an 8 KiB
+  stack buffer, matching the previous output buffer. Large payloads can write
+  directly to the transport. A Query and its automatic Data terminator share one
+  flush boundary. A successful send flushes all bytes before returning; errors
+  retain no pending buffer across calls. Compression framing and chunk limits
+  are unchanged.
+- PHP compatibility mode rejects Totals and Extremes packets with the previous
+  native errors before reading their bodies. Generic upstream clients retain
+  support for both packet types.
+
+Revision constants follow the existing vendored C++ client's feature gates and
+[ClickHouse's protocol definitions](https://github.com/ClickHouse/ClickHouse/blob/master/src/Core/ProtocolDefines.h).
+The default decoder limits remain available; PHP overrides preserve its prior
+limits and column validation remains mandatory.
+
+`test/test_php_compat.c` checks compatibility against wire fixtures, including
+legacy revisions, full metadata, explicit credential lengths, and no implicit
+Ping. These are unit tests, not live interoperability evidence.
+`test/test_client_tcp.c` adds live external-table queries with a long Enum16 type
+at revision 54459, using uncompressed, LZ4, and ZSTD connections and both capped
+and uncapped chunks. `test/test_php_live.c` repeats the compatible operations
+with `CHC_PHP_COMPAT=1` against a separate disposable server. The standard
+`bash test.sh` runner includes these tests.
+
+## 0002-omit-upstream-workflows.patch
+
+This patch omits upstream's `docs_sync.yml`, `docs_verify.yml`, and `test.yml`
+workflow copies under `.github/workflows/`. They belong to the standalone C
+client repository and are not executed from this vendored subdirectory. The
+extension's active workflows remain under the repository-root
+`.github/workflows/`; its full-repository workflow scan remains unchanged.
+
+The patch retains the complete omitted files. Reversing the patches in reverse
+filename order restores the complete pinned upstream tree, including these
+workflow definitions, for the existing vendor-integrity check.
+
+## 0003-hostile-server-limits.patch
+
+The patch bounds the work a malicious server can make the client do with a
+few bytes:
+
+- The default rows of a sparse column carry no wire bytes, so nothing else
+  bounds them. `CHC_MAX_SPARSE_DEFAULT_ROWS` limits one sparse column's
+  default rows, and `CHC_MAX_SPARSE_DEFAULT_BYTES` limits the zero-filled
+  values and String offsets one block's sparse columns expand them to.
+  Generic upstream mode leaves both unlimited; the PHP adapter sets 2^20 rows
+  and 64 MiB. A resumed ioless read restores the byte count of the column it
+  rewinds. `test/test_sparse.c` passes the count to the sparse reader.
+- A block that declares rows but no columns is rejected: rows live in
+  columns, so nothing on the wire backs such a count.
+- A Data, Totals, Extremes, Log, or ProfileEvents packet whose block reaches
+  end of stream before its first byte fails with `CHC_ERR_EOF` instead of
+  returning success with a NULL block. PHP compatibility mode rejects Totals
+  and Extremes before their blocks, so there the check covers the others. `chc_block_read()` keeps its clean-EOF result for the
+  Native file reader.
+- Exception packets consume their nested exceptions, keeping the outermost.
+  The bytes of a nested exception no longer remain in the input buffer to be
+  read as the next packet. `CHC_MAX_NESTED_EXCEPTIONS` (64) bounds the chain.
+- More than `CHC_MAX_EMPTY_FRAMES` (64) consecutive empty compressed frames
+  fail the read. A valid empty frame still precedes data as before.
