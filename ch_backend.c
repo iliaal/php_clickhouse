@@ -101,9 +101,12 @@ struct ch_connection {
 	bool has_server_info;
 	uint32_t receive_timeout_ms;
 	uint32_t send_timeout_ms;
-	/* Socket wait since the operation began. receive_timeout_ms bounds the
-	 * total, so a server that trickles bytes cannot extend an operation. */
+	uint32_t operation_timeout_ms;
+	/* Socket wait since the operation and since its current packet began.
+	 * receive_timeout_ms bounds each packet as a whole, so a server that
+	 * trickles bytes cannot stretch one; operation_timeout_ms bounds the sum. */
 	uint64_t waited_ns;
+	uint64_t packet_waited_ns;
 	bool writes_share_budget;
 #ifdef _WIN32
 	bool winsock_started;
@@ -303,24 +306,38 @@ static uint64_t ch_now_ns(void)
 #endif
 }
 
-/* Per-call timeout clamped to what is left of the operation's wait budget;
- * 0 means no limit. Fails once the budget is spent. */
-static int ch_budget_timeout(const ch_connection *connection, uint32_t per_call_ms,
-	const char *operation, uint32_t *timeout_ms, chc_err *error)
+/* Clamps a timeout (0 = no limit) to what is left of a wait limit (0 = none);
+ * fails once the limit is spent. */
+static int ch_budget_clamp(uint32_t limit_ms, uint64_t waited_ns, const char *operation,
+	uint32_t *timeout_ms, chc_err *error)
 {
-	uint64_t budget_ns = (uint64_t) connection->receive_timeout_ms * 1000000u;
-	*timeout_ms = per_call_ms;
-	if (!budget_ns) {
+	uint64_t limit_ns = (uint64_t) limit_ms * 1000000u;
+	if (!limit_ns) {
 		return CHC_OK;
 	}
-	if (connection->waited_ns >= budget_ns) {
+	if (waited_ns >= limit_ns) {
 		return ch_error(error, CHC_ERR_IO, "%s timed out", operation);
 	}
-	uint64_t remaining_ms = (budget_ns - connection->waited_ns + 999999u) / 1000000u;
-	if (!per_call_ms || remaining_ms < per_call_ms) {
+	uint64_t remaining_ms = (limit_ns - waited_ns + 999999u) / 1000000u;
+	if (!*timeout_ms || remaining_ms < *timeout_ms) {
 		*timeout_ms = (uint32_t) remaining_ms;
 	}
 	return CHC_OK;
+}
+
+/* A read waits at most what is left of its packet's receive window and of the
+ * operation's budget; a write, of the operation's budget only. */
+static int ch_budget_timeout(const ch_connection *connection, uint32_t per_call_ms, bool read,
+	const char *operation, uint32_t *timeout_ms, chc_err *error)
+{
+	*timeout_ms = per_call_ms;
+	int status = ch_budget_clamp(connection->operation_timeout_ms, connection->waited_ns,
+		operation, timeout_ms, error);
+	if (status == CHC_OK && read) {
+		status = ch_budget_clamp(connection->receive_timeout_ms, connection->packet_waited_ns,
+			operation, timeout_ms, error);
+	}
+	return status;
 }
 
 static ch_deadline ch_deadline_start(uint32_t milliseconds, bool zero_is_infinite)
@@ -735,7 +752,7 @@ static int ch_io_read(void *context, void *buffer, size_t length, size_t *receiv
 	if (connection->socket == CH_INVALID_SOCKET) {
 		return ch_error(error, CHC_ERR_IO, "connection is closed");
 	}
-	int status = ch_budget_timeout(connection, connection->receive_timeout_ms, "read",
+	int status = ch_budget_timeout(connection, connection->receive_timeout_ms, true, "read",
 		&timeout_ms, error);
 	if (status != CHC_OK) {
 		return status;
@@ -744,7 +761,9 @@ static int ch_io_read(void *context, void *buffer, size_t length, size_t *receiv
 	ch_deadline deadline = ch_deadline_start(timeout_ms, true);
 	status = ch_io_read_wait(connection, buffer, length > INT_MAX ? INT_MAX : (int) length,
 		received, &deadline, error);
-	connection->waited_ns += ch_now_ns() - started;
+	uint64_t waited = ch_now_ns() - started;
+	connection->waited_ns += waited;
+	connection->packet_waited_ns += waited;
 	return status;
 }
 
@@ -804,7 +823,7 @@ static int ch_io_write(void *context, const void *buffer, size_t length, chc_err
 		ch_deadline deadline = ch_deadline_start(timeout_ms, true);
 		return ch_io_write_wait(connection, (const unsigned char *) buffer, length, &deadline, error);
 	}
-	int status = ch_budget_timeout(connection, connection->send_timeout_ms, "write",
+	int status = ch_budget_timeout(connection, connection->send_timeout_ms, false, "write",
 		&timeout_ms, error);
 	if (status != CHC_OK) {
 		return status;
@@ -1165,6 +1184,7 @@ static int ch_connect_endpoint(ch_connection *connection, size_t endpoint_index,
 	connection->has_current = true;
 	connection->receive_timeout_ms = connection->options.receive_timeout_ms;
 	connection->send_timeout_ms = connection->options.send_timeout_ms;
+	connection->operation_timeout_ms = connection->options.operation_timeout_ms;
 	connection->writes_share_budget = false;
 	ch_backend_begin_operation(connection);
 #ifdef _WIN32
@@ -1325,7 +1345,7 @@ int ch_backend_ping(ch_connection *connection, chc_exception **exception, chc_er
 	}
 	chc_packet packet;
 	memset(&packet, 0, sizeof(packet));
-	status = chc_client_recv_packet(connection->client, &packet, error);
+	status = ch_backend_recv_packet(connection, &packet, error);
 	if (status != CHC_OK) {
 		return status;
 	}
@@ -1409,6 +1429,9 @@ int ch_backend_limit_io_timeouts(ch_connection *connection, uint32_t maximum_ms,
 	if (!connection->send_timeout_ms || connection->send_timeout_ms > maximum_ms) {
 		connection->send_timeout_ms = maximum_ms;
 	}
+	if (!connection->operation_timeout_ms || connection->operation_timeout_ms > maximum_ms) {
+		connection->operation_timeout_ms = maximum_ms;
+	}
 	connection->writes_share_budget = true;
 	ch_backend_begin_operation(connection);
 	return connection->socket == CH_INVALID_SOCKET ? CHC_OK : ch_apply_timeouts(connection, error);
@@ -1418,7 +1441,17 @@ void ch_backend_begin_operation(ch_connection *connection)
 {
 	if (connection) {
 		connection->waited_ns = 0;
+		connection->packet_waited_ns = 0;
 	}
+}
+
+int ch_backend_recv_packet(ch_connection *connection, chc_packet *out, chc_err *error)
+{
+	if (!connection || !connection->client) {
+		return ch_error(error, CHC_ERR_IO, "connection is closed");
+	}
+	connection->packet_waited_ns = 0;
+	return chc_client_recv_packet(connection->client, out, error);
 }
 
 chc_client *ch_backend_client(ch_connection *connection)

@@ -10,14 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - `receive_timeout` now defaults to 300 seconds, the `clickhouse-client`
-  default, where it used to be 0 (no limit). It now bounds the total time
-  one operation waits for the server, not each read: a query, the start of
-  an insert, `writeEnd()`, a ping, or a connect fails with "read timed out"
-  once its waits add up to the limit, even while the server keeps sending
-  Progress packets. Time spent in callbacks and in converting rows does not
-  count. Raise `receive_timeout` or `receive_timeout_ms` for queries that
-  run longer, or set it to 0 for no limit. A server that sends one byte just
-  inside each read's timeout can no longer hold a worker indefinitely.
+  default, where 0.14.0 and 0.15.0 waited without limit. It now bounds each
+  server packet as a whole, from its first byte to its last, instead of each
+  read, so a server that trickles bytes can no longer hold a worker. Every
+  complete packet, Progress included, starts a new window, so a long query
+  that keeps reporting progress still runs to completion. Set it to 0 for no
+  limit.
+- The new `operation_timeout` and `operation_timeout_ms` options bound the
+  total time one operation waits for the server: a query, the start of an
+  insert, `writeEnd()`, a ping, or a connect. Time spent in callbacks and in
+  converting rows does not count. The default, 0, sets no limit.
 - Destroying a client with an unfinished insert waits for the server at most
   five seconds in total, writes included. The five seconds used to apply to
   each read and write separately.
@@ -62,8 +64,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   limit. Each is documented in `lib/clickhouse-c/LOCAL_PATCHES.md`.
 - `tests/_wire_mock.inc` takes a raw response from a file through
   `wire_response_file()`, and `wire_child_php()` builds the command line
-  for a child process that is expected to end in a fatal error. Tests 314
-  through 321 cover the fixes above with scripted peers.
+  for a child process that is expected to end in a fatal error, and
+  `tests/_paced_mock.inc` runs a peer that paces its reply. Tests 314 through
+  322 cover the fixes above with scripted peers.
 
 ## [0.15.0] - 2026-11-21
 

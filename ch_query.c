@@ -1035,7 +1035,7 @@ int ch_query_run(clickhouse_object *obj, ch_query *query,
 	}
 	for (;;) {
 		chc_packet packet = {0};
-		status = chc_client_recv_packet(client, &packet, &error);
+		status = ch_backend_recv_packet(obj->backend, &packet, &error);
 		if (status != CHC_OK) goto native_failed;
 		if (packet.kind == CHC_PKT_END_OF_STREAM) {
 			chc_packet_clear(client, &packet);

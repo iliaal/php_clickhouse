@@ -807,9 +807,13 @@ static int ch_config_options(HashTable *config, HashTable *strings,
 	number = 0;
 	if (ch_config_long(config, "send_timeout", UINT_MAX / 1000U, &number) == FAILURE) return FAILURE;
 	options->send_timeout_ms = (uint32_t)number * 1000U;
+	number = 0;
+	if (ch_config_long(config, "operation_timeout", UINT_MAX / 1000U, &number) == FAILURE) return FAILURE;
+	options->operation_timeout_ms = (uint32_t)number * 1000U;
 	if (ch_config_timeout_ms(config, "connect_timeout_ms", INT_MAX, &options->connect_timeout_ms) == FAILURE ||
 		ch_config_timeout_ms(config, "receive_timeout_ms", UINT32_MAX, &options->receive_timeout_ms) == FAILURE ||
-		ch_config_timeout_ms(config, "send_timeout_ms", UINT32_MAX, &options->send_timeout_ms) == FAILURE) return FAILURE;
+		ch_config_timeout_ms(config, "send_timeout_ms", UINT32_MAX, &options->send_timeout_ms) == FAILURE ||
+		ch_config_timeout_ms(config, "operation_timeout_ms", UINT32_MAX, &options->operation_timeout_ms) == FAILURE) return FAILURE;
 	if (ch_load_config_bool(config, "tcp_nodelay", &options->tcp_nodelay) == FAILURE ||
 		ch_load_config_bool(config, "tcp_keepalive", &options->tcp_keepalive) == FAILURE ||
 		ch_load_config_bool(config, "ping_before_query", &options->ping_before_query) == FAILURE) return FAILURE;

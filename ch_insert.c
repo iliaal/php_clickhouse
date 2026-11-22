@@ -137,7 +137,7 @@ int ch_insert_begin(clickhouse_object *obj, ch_query *query)
 	}
 	for (size_t idle = 0;;) {
 		chc_packet packet = {0};
-		status = chc_client_recv_packet(client, &packet, &error);
+		status = ch_backend_recv_packet(obj->backend, &packet, &error);
 		if (status == CHC_OK && packet.kind != CHC_PKT_DATA) status = ch_count_idle_packet(&packet, &idle, &error);
 		if (status != CHC_OK) {
 			if (!EG(exception)) ch_failure_native(obj, status, &error, NULL);
@@ -209,7 +209,7 @@ static int ch_insert_end_impl(clickhouse_object *obj, bool report_error)
 	}
 	for (size_t idle = 0;;) {
 		chc_packet packet = {0};
-		status = chc_client_recv_packet(client, &packet, &error);
+		status = ch_backend_recv_packet(obj->backend, &packet, &error);
 		if (status == CHC_OK && packet.kind != CHC_PKT_END_OF_STREAM) {
 			status = ch_count_idle_packet(&packet, &idle, &error);
 		}

@@ -288,8 +288,10 @@ foreach ($ch-&gt;select("SELECT id, ts, tag FROM events ORDER BY id",
 <tbody>
 <tr><td><code>connect_timeout</code></td><td>int (sec)</td><td><code>5</code></td><td>Deadline for the TCP connect and, with <code>ssl</code>, separately for the TLS handshake, so a TLS endpoint can take up to twice this value</td></tr>
 <tr><td><code>connect_timeout_ms</code></td><td>int (ms)</td><td>(none)</td><td>Sub-second connect deadline; overrides the seconds key when set</td></tr>
-<tr><td><code>receive_timeout</code></td><td>int (sec)</td><td><code>300</code></td><td>Total time one operation (a query, an insert's start, <code>writeEnd()</code>, a ping, or a connect) may wait for the server, summed across reads. Callbacks and row conversion do not count. Raise it for long-running queries; 0 = no limit. Destroying a client with an unfinished insert waits at most 5 seconds in total</td></tr>
+<tr><td><code>receive_timeout</code></td><td>int (sec)</td><td><code>300</code></td><td>Time one server packet may take to arrive, from its first byte to its last, summed across reads. Each complete packet, Progress included, starts a new window, so long queries that report progress are not cut off. 0 = no limit. Destroying a client with an unfinished insert waits at most 5 seconds in total</td></tr>
 <tr><td><code>receive_timeout_ms</code></td><td>int (ms)</td><td>(none)</td><td>Sub-second <code>receive_timeout</code>; overrides the seconds key when set</td></tr>
+<tr><td><code>operation_timeout</code></td><td>int (sec)</td><td><code>0</code></td><td>Total time one operation (a query, an insert's start, <code>writeEnd()</code>, a ping, or a connect) may wait for the server. Callbacks and row conversion do not count. 0 = no limit</td></tr>
+<tr><td><code>operation_timeout_ms</code></td><td>int (ms)</td><td>(none)</td><td>Sub-second <code>operation_timeout</code>; overrides the seconds key when set</td></tr>
 <tr><td><code>send_timeout</code></td><td>int (sec)</td><td><code>0</code></td><td>Write deadline</td></tr>
 <tr><td><code>send_timeout_ms</code></td><td>int (ms)</td><td>(none)</td><td>Sub-second write deadline; overrides the seconds key when set</td></tr>
 <tr><td><code>retry_count</code></td><td>int</td><td><code>1</code></td><td>Send retries on transient failure</td></tr>

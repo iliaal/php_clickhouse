@@ -55,6 +55,7 @@ typedef struct {
 	uint32_t connect_timeout_ms;
 	uint32_t receive_timeout_ms;
 	uint32_t send_timeout_ms;
+	uint32_t operation_timeout_ms;
 	uint32_t retry_count;
 	uint64_t retry_timeout_seconds;
 	bool ping_before_query;
@@ -90,9 +91,12 @@ int ch_backend_connect(ch_connection *connection, chc_exception **exception, chc
 int ch_backend_reset(ch_connection *connection, chc_exception **exception, chc_err *error);
 int ch_backend_before_query(ch_connection *connection, chc_exception **exception, chc_err *error);
 int ch_backend_ping(ch_connection *connection, chc_exception **exception, chc_err *error);
-/* Starts an operation: receive_timeout_ms bounds its total socket wait, not
- * each read. before_query, ping, and connect start one themselves. */
+/* Starts an operation: operation_timeout_ms bounds its total socket wait for
+ * replies. before_query, ping, and connect start one themselves. */
 void ch_backend_begin_operation(ch_connection *connection);
+/* Receives one packet; receive_timeout_ms bounds the socket wait for the whole
+ * packet, not each read. */
+int ch_backend_recv_packet(ch_connection *connection, chc_packet *out, chc_err *error);
 /* Starts an operation whose I/O, writes included, waits at most maximum_ms in
  * total. */
 int ch_backend_limit_io_timeouts(ch_connection *connection, uint32_t maximum_ms, chc_err *error);
