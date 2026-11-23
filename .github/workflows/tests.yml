@@ -741,7 +741,8 @@ jobs:
             tests/266_tls_handshake_tarpit_timeout.phpt \
             tests/301_zend_native_memory_accounting.phpt \
             tests/302_zend_native_memory_shared_limit.phpt \
-            tests/303_zend_native_memory_no_double_charge.phpt
+            tests/303_zend_native_memory_no_double_charge.phpt \
+            tests/324_stream_string_buffer_trim.phpt
 
       - name: Verify Zend-managed native memory under ASAN
         env:
@@ -761,7 +762,8 @@ jobs:
             tests/213_stream_untyped_null_column.phpt \
             tests/301_zend_native_memory_accounting.phpt \
             tests/302_zend_native_memory_shared_limit.phpt \
-            tests/303_zend_native_memory_no_double_charge.phpt |
+            tests/303_zend_native_memory_no_double_charge.phpt \
+            tests/324_stream_string_buffer_trim.phpt |
             tee "${zend_asan_output}"
           scripts/assert-phpt-summary.sh "${zend_asan_output}"
 
