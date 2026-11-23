@@ -1,5 +1,5 @@
 diff --git a/LOCAL_PATCHES.md b/LOCAL_PATCHES.md
-index 3270faf..d6ec214 100644
+index 2988504..d000960 100644
 --- a/LOCAL_PATCHES.md
 +++ b/LOCAL_PATCHES.md
 @@ -114,3 +114,28 @@ extension's active workflows remain under the repository-root
@@ -159,7 +159,7 @@ index 84f4f16..4ed07b8 100644
  }
  
 diff --git a/clickhouse.h b/clickhouse.h
-index 7a59fa7..d55f513 100644
+index 86f07e7..a1a5a17 100644
 --- a/clickhouse.h
 +++ b/clickhouse.h
 @@ -742,6 +742,14 @@ chc_alloc chc_alloc_stdlib(void) {
@@ -177,7 +177,7 @@ index 7a59fa7..d55f513 100644
  #ifndef CHC_MAX_FIXEDSTRING_SIZE
  #define CHC_MAX_FIXEDSTRING_SIZE  0xFFFFFFULL
  #endif
-@@ -2556,8 +2564,8 @@ chc__serial_type(const chc_type *t)
+@@ -2547,8 +2555,8 @@ chc__serial_type(const chc_type *t)
  #define CHC__SPARSE_END (UINT64_C(1) << 62)
  
  static int chc__col_read_kinds(chc_in *in, const chc_type *t, size_t n_rows,
@@ -188,7 +188,7 @@ index 7a59fa7..d55f513 100644
  
  /* Byte-swap a host-typed uint64/keys array in place on BE hosts. No-op on LE. */
  static void
-@@ -2586,7 +2594,8 @@ chc__swap_keys(CHC_MAYBE_UNUSED void *p, CHC_MAYBE_UNUSED size_t n,
+@@ -2577,7 +2585,8 @@ chc__swap_keys(CHC_MAYBE_UNUSED void *p, CHC_MAYBE_UNUSED size_t n,
   * kinds NULL when dense */
  static int
  chc__col_read_tuple(chc_in *in, const chc_type *t, size_t n_rows,
@@ -198,7 +198,7 @@ index 7a59fa7..d55f513 100644
  {
      const chc_alloc *al = in->al;
      chc_column *c = chc__calloc(al, sizeof *c, err);
-@@ -2600,7 +2609,8 @@ chc__col_read_tuple(chc_in *in, const chc_type *t, size_t n_rows,
+@@ -2591,7 +2600,8 @@ chc__col_read_tuple(chc_in *in, const chc_type *t, size_t n_rows,
      }
      for (size_t i = 0; i < t->n_children; i++) {
          chc_column **slot = &c->tuple.children[i];
@@ -208,7 +208,7 @@ index 7a59fa7..d55f513 100644
                         : chc__col_read(in, t->children[i], n_rows, slot, err);
          if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
      }
-@@ -2613,7 +2623,7 @@ chc__col_read_tuple(chc_in *in, const chc_type *t, size_t n_rows,
+@@ -2604,7 +2614,7 @@ chc__col_read_tuple(chc_in *in, const chc_type *t, size_t n_rows,
   * ColumnSparse storage default even where type default differs (Enum) */
  static int
  chc__col_read_sparse(chc_in *in, const chc_type *t, size_t n_rows,
@@ -217,7 +217,7 @@ index 7a59fa7..d55f513 100644
  {
      const chc_alloc *al = in->al;
      size_t es = chc_type_elem_size(t);
-@@ -2657,6 +2667,22 @@ chc__col_read_sparse(chc_in *in, const chc_type *t, size_t n_rows,
+@@ -2648,6 +2658,22 @@ chc__col_read_sparse(chc_in *in, const chc_type *t, size_t n_rows,
              "sparse offsets end at row %zu of %zu", row, n_rows);
          goto fail;
      }
@@ -240,7 +240,7 @@ index 7a59fa7..d55f513 100644
  
      rc = chc__col_read(in, t, n, &c, err);
      if (rc != CHC_OK) goto fail;
-@@ -2696,12 +2722,15 @@ fail:
+@@ -2687,12 +2713,15 @@ fail:
   * element's */
  static int
  chc__col_read_kinds(chc_in *in, const chc_type *t, size_t n_rows,
@@ -259,7 +259,7 @@ index 7a59fa7..d55f513 100644
      return chc__col_read(in, t, n_rows, out, err);
  }
  
-@@ -2793,14 +2822,14 @@ chc__col_read(chc_in *in, const chc_type *t,
+@@ -2784,14 +2813,14 @@ chc__col_read(chc_in *in, const chc_type *t,
          /* ClickHouse sends Map and Nested values as arrays of tuples */
          int rc = t->kind == CHC_ARRAY
              ? chc__col_read(in, t->children[0], (size_t) total, &c->array.values, err)
@@ -276,7 +276,7 @@ index 7a59fa7..d55f513 100644
  
      case CHC_QBIT: {
          /* Wire form is Tuple(FixedString(ceil(N/8)) x element_size): one
-@@ -3049,6 +3078,7 @@ struct chc_block {
+@@ -3040,6 +3069,7 @@ struct chc_block {
      size_t        n_rows;
      bool          is_overflows;
      int32_t       bucket_num;
@@ -284,7 +284,7 @@ index 7a59fa7..d55f513 100644
      char        **names;
      size_t       *name_lens;
      chc_type    **types;
-@@ -3224,6 +3254,12 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
+@@ -3215,6 +3245,12 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
                  "suspiciously many rows: %llu", (unsigned long long) nrows);
              goto header_fail;
          }
@@ -297,7 +297,7 @@ index 7a59fa7..d55f513 100644
  
          b->n_columns = (size_t) ncols;
          b->n_rows    = (size_t) nrows;
-@@ -3237,6 +3273,7 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
+@@ -3228,6 +3264,7 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
      for (size_t i = *next_col; i < b->n_columns; i++) {
          char *type_name; size_t type_len;
          uint8_t *kinds = NULL; size_t kinds_len = 0;
@@ -305,7 +305,7 @@ index 7a59fa7..d55f513 100644
          rc = chc__block_reserve_column(b, i, al, err);
          if (rc != CHC_OK) goto col_fail;
  
-@@ -3264,7 +3301,8 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
+@@ -3255,7 +3292,8 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
              if (rc != CHC_OK) goto col_fail;
  
              const uint8_t *cursor = kinds;
@@ -315,7 +315,7 @@ index 7a59fa7..d55f513 100644
                         : chc__col_read(in, b->types[i], nrows, &b->columns[i], err);
              if (CHC_PHP_COMPAT && rc == CHC_OK &&
                  chc_column_validate(b->columns[i], err) != CHC_OK)
-@@ -3294,6 +3332,7 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
+@@ -3285,6 +3323,7 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
              b->types[i] = NULL;
              chc__column_destroy(b->columns[i], al);
              b->columns[i] = NULL;

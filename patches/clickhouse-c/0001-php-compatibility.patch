@@ -1,5 +1,5 @@
 diff --git a/clickhouse.h b/clickhouse.h
-index 42c52e6..7a59fa7 100644
+index 42c52e6..86f07e7 100644
 --- a/clickhouse.h
 +++ b/clickhouse.h
 @@ -26,7 +26,7 @@
@@ -628,7 +628,7 @@ index 42c52e6..7a59fa7 100644
      size_t cap = 256;
      size_t total = 0;
      c->str.data = chc__alloc(al, cap, err);
-@@ -2103,25 +2411,37 @@ chc__col_read_string(chc_in *in, size_t n_rows,
+@@ -2103,25 +2411,28 @@ chc__col_read_string(chc_in *in, size_t n_rows,
      for (size_t i = 0; i < n_rows; i++) {
          uint64_t len;
          int rc = chc__read_varuint(in, &len, err);
@@ -669,19 +669,10 @@ index 42c52e6..7a59fa7 100644
 +        total += (size_t) len;
          c->str.offsets[i] = total;
      }
-+    /* Decoded blocks can be retained, so release the geometric reserve. A
-+     * refused shrink keeps the larger buffer and is not an error. */
-+    if (c->str.bytes > total && total) {
-+        uint8_t *exact = al->realloc(al->ud, c->str.data, c->str.bytes, total);
-+        if (exact) {
-+            c->str.data = exact;
-+            c->str.bytes = total;
-+        }
-+    }
      *out = c;
      return CHC_OK;
  }
-@@ -2392,6 +2712,9 @@ chc__col_read(chc_in *in, const chc_type *t,
+@@ -2392,6 +2703,9 @@ chc__col_read(chc_in *in, const chc_type *t,
      const chc_alloc *al = in->al;
      /* Tier 1 / FIXED scalar */
      size_t es = chc_type_elem_size(t);
@@ -691,7 +682,7 @@ index 42c52e6..7a59fa7 100644
      if (es) return chc__col_read_fixed(in, es, n_rows, out, err);
 
      switch (t->kind) {
-@@ -2410,9 +2733,9 @@ chc__col_read(chc_in *in, const chc_type *t,
+@@ -2410,9 +2724,9 @@ chc__col_read(chc_in *in, const chc_type *t,
          c->layout = CHC_COL_NULLABLE;
          c->n_rows = n_rows;
          if (n_rows) {
@@ -704,7 +695,7 @@ index 42c52e6..7a59fa7 100644
              if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
          }
          int rc = chc__col_read(in, t->children[0], n_rows, &c->nullable.inner, err);
-@@ -2441,13 +2764,26 @@ chc__col_read(chc_in *in, const chc_type *t,
+@@ -2441,13 +2755,26 @@ chc__col_read(chc_in *in, const chc_type *t,
                  chc__column_destroy(c, al);
                  return chc__err_set(err, CHC_ERR_PROTOCOL, "array offsets size overflow");
              }
@@ -735,7 +726,7 @@ index 42c52e6..7a59fa7 100644
                  chc__column_destroy(c, al);
                  return chc__err_set(err, CHC_ERR_PROTOCOL,
                      "array nested length too large: %llu",
-@@ -2546,7 +2882,7 @@ chc__col_read(chc_in *in, const chc_type *t,
+@@ -2546,7 +2873,7 @@ chc__col_read(chc_in *in, const chc_type *t,
          uint64_t dict_n;
          rc = chc__read_u64_le(in, &dict_n, err);
          if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
@@ -744,7 +735,7 @@ index 42c52e6..7a59fa7 100644
              chc__column_destroy(c, al);
              return chc__err_set(err, CHC_ERR_PROTOCOL,
                  "LowCardinality dictionary too large: %llu",
-@@ -2594,9 +2930,7 @@ chc__col_read(chc_in *in, const chc_type *t,
+@@ -2594,9 +2921,7 @@ chc__col_read(chc_in *in, const chc_type *t,
              chc__column_destroy(c, al);
              return chc__err_set(err, CHC_ERR_PROTOCOL, "LowCardinality keys size overflow");
          }
@@ -755,7 +746,7 @@ index 42c52e6..7a59fa7 100644
          if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
          chc__swap_keys(c->lc.keys, n_rows, c->lc.key_size);
 
-@@ -2711,6 +3045,7 @@ chc__read_kinds(chc_in *in, const chc_type *t, uint8_t **out, size_t *out_len,
+@@ -2711,6 +3036,7 @@ chc__read_kinds(chc_in *in, const chc_type *t, uint8_t **out, size_t *out_len,
 
  struct chc_block {
      size_t        n_columns;
@@ -763,7 +754,7 @@ index 42c52e6..7a59fa7 100644
      size_t        n_rows;
      bool          is_overflows;
      int32_t       bucket_num;
-@@ -2724,19 +3059,57 @@ void
+@@ -2724,19 +3050,57 @@ void
  chc_block_destroy(chc_block *b, const chc_alloc *al)
  {
      if (!b) return;
@@ -826,7 +817,7 @@ index 42c52e6..7a59fa7 100644
  size_t            chc_block_n_rows(const chc_block *b)    { return b ? b->n_rows : 0; }
  size_t            chc_block_n_columns(const chc_block *b) { return b ? b->n_columns : 0; }
  const char       *chc_block_column_name(const chc_block *b, size_t i, size_t *out_len) {
-@@ -2831,12 +3204,22 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
+@@ -2831,12 +3195,22 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
          rc = chc__read_varuint(in, &nrows, err);
          if (rc != CHC_OK) goto header_fail;
 
@@ -851,7 +842,7 @@ index 42c52e6..7a59fa7 100644
              rc = chc__err_set(err, CHC_ERR_PROTOCOL,
                  "suspiciously many rows: %llu", (unsigned long long) nrows);
              goto header_fail;
-@@ -2844,15 +3227,6 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
+@@ -2844,15 +3218,6 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
 
          b->n_columns = (size_t) ncols;
          b->n_rows    = (size_t) nrows;
@@ -867,7 +858,7 @@ index 42c52e6..7a59fa7 100644
 
          /* Header fully parsed; commit the block and start at column 0. */
          *blk = b;
-@@ -2863,6 +3237,8 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
+@@ -2863,6 +3228,8 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
      for (size_t i = *next_col; i < b->n_columns; i++) {
          char *type_name; size_t type_len;
          uint8_t *kinds = NULL; size_t kinds_len = 0;
@@ -876,7 +867,7 @@ index 42c52e6..7a59fa7 100644
 
          /* Checkpoint column start so a mid-column would-block rewinds here,
           * dropping completed columns' wire bytes on the caller's next submit. */
-@@ -2890,6 +3266,15 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
+@@ -2890,6 +3257,15 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
              const uint8_t *cursor = kinds;
              rc = kinds ? chc__col_read_kinds(in, b->types[i], nrows, &cursor, &b->columns[i], err)
                         : chc__col_read(in, b->types[i], nrows, &b->columns[i], err);
@@ -892,7 +883,7 @@ index 42c52e6..7a59fa7 100644
              if (rc != CHC_OK) goto col_fail;
          }
          al->free(al->ud, kinds, kinds_len);
-@@ -2937,7 +3322,7 @@ int
+@@ -2937,7 +3313,7 @@ int
  chc_block_read(chc_in *in, const chc_alloc *al,
                 const chc_block_opts *opts, chc_block **out, chc_err *err)
  {
@@ -901,7 +892,7 @@ index 42c52e6..7a59fa7 100644
      if (!opts) opts = &def;
      /* Snapshot to roll back resume's per-column checkpoint progress: this
       * non-resuming entry is baseline (rewind to packet start), so a would-block
-@@ -3344,7 +3729,7 @@ chc__col_write(chc_io *io, const chc_column *c, const chc_type *t, chc_err *err)
+@@ -3344,7 +3720,7 @@ chc__col_write(chc_io *io, const chc_column *c, const chc_type *t, chc_err *err)
 
      case CHC_NOTHING:
      case CHC_VOID: {
@@ -910,7 +901,7 @@ index 42c52e6..7a59fa7 100644
          size_t left = c->n_rows;
          while (left) {
              size_t take = left < sizeof zeros ? left : sizeof zeros;
-@@ -3364,7 +3749,7 @@ chc_block_write_cols(chc_io *io, const chc_block_col *cols,
+@@ -3364,7 +3740,7 @@ chc_block_write_cols(chc_io *io, const chc_block_col *cols,
                       size_t n_cols, size_t n_rows,
                       const chc_block_opts *opts, chc_err *err)
  {
@@ -919,7 +910,7 @@ index 42c52e6..7a59fa7 100644
      if (!opts) opts = &def;
 
      if (opts->has_block_info) {
-@@ -3390,12 +3775,7 @@ chc_block_write_cols(chc_io *io, const chc_block_col *cols,
+@@ -3390,12 +3766,7 @@ chc_block_write_cols(chc_io *io, const chc_block_col *cols,
          rc = chc__write_string(io, e->name, e->name_len, err);
          if (rc != CHC_OK) return rc;
 
@@ -2236,10 +2227,10 @@ index 00882e9..c099c8a 100644
          fprintf(stderr, "%d failure(s)\n", fail_count);
 diff --git a/test/test_php_compat.c b/test/test_php_compat.c
 new file mode 100644
-index 0000000..69ca6ea
+index 0000000..e66db43
 --- /dev/null
 +++ b/test/test_php_compat.c
-@@ -0,0 +1,566 @@
+@@ -0,0 +1,527 @@
 +/* Compatibility contracts used by the PHP adapter; wire fixtures are unit tests. */
 +#include <stdbool.h>
 +#include <stdint.h>
@@ -2752,44 +2743,6 @@ index 0000000..69ca6ea
 +    }
 +}
 +
-+/* A decoded String column can be retained by its block, so its buffer ends
-+ * at the loaded size instead of keeping the read-ahead reserve. */
-+static void
-+test_string_column_capacity(void)
-+{
-+    current_test = "string_column_capacity";
-+    enum { ROWS = 3000, WIDTH = 69 };
-+    static uint8_t data[ROWS * WIDTH];
-+    static uint64_t offsets[ROWS];
-+    chc_alloc al = chc_alloc_stdlib();
-+    chc_err err = {0};
-+    test_mem_sink wire = {0};
-+    chc_io sink = {.ud = &wire, .write = test_mem_sink_write};
-+    test_mem_src src;
-+    chc_io source;
-+    chc_in in;
-+    chc_column *column = NULL;
-+    for (size_t i = 0; i < ROWS; ++i) {
-+        memset(data + i * WIDTH, 'a' + (int) (i % 26), WIDTH);
-+        offsets[i] = (uint64_t) (i + 1) * WIDTH;
-+    }
-+    CHECK(chc__write_string_body(&sink, offsets, data, ROWS, &err) == CHC_OK);
-+    test_mem_src_init(&src, &source, wire.data, wire.len);
-+    int rc = chc_in_init(&in, &source, &al, 0, &err);
-+    CHECK_OK(rc, err);
-+    rc = chc__col_read_string(&in, ROWS, &column, &err);
-+    CHECK(rc == CHC_OK);
-+    if (rc == CHC_OK) {
-+        CHECK_EQ_U64(column->str.bytes, sizeof data);
-+        CHECK_EQ_U64(column->str.offsets[ROWS - 1], sizeof data);
-+        CHECK(memcmp(column->str.data, data, sizeof data) == 0);
-+        chc__column_destroy(column, &al);
-+    }
-+    chc_in_free(&in);
-+out:
-+    test_mem_sink_free(&wire);
-+}
-+
 +int main(void)
 +{
 +    test_hello(732);
@@ -2801,7 +2754,6 @@ index 0000000..69ca6ea
 +    test_empty_type_arguments();
 +    test_data_coalescing();
 +    test_query_coalescing();
-+    test_string_column_capacity();
 +    if (fail_count) return 1;
 +    fprintf(stderr, "all PHP compatibility unit tests passed\n");
 +    return 0;
@@ -2847,7 +2799,7 @@ index 0000000..27878c1
 +}
 diff --git a/LOCAL_PATCHES.md b/LOCAL_PATCHES.md
 new file mode 100644
-index 0000000..19365ed
+index 0000000..32af7ef
 --- /dev/null
 +++ b/LOCAL_PATCHES.md
 @@ -0,0 +1,104 @@
@@ -2903,9 +2855,9 @@ index 0000000..19365ed
 +- Fixed, String, nullable, array-offset, LowCardinality-index, and compressed
 +  input buffers grow in steps as preceding bytes arrive. Ioless readers defer
 +  allocation until the submitted payload is available. String buffers double
-+  their capacity across rows, then shrink to the loaded size once the column is
-+  complete, so a retained block does not keep the reserve. Valid empty
-+  compressed frames are consumed before reading the next data-bearing frame.
++  their capacity across rows. The PHP adapter trims the buffers of blocks that
++  `selectStream()` retains. Valid empty compressed frames are consumed before
++  reading the next data-bearing frame.
 +  Block metadata arrays grow as
 +  columns arrive, and cleanup visits only allocated slots. Type-child and Tuple
 +  field arrays grow geometrically instead of reallocating for every element.

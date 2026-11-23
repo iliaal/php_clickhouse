@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### For contributors
+
+- The String-buffer trim moved from the local clickhouse-c patch into
+  `selectStream()`, the only path that retains decoded blocks. Other result
+  paths free each block after converting it and no longer pay for the shrink.
+  Test 324 covers the retained size.
+- `0003-hostile-server-limits.patch` now ends with a newline and applies with
+  `git apply`.
+
 ## [0.15.1] - 2026-11-22
 
 ### Changed

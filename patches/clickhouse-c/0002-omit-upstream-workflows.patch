@@ -348,7 +348,7 @@ index 57f472a..0000000
 -          path: /tmp/ch-test-srv*/server.*
 -          if-no-files-found: ignore
 diff --git a/LOCAL_PATCHES.md b/LOCAL_PATCHES.md
-index 19365ed..3270faf 100644
+index 32af7ef..2988504 100644
 --- a/LOCAL_PATCHES.md
 +++ b/LOCAL_PATCHES.md
 @@ -1,13 +1,13 @@

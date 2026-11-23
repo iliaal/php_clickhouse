@@ -549,6 +549,39 @@ static size_t ch_column_bytes(const chc_column *column)
 	return SIZE_MAX;
 }
 
+/* String data grows geometrically while it is decoded. A retained block keeps
+ * only the loaded bytes; a refused shrink leaves the larger buffer in place. */
+static void ch_trim_column(chc_column *column)
+{
+	switch (column->layout) {
+		case CHC_COL_STRING: {
+			size_t used = column->n_rows ? (size_t)column->str.offsets[column->n_rows - 1] : 0;
+			if (!used || used >= column->str.bytes) return;
+			uint8_t *trimmed = ch_php_allocator.realloc(ch_php_allocator.ud, column->str.data, column->str.bytes, used);
+			if (trimmed) {
+				column->str.data = trimmed;
+				column->str.bytes = used;
+			}
+			return;
+		}
+		case CHC_COL_NULLABLE:
+			ch_trim_column(column->nullable.inner);
+			return;
+		case CHC_COL_ARRAY:
+			ch_trim_column(column->array.values);
+			return;
+		case CHC_COL_TUPLE:
+			for (size_t i = 0; i < column->tuple.arity; ++i) ch_trim_column(column->tuple.children[i]);
+			return;
+		case CHC_COL_LOW_CARDINALITY:
+			ch_trim_column(column->lc.dict);
+			return;
+		case CHC_COL_FIXED:
+		case CHC_COL_NOTHING:
+			return;
+	}
+}
+
 #define CH_STREAM_BUFFER_LIMIT "selectStream: buffered result exceeds PHP memory_limit; use selectStreamCallback() for unbounded streaming or raise memory_limit"
 
 typedef struct {
@@ -566,6 +599,7 @@ static ch_block_action ch_collect_blocks(clickhouse_object *obj, chc_block **own
 	size_t incoming = 0;
 	if (!rows || !columns) return CH_BLOCK_CONTINUE;
 	if (ch_result_block(obj, block, &result->blocks) == FAILURE) return CH_BLOCK_FAIL;
+	for (size_t col = 0; col < columns; ++col) ch_trim_column((chc_column *)chc_block_column(block, col));
 	/* Normal Zend MM already counts every retained native allocation. Keep the
 	 * estimate for allocator-disabled diagnostic runs, where it cannot do so. */
 	if (!is_zend_mm() && PG(memory_limit) > 0) {

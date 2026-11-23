@@ -2441,15 +2441,6 @@ chc__col_read_string(chc_in *in, size_t n_rows,
         total += (size_t) len;
         c->str.offsets[i] = total;
     }
-    /* Decoded blocks can be retained, so release the geometric reserve. A
-     * refused shrink keeps the larger buffer and is not an error. */
-    if (c->str.bytes > total && total) {
-        uint8_t *exact = al->realloc(al->ud, c->str.data, c->str.bytes, total);
-        if (exact) {
-            c->str.data = exact;
-            c->str.bytes = total;
-        }
-    }
     *out = c;
     return CHC_OK;
 }
