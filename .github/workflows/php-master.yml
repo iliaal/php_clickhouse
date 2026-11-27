@@ -239,6 +239,20 @@ jobs:
         run: |
           set -euo pipefail
           conclusion=$(gh run view "$RUN_ID" --json jobs --jq '.jobs[] | select(.name == env.JOB_NAME) | .conclusion')
+          # With Issues disabled, gh issue list exits 1 on every run. Fail
+          # only on a master break instead, so the run's status reports it.
+          # A failed lookup keeps the issue path below.
+          has_issues=$(gh api "repos/$GH_REPO" --jq .has_issues) || has_issues=unknown
+          if [ "$has_issues" = false ]; then
+            echo "job conclusion: ${conclusion:-unknown}; issues disabled in $GH_REPO"
+            case "$conclusion" in
+              failure|timed_out)
+                echo "::error::The advisory job against php-src master failed: $RUN_URL"
+                exit 1
+                ;;
+            esac
+            exit 0
+          fi
           issue=$(gh issue list --state open --limit 100 --json number,title --jq '.[] | select(.title == env.TITLE) | .number' | head -n 1)
           echo "job conclusion: ${conclusion:-unknown}; open issue: ${issue:-none}"
           case "$conclusion" in
