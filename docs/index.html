@@ -576,11 +576,11 @@ foreach ($ch-&gt;getLogQueries() as $q) {
 }</code></pre>
 
 <h2 id="exceptions">Structured exceptions <a class="anchor" href="#exceptions">#</a></h2>
-<p><code>ClickHouseException</code> carries three extra public properties:</p>
+<p><code>ClickHouseException</code> carries three extra public properties, each with a getter that returns the same value:</p>
 <ul>
-<li><code>server_code</code>: ClickHouse error code (e.g. 159 = <code>TIMEOUT_EXCEEDED</code>). <code>0</code> for client-side errors.</li>
-<li><code>server_name</code>: server-reported exception name (e.g. <code>DB::Exception</code>). <code>null</code> for client-side errors.</li>
-<li><code>query_id</code>: the query id associated with the failed call, when one was supplied. <code>null</code> otherwise.</li>
+<li><code>server_code</code> / <code>getServerCode()</code>: ClickHouse error code (e.g. 159 = <code>TIMEOUT_EXCEEDED</code>). <code>0</code> for client-side errors.</li>
+<li><code>server_name</code> / <code>getServerName()</code>: server-reported exception name (e.g. <code>DB::Exception</code>). <code>null</code> for client-side errors.</li>
+<li><code>query_id</code> / <code>getQueryId()</code>: the query id associated with the failed call, when one was supplied. <code>null</code> otherwise.</li>
 </ul>
 
 <hr>
